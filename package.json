@@ -1,0 +1,14 @@
+{
+  "name": "app-tenant-config-beta",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"*\" dev",
+    "dev:bff": "pnpm --filter bff dev",
+    "dev:web": "pnpm --filter web dev",
+    "build": "pnpm --filter \"*\" build"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}
