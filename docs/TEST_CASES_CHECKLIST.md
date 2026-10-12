@@ -1,6 +1,6 @@
 # 📋 Checklist & Test Cases Pengujian Tenant Configuration Studio
 
-Dokumen ini berisi daftar skenario pengujian (*test cases*) terstruktur untuk memverifikasi seluruh fitur yang baru saja dibangun: **Local Preset Editor**, **Sync Center**, **Pre-flight Validator Guardrail**, **Dokumentasi Dalam Aplikasi**, dan **Audit Trail Neon DB**.
+Dokumen ini berisi daftar skenario pengujian (_test cases_) terstruktur untuk memverifikasi seluruh fitur yang baru saja dibangun: **Local Preset Editor**, **Sync Center**, **Pre-flight Validator Guardrail**, **Dokumentasi Dalam Aplikasi**, dan **Audit Trail Neon DB**.
 
 Anda dapat menandai kotak centang `[ ]` menjadi `[x]` setelah berhasil menguji masing-masing skenario.
 
@@ -8,19 +8,19 @@ Anda dapat menandai kotak centang `[ ]` menjadi `[x]` setelah berhasil menguji m
 
 ## 🎯 Ringkasan Status Pengujian
 
-| Modul | Total Skenario | Status |
-| :--- | :---: | :---: |
-| **1. Local Preset Editor (Window Kanan)** | 8 Test Cases | `[ ]` Belum Diuji |
-| **2. Sync Center (Bidirectional Sync)** | 6 Test Cases | `[ ]` Belum Diuji |
-| **3. Pre-Flight Linter & Guardrail** | 4 Test Cases | `[ ]` Belum Diuji |
-| **4. Dokumentasi Interaktif (DocsModal)** | 4 Test Cases | `[ ]` Belum Diuji |
-| **5. Audit Trail & Version History** | 3 Test Cases | `[ ]` Belum Diuji |
-| **6. Hapus Config (Validasi Ketik Nama)** | 4 Test Cases | `[ ]` Belum Diuji |
-| **7. Format JSON & Linter Inspector** | 4 Test Cases | `[ ]` Belum Diuji |
-| **8. Skill Tenant Configuration Antigravity** | 1 Test Case | `[x]` Selesai & Valid |
-| **9. Split Screen & Komparasi Antar Tenant** | 8 Test Cases | `[ ]` Belum Diuji |
-| **10. JSON Delta & Perbedaan Struktural (JSON Output)** | 9 Test Cases | `[ ]` Belum Diuji |
-| **TOTAL** | **51 Test Cases** | `[ ]` Siap Pengujian |
+| Modul                                                   |  Total Skenario   |        Status         |
+| :------------------------------------------------------ | :---------------: | :-------------------: |
+| **1. Local Preset Editor (Window Kanan)**               |   8 Test Cases    |   `[ ]` Belum Diuji   |
+| **2. Sync Center (Bidirectional Sync)**                 |   6 Test Cases    |   `[ ]` Belum Diuji   |
+| **3. Pre-Flight Linter & Guardrail**                    |   4 Test Cases    |   `[ ]` Belum Diuji   |
+| **4. Dokumentasi Interaktif (DocsModal)**               |   4 Test Cases    |   `[ ]` Belum Diuji   |
+| **5. Audit Trail & Version History**                    |   3 Test Cases    |   `[ ]` Belum Diuji   |
+| **6. Hapus Config (Validasi Ketik Nama)**               |   4 Test Cases    |   `[ ]` Belum Diuji   |
+| **7. Format JSON & Linter Inspector**                   |   4 Test Cases    |   `[ ]` Belum Diuji   |
+| **8. Skill Tenant Configuration Antigravity**           |    1 Test Case    | `[x]` Selesai & Valid |
+| **9. Split Screen & Komparasi Antar Tenant**            |   8 Test Cases    |   `[ ]` Belum Diuji   |
+| **10. JSON Delta & Perbedaan Struktural (JSON Output)** |   9 Test Cases    |   `[ ]` Belum Diuji   |
+| **TOTAL**                                               | **51 Test Cases** | `[ ]` Siap Pengujian  |
 
 ---
 
@@ -88,14 +88,14 @@ Fokus: Memastikan file lokal di folder preset (`/stable`) dapat diedit, diformat
     1. Lakukan perubahan di window kanan hingga muncul badge "Belum disimpan".
     2. Klik tombol **X** di sudut kanan atas window preset.
   - **Hasil yang Diharapkan:**
-    - Muncul dialog konfirmasi peringatan: *"Window lokal punya perubahan yang belum disimpan ke file. Tutup dan buang perubahan?"*.
+    - Muncul dialog konfirmasi peringatan: _"Window lokal punya perubahan yang belum disimpan ke file. Tutup dan buang perubahan?"_.
     - Jika klik Batal, window tetap terbuka. Jika klik OK, window tertutup.
 
 ---
 
 ## 🔄 Modul 2: Sync Center (Bidirectional Synchronizer)
 
-Fokus: Membandingkan konfigurasi database dengan file lokal secara kanonikal dan menyinkronkan data secara terpilih (*granular*).
+Fokus: Membandingkan konfigurasi database dengan file lokal secara kanonikal dan menyinkronkan data secara terpilih (_granular_).
 
 - [ ] **TC-2.1: Membuka Modal Sync Center**
   - **Langkah:**
@@ -103,7 +103,7 @@ Fokus: Membandingkan konfigurasi database dengan file lokal secara kanonikal dan
     2. Klik tombol **Sync Center Presets** di header atas (atau tombol **Sync ke DB** di drawer Presets).
   - **Hasil yang Diharapkan:**
     - Modal Sync Center terbuka menampilkan tabel seluruh `config_type` milik tenant terpilih.
-    - Muncul kolom: *Config (Database)*, *File Preset Lokal*, *Status*, dan *Diubah (DB)*.
+    - Muncul kolom: _Config (Database)_, _File Preset Lokal_, _Status_, dan _Diubah (DB)_.
 
 - [ ] **TC-2.2: Akurasi Status Kanonikal (Sama / Berbeda / Belum Ada File)**
   - **Langkah:**
@@ -116,11 +116,11 @@ Fokus: Membandingkan konfigurasi database dengan file lokal secara kanonikal dan
 
 - [ ] **TC-2.3: Pemetaan Manual File Preset via Dropdown**
   - **Langkah:**
-    1. Pada baris yang statusnya "Belum Ada File", buka dropdown *File Preset Lokal*.
+    1. Pada baris yang statusnya "Belum Ada File", buka dropdown _File Preset Lokal_.
     2. Pilih salah satu file `.json` dari daftar.
   - **Hasil yang Diharapkan:**
     - Pemetaan tersimpan di database audit (`tenant_studio.preset_links`).
-    - Status baris otomatis diperbarui (menjadi *Sama* atau *Berbeda*).
+    - Status baris otomatis diperbarui (menjadi _Sama_ atau _Berbeda_).
     - Muncul badge kecil `link` penanda tautan tersimpan.
 
 - [ ] **TC-2.4: Tombol Bandingkan (Side-by-Side Diff)**
@@ -162,7 +162,7 @@ Fokus: Memastikan validasi berjalan dan mencegah runtime error 500 UUID sebelum 
     1. Muat salah satu konfigurasi yang valid.
     2. Klik tombol **Validate** di header atas.
   - **Hasil yang Diharapkan:**
-    - Muncul panel hijau di bawah editor: *"Semua struktur JSON & guardrail valid! Tidak ada kesalahan sintaks atau view yang terdeteksi."*
+    - Muncul panel hijau di bawah editor: _"Semua struktur JSON & guardrail valid! Tidak ada kesalahan sintaks atau view yang terdeteksi."_
 
 - [ ] **TC-3.2: Pencegahan Error Kritis `resolvePaths` pada `isFile: true`**
   - **Langkah:**
@@ -171,7 +171,7 @@ Fokus: Memastikan validasi berjalan dan mencegah runtime error 500 UUID sebelum 
     2. Klik tombol **Validate**.
   - **Hasil yang Diharapkan:**
     - Muncul peringatan merah:
-      *"Ditemukan 'resolvePaths' pada isFile view '...'. Ini memicu runtime error '500 invalid input syntax for type uuid' di ATS!"*
+      _"Ditemukan 'resolvePaths' pada isFile view '...'. Ini memicu runtime error '500 invalid input syntax for type uuid' di ATS!"_
 
 - [ ] **TC-3.3: Deteksi Duplikasi Nama `view`**
   - **Langkah:**
@@ -185,7 +185,7 @@ Fokus: Memastikan validasi berjalan dan mencegah runtime error 500 UUID sebelum 
     1. Tambahkan custom field di `customData.fields`: `{"key": "testFieldBaru", "type": "TEXT"}` tanpa menambahkan mapping di `views`.
     2. Klik tombol **Validate**.
   - **Hasil yang Diharapkan:**
-    - Muncul catatan peringatan kuning: *"Custom field 'testFieldBaru' terdaftar di customData, tapi belum memiliki view mapping di array views."*
+    - Muncul catatan peringatan kuning: _"Custom field 'testFieldBaru' terdaftar di customData, tapi belum memiliki view mapping di array views."_
 
 ---
 
@@ -232,7 +232,7 @@ Fokus: Memastikan setiap perubahan tersimpan ke riwayat audit dan dapat di-rollb
   - **Langkah:**
     1. Ubah salah satu nilai JSON di editor kiri (Database Live).
     2. Klik tombol **Save** di header atas.
-    3. Masukkan ringkasan perubahan di prompt browser (misal: *"Uji coba update view"*).
+    3. Masukkan ringkasan perubahan di prompt browser (misal: _"Uji coba update view"_).
   - **Hasil yang Diharapkan:**
     - Data tersimpan ke PostgreSQL.
     - Muncul notifikasi sukses: `✅ Berhasil disimpan! Versi N tercatat di Neon DB`.
@@ -263,7 +263,7 @@ Fokus: Memastikan konfigurasi tidak dapat terhapus secara tidak sengaja tanpa me
     1. Pada sidebar daftar konfigurasi, arahkan kursor (hover) ke salah satu item konfigurasi (atau klik ikon tong sampah di samping nama config aktif pada top bar editor).
     2. Klik ikon tong sampah (`Trash2`).
   - **Hasil yang Diharapkan:**
-    - Muncul modal popup peringatan: *"Hapus Konfigurasi: <CONFIG_TYPE>"*.
+    - Muncul modal popup peringatan: _"Hapus Konfigurasi: <CONFIG_TYPE>"_.
     - Menampilkan kotak peringatan merah dengan penjelasan bahwa data akan dihapus dan snapshot disimpan ke audit Neon DB.
     - Menampilkan input teks untuk mengetik nama konfigurasi.
 
@@ -273,13 +273,13 @@ Fokus: Memastikan konfigurasi tidak dapat terhapus secara tidak sengaja tanpa me
     2. Ketikkan nama yang salah (misal: `"SALAH"` atau huruf kecil tidak sesuai).
   - **Hasil yang Diharapkan:**
     - Tombol **Hapus Konfigurasi** dalam kondisi **DISABLED** (warna redup/abu-abu, kursor dilarang).
-    - Muncul hint: *"Nama harus cocok persis (case-sensitive)"*.
+    - Muncul hint: _"Nama harus cocok persis (case-sensitive)"_.
 
 - [ ] **TC-6.3: Tombol Hapus Enabled Hanya Saat Teks Cocok Persis**
   - **Langkah:**
     1. Ketikkan nama konfigurasi persis sama dengan nama aslinya (misal: `APPLICANT_STABLE`).
   - **Hasil yang Diharapkan:**
-    - Muncul teks hijau: *"✓ Nama cocok! Tombol hapus aktif."*.
+    - Muncul teks hijau: _"✓ Nama cocok! Tombol hapus aktif."_.
     - Tombol **Hapus Konfigurasi** berubah menjadi warna merah menyala dan bisa diklik.
 
 - [ ] **TC-6.4: Eksekusi Penghapusan & Verifikasi Database / History**
@@ -327,8 +327,8 @@ Fokus: Memastikan format JSON 2 spasi tersedia di seluruh editor dan hasil valid
     1. Pastikan seluruh struktur JSON valid dan guardrail terpenuhi.
     2. Klik tombol **Validate**.
   - **Hasil yang Diharapkan:**
-    - Panel menampilkan card hijau: *"Semua struktur JSON & guardrail ATS valid! Tidak ada kesalahan sintaks atau view yang terdeteksi."*
-    - Badge *"Semua Valid"* muncul di header panel.
+    - Panel menampilkan card hijau: _"Semua struktur JSON & guardrail ATS valid! Tidak ada kesalahan sintaks atau view yang terdeteksi."_
+    - Badge _"Semua Valid"_ muncul di header panel.
 
 ---
 
@@ -352,17 +352,17 @@ Fokus: Memastikan dua tenant berbeda di database dapat dibandingkan langsung sec
 
 - [ ] **TC-9.1: Buka Modal Bandingkan Antar Tenant dari Top Header**
   - **Langkah:**
-    1. Pastikan satu tenant sedang aktif di editor utama (misal: *Indomaret (IDM)*).
+    1. Pastikan satu tenant sedang aktif di editor utama (misal: _Indomaret (IDM)_).
     2. Klik tombol **Bandingkan Tenant** (ikon `ArrowLeftRight` warna ungu) pada Top Header.
   - **Hasil yang Diharapkan:**
-    - Muncul modal popup: *"Bandingkan Konfigurasi Antar Tenant"*.
+    - Muncul modal popup: _"Bandingkan Konfigurasi Antar Tenant"_.
     - Menampilkan kartu ringkasan Tenant Aktif (Window Kiri) dan kartu Tenant Pembanding (Window Kanan).
     - Menampilkan dropdown pilihan Tenant Pembanding dan dropdown jenis konfigurasi target.
-    - Menampilkan opsi pilihan mode tampilan awal (*Side-by-Side* atau *Diff Editor Mode*).
+    - Menampilkan opsi pilihan mode tampilan awal (_Side-by-Side_ atau _Diff Editor Mode_).
 
 - [ ] **TC-9.2: Buka Komparasi Cepat lewat Ikon ArrowLeftRight di Sidebar Tenant**
   - **Langkah:**
-    1. Pada sidebar daftar tenant sebelah kiri, cari tenant lain (misal: *Alfamart (ALFA)*).
+    1. Pada sidebar daftar tenant sebelah kiri, cari tenant lain (misal: _Alfamart (ALFA)_).
     2. Klik ikon panah bolak-balik (`ArrowLeftRight`) di samping kode tenant tersebut.
   - **Hasil yang Diharapkan:**
     - Split screen langsung terbuka tanpa modal, membandingkan tenant aktif dengan tenant yang diklik pada config type yang sama.
@@ -407,8 +407,8 @@ Fokus: Memastikan dua tenant berbeda di database dapat dibandingkan langsung sec
     1. Klik tombol **Missing Views** pada window kanan.
     2. Atau klik **Terapkan ke Live**.
   - **Hasil yang Diharapkan:**
-    - Tombol *Missing Views* mendeteksi view yang ada di tenant pembanding namun belum ada di tenant aktif, lalu menggabungkannya ke editor kiri.
-    - Tombol *Terapkan ke Live* menyalin seluruh JSON tenant pembanding ke editor live tenant aktif untuk ditinjau.
+    - Tombol _Missing Views_ mendeteksi view yang ada di tenant pembanding namun belum ada di tenant aktif, lalu menggabungkannya ke editor kiri.
+    - Tombol _Terapkan ke Live_ menyalin seluruh JSON tenant pembanding ke editor live tenant aktif untuk ditinjau.
 
 - [ ] **TC-9.8: Simpan Perubahan Langsung ke Database Tenant Pembanding**
   - **Langkah:**
@@ -430,17 +430,17 @@ Fokus: Memverifikasi fitur kalkulasi selisih/delta antara dua konfigurasi JSON y
     1. Buka split screen (bisa perbandingan preset, history, atau antar tenant).
     2. Pada switcher mode di toolbar atas (`Side-by-Side` | `Visual Diff` | `JSON Delta`), klik **JSON Delta**.
   - **Hasil yang Diharapkan:**
-    - Layar berganti menampilkan *JSON Delta Inspector*.
+    - Layar berganti menampilkan _JSON Delta Inspector_.
     - Menampilkan dokumen JSON hasil perbandingan dengan penyorotan sintaks (Monaco Editor).
     - Terlihat ringkasan pill: `+X Ditambahkan`, `-Y Dihapus`, `~Z Diubah`, dan `W Views Diff`.
 
 - [ ] **TC-10.2: Buka Mode JSON Delta Langsung dari Modal Perbandingan Antar Tenant**
   - **Langkah:**
     1. Klik ikon **Bandingkan Antar Tenant** (`ArrowLeftRight`) pada salah satu kartu tenant di sidebar.
-    2. Pada bagian *3. Mode Tampilan*, pilih kartu **JSON Delta** (ikon dokumen kode biru).
+    2. Pada bagian _3. Mode Tampilan_, pilih kartu **JSON Delta** (ikon dokumen kode biru).
     3. Klik **Buka Split Perbandingan**.
   - **Hasil yang Diharapkan:**
-    - Split screen terbuka langsung dalam mode *JSON Delta Inspector*.
+    - Split screen terbuka langsung dalam mode _JSON Delta Inspector_.
     - Header menunjukkan perbandingan: `Baseline: Tenant A ➔ Target: Tenant B`.
 
 - [ ] **TC-10.3: Verifikasi Struktur Output JSON Delta (Full Analysis)**
@@ -504,12 +504,9 @@ Fokus: Memverifikasi fitur kalkulasi selisih/delta antara dua konfigurasi JSON y
     2. Beralih kembali ke mode **JSON Delta**.
   - **Hasil yang Diharapkan:**
     - Aplikasi tidak crash.
-    - Muncul banner peringatan merah di atas editor: *"Syntax Error pada salah satu konfigurasi..."*
+    - Muncul banner peringatan merah di atas editor: _"Syntax Error pada salah satu konfigurasi..."_
     - Monaco editor menampilkan JSON error berpenjelasan ramah yang memandu pengguna untuk memperbaiki tanda baca JSON.
 
 ---
 
-> *Catatan: Anda dapat membuka file ini kapan saja atau mengedit tanda centang `[ ]` menjadi `[x]` saat melakukan verifikasi fungsional.*
-
-
-
+> _Catatan: Anda dapat membuka file ini kapan saja atau mengedit tanda centang `[ ]` menjadi `[x]` saat melakukan verifikasi fungsional._

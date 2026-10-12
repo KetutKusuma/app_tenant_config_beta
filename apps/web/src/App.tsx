@@ -1982,149 +1982,100 @@ export default function App() {
               ) : splitMode === "json-delta" ? (
                 /* JSON Delta Inspector */
                 <div className="w-full h-full flex flex-col min-h-0 overflow-hidden bg-slate-950">
-                  {/* Top Bar for JSON Delta */}
-                  <div className="h-8 bg-slate-900 border-b border-slate-800 px-3 flex items-center justify-between gap-2 text-[10px] shrink-0">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className="flex items-center gap-1 font-semibold text-cyan-300 bg-cyan-950/40 px-2 py-0.5 rounded border border-cyan-500/30 shrink-0">
-                        <FileCode className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Dokumen Perbedaan (JSON Delta)</span>
-                      </div>
+                  {/* Top Bar for JSON Delta — baris 1: arah + aksi, baris 2: format + statistik */}
+                  {(() => {
+                    const liveLabel = splitSourceType === "tenant" ? `${selectedTenant?.name || "Tenant Aktif"}` : "Live DB";
+                    const compareLabel = compareTenant?.name || splitTitle;
+                    const baselineLabel = jsonDeltaDirection === "left-to-right" ? liveLabel : compareLabel;
+                    const targetLabel = jsonDeltaDirection === "left-to-right" ? compareLabel : liveLabel;
+                    const formats: { key: typeof jsonDeltaFormat; label: string; title: string }[] = [
+                      { key: "full", label: "Full", title: "Lengkap: metadata, rangkuman, analisis views, selisih path, dan patch" },
+                      { key: "compact", label: "Compact", title: "Ringkas: hanya objek added, removed, dan modified" },
+                      { key: "patch", label: "RFC 6902", title: "Array spesifikasi standar RFC 6902 JSON Patch" },
+                      { key: "views", label: "Views", title: "Khusus analisis perbedaan array Views Tenant ATS" }
+                    ];
+                    return (
+                      <div className="relative z-10 shrink-0 bg-slate-900 border-b border-slate-800/80 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] text-[11px] whitespace-nowrap">
+                        <div className="h-9 px-3 flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2 min-w-0 overflow-hidden" title={`Baseline: ${baselineLabel} → Target: ${targetLabel} (${activeConfigType})`}>
+                            <FileCode className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                            <span className="text-slate-500 shrink-0">Baseline</span>
+                            <span className="font-medium text-slate-200 truncate">{baselineLabel}</span>
+                            <span className="text-cyan-400 shrink-0">→</span>
+                            <span className="text-slate-500 shrink-0">Target</span>
+                            <span className="font-medium text-cyan-300 truncate">{targetLabel}</span>
+                            <span className="font-mono text-[10px] text-slate-500 truncate">{activeConfigType}</span>
+                            <button
+                              onClick={() => setJsonDeltaDirection(prev => prev === "left-to-right" ? "right-to-left" : "left-to-right")}
+                              className="h-6 w-6 shrink-0 rounded-md text-slate-400 hover:text-cyan-300 hover:bg-slate-800 flex items-center justify-center transition"
+                              title="Tukar arah baseline dan target pembanding"
+                            >
+                              <ArrowLeftRight className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
 
-                      {/* Direction indicator & switcher */}
-                      <div className="flex items-center gap-1 text-[10px] bg-slate-950 px-2 py-0.5 rounded border border-slate-800 shrink-0">
-                        <span className="text-slate-400">Baseline:</span>
-                        <strong className="font-mono text-slate-200 truncate max-w-[140px]">
-                          {jsonDeltaDirection === "left-to-right"
-                            ? (splitSourceType === "tenant" ? `${selectedTenant?.name} (${activeConfigType})` : `Live DB (${activeConfigType})`)
-                            : (compareTenant?.name || splitTitle)}
-                        </strong>
-                        <span className="text-cyan-400 font-bold px-0.5">➔</span>
-                        <span className="text-slate-400">Target:</span>
-                        <strong className="font-mono text-cyan-300 truncate max-w-[140px]">
-                          {jsonDeltaDirection === "left-to-right"
-                            ? (compareTenant?.name || splitTitle)
-                            : (splitSourceType === "tenant" ? `${selectedTenant?.name} (${activeConfigType})` : `Live DB (${activeConfigType})`)}
-                        </strong>
-                        <button
-                          onClick={() => setJsonDeltaDirection(prev => prev === "left-to-right" ? "right-to-left" : "left-to-right")}
-                          className="ml-1 px-1.5 py-0.2 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 text-[9px] flex items-center gap-1 transition"
-                          title="Tukar arah baseline dan target pembanding"
-                        >
-                          <ArrowLeftRight className="w-2.5 h-2.5 text-cyan-400" /> Tukar Arah
-                        </button>
-                      </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={handleCopyJsonDelta}
+                              className="h-6 px-2.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium flex items-center gap-1.5 shadow-sm shadow-cyan-950/50 transition"
+                              title="Salin hasil JSON delta ke clipboard"
+                            >
+                              {deltaCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {deltaCopied ? "Tersalin!" : "Salin JSON"}
+                            </button>
+                            <button
+                              onClick={handleDownloadJsonDelta}
+                              className="h-6 px-2 rounded-md text-slate-300 hover:text-white hover:bg-slate-800 text-[11px] flex items-center gap-1.5 transition"
+                              title="Unduh dokumen perbedaan sebagai file .json"
+                            >
+                              <Download className="w-3 h-3" /> Unduh
+                            </button>
+                            <span className="w-px h-4 bg-slate-700/70 mx-1" />
+                            <button
+                              onClick={() => setIsSplitScreen(false)}
+                              className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
+                              title="Tutup perbandingan"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
 
-                      {/* Format Selector Pills */}
-                      <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded border border-slate-800 shrink-0">
-                        <button
-                          onClick={() => setJsonDeltaFormat("full")}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
-                            jsonDeltaFormat === "full" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"
-                          }`}
-                          title="Lengkap: metadata, rangkuman, analisis views, selisih path, dan patch"
-                        >
-                          Full Analysis
-                        </button>
-                        <button
-                          onClick={() => setJsonDeltaFormat("compact")}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
-                            jsonDeltaFormat === "compact" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"
-                          }`}
-                          title="Ringkas: hanya objek added, removed, dan modified"
-                        >
-                          Compact Delta
-                        </button>
-                        <button
-                          onClick={() => setJsonDeltaFormat("patch")}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
-                            jsonDeltaFormat === "patch" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"
-                          }`}
-                          title="Array spesifikasi standar RFC 6902 JSON Patch"
-                        >
-                          RFC 6902 Patch
-                        </button>
-                        <button
-                          onClick={() => setJsonDeltaFormat("views")}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition ${
-                            jsonDeltaFormat === "views" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-slate-200"
-                          }`}
-                          title="Khusus analisis perbedaan array Views Tenant ATS"
-                        >
-                          Views Only
-                        </button>
-                      </div>
-                    </div>
+                        <div className="h-8 px-3 flex items-center justify-between gap-4 border-t border-slate-800/60">
+                          <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-md shrink-0">
+                            {formats.map(f => (
+                              <button
+                                key={f.key}
+                                onClick={() => setJsonDeltaFormat(f.key)}
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium transition ${
+                                  jsonDeltaFormat === f.key ? "bg-slate-700 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                                }`}
+                                title={f.title}
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
 
-                    {/* Stats and Action Buttons */}
-                    <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto">
-                      {deltaResult && (
-                        <div className="flex items-center gap-1 mr-1 text-[10px]">
-                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
-                            +{deltaResult.summary.addedCount} Ditambahkan
-                          </span>
-                          <span className="px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 font-medium">
-                            -{deltaResult.summary.removedCount} Dihapus
-                          </span>
-                          <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 font-medium">
-                            ~{deltaResult.summary.modifiedCount} Diubah
-                          </span>
-                          {deltaResult.summary.viewsDiff && (
-                            <span className="px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-mono" title="Perbedaan pada views array">
-                              👁️ {deltaResult.summary.viewsDiff.onlyInBaseline + deltaResult.summary.viewsDiff.onlyInTarget + deltaResult.summary.viewsDiff.modifiedViews} Views Diff
-                            </span>
+                          {deltaResult && (
+                            <div className="flex items-center gap-3 min-w-0 overflow-hidden text-[10px] font-mono">
+                              <span className="text-emerald-400" title="Ditambahkan">+{deltaResult.summary.addedCount}</span>
+                              <span className="text-rose-400" title="Dihapus">−{deltaResult.summary.removedCount}</span>
+                              <span className="text-amber-400" title="Diubah">~{deltaResult.summary.modifiedCount}</span>
+                              {deltaResult.summary.viewsDiff && (
+                                <>
+                                  <span className="w-px h-3 bg-slate-700/70" />
+                                  <span className="text-purple-300 truncate" title="Perbedaan pada views array (hanya di baseline / hanya di target / diubah)">
+                                    {deltaResult.summary.viewsDiff.onlyInBaseline + deltaResult.summary.viewsDiff.onlyInTarget + deltaResult.summary.viewsDiff.modifiedViews} views berbeda
+                                  </span>
+                                </>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
-
-                      <button
-                        onClick={handleCopyJsonDelta}
-                        className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1 font-medium transition shadow-sm"
-                        title="Salin hasil JSON delta ke clipboard"
-                      >
-                        {deltaCopied ? (
-                          <>
-                            <Check className="w-2.5 h-2.5 text-emerald-400" /> Tersalin!
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="w-2.5 h-2.5 text-cyan-400" /> Salin JSON
-                          </>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={handleDownloadJsonDelta}
-                        className="px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 border border-cyan-500/40 text-[10px] flex items-center gap-1 font-medium transition"
-                        title="Unduh dokumen perbedaan sebagai file .json"
-                      >
-                        <Download className="w-2.5 h-2.5 text-cyan-400" /> Unduh .json
-                      </button>
-
-                      <button
-                        onClick={() => setSplitMode("side-by-side")}
-                        className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1 transition"
-                        title="Kembali ke tampilan dua editor mandiri berdampingan"
-                      >
-                        <Columns className="w-2.5 h-2.5 text-indigo-400" /> Side-by-Side
-                      </button>
-
-                      <button
-                        onClick={() => setSplitMode("diff")}
-                        className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1 transition"
-                        title="Buka tampilan Monaco Diff Editor visual"
-                      >
-                        <GitCompare className="w-2.5 h-2.5 text-purple-400" /> Visual Diff
-                      </button>
-
-                      <button
-                        onClick={() => setIsSplitScreen(false)}
-                        className="text-slate-400 hover:text-slate-200 p-0.5 ml-1"
-                        title="Tutup perbandingan"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Warning banner if JSON parsing failed */}
                   {deltaError && (
