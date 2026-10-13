@@ -1,8 +1,16 @@
 show
 
+# Dependensi & hasil build
+node_modules/
+dist/
+*.tsbuildinfo
+
 # Rahasia: kredensial DB & auth (jangan di-commit)
 .env
 .env.*
 !.env.example
 envs/*.env
 !envs/*.env.example
+
+# OS / editor
+.DS_Store
