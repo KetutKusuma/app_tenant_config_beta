@@ -334,3 +334,64 @@ export function Stepper({ steps, current }: { steps: string[]; current: number }
     </ol>
   );
 }
+
+// Konfirmasi dengan mengetik teks persis (mis. nama target env yang dilindungi)
+export function TypeToConfirmDialog({
+  title,
+  description,
+  expected,
+  confirmLabel = "Lanjutkan",
+  onConfirm,
+  onCancel
+}: {
+  title: string;
+  description?: ReactNode;
+  expected: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const ok = value.trim() === expected;
+  return (
+    <div
+      className="fixed inset-0 z-[90] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4"
+      onMouseDown={(e) => e.target === e.currentTarget && onCancel()}
+      onKeyDown={(e) => e.key === "Escape" && onCancel()}
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (ok) onConfirm();
+        }}
+        className="w-full max-w-md rounded-xl bg-slate-900 border border-rose-500/40 shadow-2xl p-5 space-y-4"
+      >
+        <div>
+          <h3 className="text-sm font-semibold text-rose-200">{title}</h3>
+          {description && <div className="mt-1 text-[11px] text-slate-400">{description}</div>}
+        </div>
+        <label className="block text-[11px] text-slate-400">
+          Ketik <code className="px-1 rounded bg-slate-800 text-rose-200 font-mono">{expected}</code> untuk melanjutkan
+          <input
+            autoFocus
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-rose-500"
+          />
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="px-3 py-1.5 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition">
+            Batal
+          </button>
+          <button
+            type="submit"
+            disabled={!ok}
+            className="px-3 py-1.5 rounded-md bg-rose-600 hover:bg-rose-500 text-xs font-semibold text-white transition disabled:opacity-40"
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

@@ -32,6 +32,8 @@ import {
   ChevronDown,
   ChevronUp,
   ArrowLeftRight,
+  KeyRound,
+  LogOut,
   ChevronRight,
   CircleHelp,
   Workflow,
@@ -40,7 +42,8 @@ import {
 } from "lucide-react";
 import { DocsModal } from "./components/DocsModal";
 import { WorkflowDocsModal } from "./components/WorkflowDocsModal";
-import { MenuButton, SplitButton, Chip, PromptDialog, ContextMenu, Stepper, type ContextMenuState } from "./components/ui";
+import { ChangePasswordForm, UNAUTHORIZED_EVENT, type StudioUser } from "./components/AuthGate";
+import { MenuButton, SplitButton, Chip, PromptDialog, ContextMenu, Stepper, TypeToConfirmDialog, type ContextMenuState } from "./components/ui";
 
 interface Tenant {
   tenantId: string;
@@ -120,13 +123,54 @@ const DOMAIN_LABEL: Record<ConfigDomain, string> = {
   workflow_pipeline: "Workflow Pipeline"
 };
 let activeDomain: ConfigDomain = "tenant_config";
-const api = (input: string, init: RequestInit = {}) =>
-  fetch(input, {
-    ...init,
-    headers: { ...(init.headers as Record<string, string> | undefined), "X-Config-Domain": activeDomain }
-  });
+// Target env (ats_db) aktif; kosong = BFF memakai preferensi user / default server
+let activeTargetEnv = "";
+// Dipasang oleh App: minta user mengetik nama env yang dilindungi sebelum operasi tulis
+let envConfirmHandler: ((env: string) => Promise<boolean>) | null = null;
 
-export default function App() {
+interface TargetEnvInfo {
+  name: string;
+  label: string;
+  color: string;
+  readonly: boolean;
+  protected: boolean;
+  hostMasked: string;
+  source: string;
+  status?: { ok: boolean; error?: string; ms?: number };
+}
+
+const ENV_DOT: Record<string, string> = {
+  slate: "bg-slate-400", indigo: "bg-indigo-400", emerald: "bg-emerald-400", amber: "bg-amber-400",
+  rose: "bg-rose-400", sky: "bg-sky-400", violet: "bg-violet-400", teal: "bg-teal-400"
+};
+
+const api = async (input: string, init: RequestInit = {}, confirmEnv?: string): Promise<Response> => {
+  const headers: Record<string, string> = {
+    ...(init.headers as Record<string, string> | undefined),
+    "X-Config-Domain": activeDomain
+  };
+  if (activeTargetEnv) headers["X-Target-Env"] = activeTargetEnv;
+  if (confirmEnv) headers["X-Confirm-Env"] = confirmEnv;
+  const res = await fetch(input, { ...init, credentials: "same-origin", headers });
+  // Sesi habis/di-logout di tab lain: kembalikan ke layar login
+  if (res.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  // Env dilindungi: minta konfirmasi lalu ulangi request yang sama sekali lagi
+  if (res.status === 428 && !confirmEnv && envConfirmHandler) {
+    const body = await res.clone().json().catch(() => null);
+    if (body?.code === "ENV_CONFIRM_REQUIRED" && (await envConfirmHandler(body.env))) {
+      return api(input, init, body.env);
+    }
+  }
+  return res;
+};
+
+interface AppProps {
+  user: StudioUser;
+  setUser: (u: StudioUser) => void;
+  onLogout: () => void;
+}
+
+export default function App({ user, setUser, onLogout }: AppProps) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -141,6 +185,12 @@ export default function App() {
   // Versi DB (updated_at) saat config terakhir dimuat; wajib dikirim saat menyimpan (optimistic locking)
   const [configVersion, setConfigVersion] = useState<string | null>(null);
   const [configDomain, setConfigDomain] = useState<ConfigDomain>("tenant_config");
+  const [targetEnvs, setTargetEnvs] = useState<TargetEnvInfo[]>([]);
+  const [targetEnvName, setTargetEnvName] = useState<string>(() => {
+    activeTargetEnv = user.preferences.lastTargetEnv || "";
+    return activeTargetEnv;
+  });
+  const [envConfirm, setEnvConfirm] = useState<null | { env: string; resolve: (ok: boolean) => void }>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
   // Dialog catatan commit (pengganti window.prompt); resolve(null) = batal
   const [promptDialog, setPromptDialog] = useState<null | {
@@ -190,8 +240,10 @@ export default function App() {
   const [deltaCopied, setDeltaCopied] = useState(false);
 
   // Local References State & Customizable Folder Path
-  const [presetDirPath, setPresetDirPath] = useState<string>("/Users/ketutkusuma/Python/test_redis_stream/stable");
-  const [presetInputPath, setPresetInputPath] = useState<string>("/Users/ketutkusuma/Python/test_redis_stream/stable");
+  // Folder preset per user & per domain; string kosong = BFF memakai preferensi user / default server
+  const [presetDirPath, setPresetDirPath] = useState<string>(user.preferences.presetDirTenant || "");
+  const [presetInputPath, setPresetInputPath] = useState<string>(user.preferences.presetDirTenant || "");
+  const [showChangePassword, setShowChangePassword] = useState(false);
   const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [showRefDrawer, setShowRefDrawer] = useState(false);
 
@@ -340,8 +392,9 @@ export default function App() {
 
       setTimeout(() => setStatusMessage(null), 3500);
 
-      // Refresh katalog presets
+      // Refresh katalog presets (folder tujuan ekspor menjadi folder aktif user)
       await fetchReferences(presetSaveTargetDir);
+      if (presetSaveTargetDir && presetSaveTargetDir !== presetDirPath) savePresetDirPref(presetSaveTargetDir);
 
       setTimeout(() => {
         setShowSavePresetModal(false);
@@ -691,8 +744,13 @@ export default function App() {
 
   // 1. Fetch Tenant List & Local References on Mount
   useEffect(() => {
+    fetchTargetEnvs();
     fetchTenants();
     fetchReferences(presetDirPath);
+    envConfirmHandler = (env) => new Promise<boolean>((resolve) => setEnvConfirm({ env, resolve }));
+    return () => {
+      envConfirmHandler = null;
+    };
   }, []);
 
   const fetchTenants = async (selectCode?: string) => {
@@ -703,7 +761,9 @@ export default function App() {
         setTenants(json.data);
         const target = selectCode 
           ? json.data.find((t: Tenant) => t.code === selectCode) 
-          : (json.data.find((t: Tenant) => t.code === "IDM") || json.data[0]);
+          : (json.data.find((t: Tenant) => t.tenantId === user.preferences.lastTenantId)
+            || json.data.find((t: Tenant) => t.code === "IDM")
+            || json.data[0]);
         if (target) {
           selectTenant(target);
         }
@@ -729,10 +789,28 @@ export default function App() {
     }
   };
 
+  // Simpan preferensi user (folder preset per domain, tenant terakhir) ke BFF
+  const savePreferences = async (prefs: Partial<StudioUser["preferences"]>) => {
+    try {
+      const res = await api("/api/me/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prefs)
+      });
+      const json = await res.json();
+      if (res.ok && json.user) setUser(json.user);
+    } catch (err) {
+      console.error("Gagal menyimpan preferensi:", err);
+    }
+  };
+  const savePresetDirPref = (dir: string) =>
+    savePreferences(activeDomain === "workflow_pipeline" ? { presetDirWorkflow: dir } : { presetDirTenant: dir });
+
   const handleUpdatePresetDir = (e: React.FormEvent) => {
     e.preventDefault();
     if (!presetInputPath.trim()) return;
     fetchReferences(presetInputPath.trim());
+    savePresetDirPref(presetInputPath.trim());
     setStatusMessage(`📁 Folder presets diubah ke: ${presetInputPath.trim()}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
@@ -740,6 +818,7 @@ export default function App() {
   // 2. Select Tenant & Fetch configs
   const selectTenant = async (tenant: Tenant) => {
     setSelectedTenant(tenant);
+    if (user.preferences.lastTenantId !== tenant.tenantId) savePreferences({ lastTenantId: tenant.tenantId });
     setCurrentGroupId(tenant.groupId || "");
     try {
       const res = await api(`/api/tenants/${tenant.tenantId}/configs`);
@@ -761,11 +840,8 @@ export default function App() {
   };
 
   // Ganti domain: Tenant Config <-> Workflow Pipeline (public.pipeline_workflow_configurations)
-  const handleSwitchDomain = async (next: ConfigDomain) => {
-    if (next === configDomain) return;
-    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah domain dan buang perubahan tersebut?")) return;
-    activeDomain = next;
-    setConfigDomain(next);
+  // Kosongkan editor & panel saat sumber data berganti (domain atau target env)
+  const resetWorkspace = () => {
     setIsSplitScreen(false);
     setValidationIssues([]);
     setShowValidationPanel(false);
@@ -777,6 +853,51 @@ export default function App() {
     setOriginalContent("{}");
     setConfigVersion(null);
     setIsDbNewer(false);
+  };
+
+  // Daftar profil target env (envs/<nama>.env) + status koneksi
+  const fetchTargetEnvs = async () => {
+    try {
+      const res = await api("/api/envs");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "Gagal memuat daftar env");
+      const list: TargetEnvInfo[] = json.data || [];
+      setTargetEnvs(list);
+      json.errors?.forEach((e: string) => console.warn("Profil env tidak valid:", e));
+      // Preferensi lama menunjuk env yang sudah dihapus: pindah ke default server
+      if (!list.some(e => e.name === activeTargetEnv)) {
+        activeTargetEnv = json.defaultEnv;
+        setTargetEnvName(json.defaultEnv);
+      }
+    } catch (err) {
+      console.error("Gagal memuat target env:", err);
+    }
+  };
+
+  const handleSwitchTargetEnv = async (next: string) => {
+    if (next === targetEnvName) return;
+    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah env dan buang perubahan tersebut?")) return;
+    activeTargetEnv = next;
+    setTargetEnvName(next);
+    resetWorkspace();
+    savePreferences({ lastTargetEnv: next });
+    await fetchTenants(selectedTenant?.code);
+    const env = targetEnvs.find(e => e.name === next);
+    setStatusMessage(`🌐 Target env: ${env?.label || next}${env?.readonly ? " (read-only)" : ""}`);
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  const handleSwitchDomain = async (next: ConfigDomain) => {
+    if (next === configDomain) return;
+    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah domain dan buang perubahan tersebut?")) return;
+    activeDomain = next;
+    setConfigDomain(next);
+    resetWorkspace();
+    // Folder preset mengikuti domain (preferensi user); kosong = default server untuk domain tsb
+    const nextDir = next === "workflow_pipeline"
+      ? user.preferences.presetDirWorkflow || ""
+      : user.preferences.presetDirTenant || "";
+    fetchReferences(nextDir);
     // Muat ulang daftar tenant (jumlah config per domain) dan pertahankan tenant yang sedang dipilih
     await fetchTenants(selectedTenant?.code);
     setStatusMessage(`🔀 Domain aktif: ${DOMAIN_LABEL[next]}`);
@@ -1644,17 +1765,49 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-950 text-slate-100 font-sans">
       {/* Top Header: brand · breadcrumb (domain › tenant › config) · aksi */}
-      <header className="relative z-30 h-11 border-b border-slate-800 px-3 flex items-center gap-4 bg-slate-900/95 shrink-0 text-xs shadow-[0_4px_12px_-6px_rgba(0,0,0,0.6)]">
+      <header className={`relative z-30 h-11 border-b ${targetEnvs.find(e => e.name === targetEnvName)?.protected ? "border-rose-500/60" : "border-slate-800"} px-3 flex items-center gap-4 bg-slate-900/95 shrink-0 text-xs shadow-[0_4px_12px_-6px_rgba(0,0,0,0.6)]`}>
         <div className="flex items-center gap-2 shrink-0">
           <div className="p-1 rounded bg-indigo-600/20 text-indigo-400 ring-1 ring-inset ring-indigo-500/30">
             <Layers className="w-3.5 h-3.5" />
           </div>
           <span className="font-semibold text-slate-200 text-xs tracking-wide">Tenant Studio</span>
-          <span className="text-[9px] px-1 rounded bg-amber-500/15 text-amber-300 font-mono ring-1 ring-inset ring-amber-500/30">DEV</span>
+
+          {/* Pemilih target env (ats_db): 1 profil = 1 file envs/<nama>.env */}
+          {(() => {
+            const cur = targetEnvs.find(e => e.name === targetEnvName);
+            return (
+              <MenuButton
+                align="left"
+                label={cur?.label || targetEnvName || "…"}
+                title={cur ? `${cur.source} · ${cur.hostMasked}` : "Target database"}
+                icon={<span className={`w-2 h-2 rounded-full ${ENV_DOT[cur?.color || "slate"] || ENV_DOT.slate} ${cur?.status && !cur.status.ok ? "ring-2 ring-rose-500" : ""}`} />}
+                items={[
+                  ...targetEnvs.map(e => ({
+                    key: e.name,
+                    label: `${e.label}${e.name === targetEnvName ? "  ✓" : ""}`,
+                    hint: `${e.hostMasked} · ${e.status?.ok ? `${e.status.ms} ms` : `gagal: ${e.status?.error || "?"}`}${e.readonly ? " · read-only" : ""}${e.protected ? " · dilindungi" : ""}`,
+                    icon: <span className={`w-2 h-2 rounded-full ${ENV_DOT[e.color] || ENV_DOT.slate}`} />,
+                    onSelect: () => handleSwitchTargetEnv(e.name)
+                  })),
+                  "divider" as const,
+                  {
+                    key: "reload",
+                    label: "Muat ulang daftar env",
+                    hint: "Tambah file envs/<nama>.env lalu klik ini",
+                    icon: <RefreshCw className="w-3.5 h-3.5" />,
+                    onSelect: fetchTargetEnvs
+                  }
+                ]}
+              />
+            );
+          })()}
+          {targetEnvs.find(e => e.name === targetEnvName)?.readonly && <Chip tone="amber">Read-only</Chip>}
+          {targetEnvs.find(e => e.name === targetEnvName)?.protected && <Chip tone="rose">Dilindungi</Chip>}
         </div>
 
         {/* Breadcrumb: selalu menunjukkan apa yang sedang diedit */}
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] whitespace-nowrap overflow-hidden">
+          <span className="w-px h-4 bg-slate-800 mr-1 shrink-0" />
           <span className={`shrink-0 font-medium ${configDomain === "workflow_pipeline" ? "text-teal-300" : "text-indigo-300"}`}>
             {DOMAIN_LABEL[configDomain]}
           </span>
@@ -1819,7 +1972,7 @@ export default function App() {
             label={isSaving ? "Saving..." : "Save"}
             icon={<Save className="w-3.5 h-3.5" />}
             onClick={() => handleSave()}
-            disabled={isSaving || !selectedConfigId}
+            disabled={isSaving || !selectedConfigId || !!targetEnvs.find(e => e.name === targetEnvName)?.readonly}
             items={[
               {
                 key: "validate",
@@ -1845,6 +1998,54 @@ export default function App() {
               }
             ]}
           />
+
+          <span className="w-px h-5 bg-slate-800 mx-1" />
+
+          {/* Menu user: identitas, preferensi folder, ganti password, keluar */}
+          <MenuButton
+            label={user.displayName}
+            icon={
+              <span className="w-5 h-5 rounded-full bg-indigo-600/30 text-indigo-200 text-[9px] font-bold flex items-center justify-center uppercase">
+                {user.displayName.slice(0, 2)}
+              </span>
+            }
+            title={user.email}
+            items={[
+              {
+                key: "who",
+                label: user.email,
+                hint: "Perubahan dicatat di History atas nama Anda",
+                icon: <Users className="w-3.5 h-3.5" />,
+                disabled: true,
+                onSelect: () => {}
+              },
+              "divider",
+              {
+                key: "folder",
+                label: "Folder preset…",
+                hint: presetDirPath || "default server",
+                icon: <FolderOpen className="w-3.5 h-3.5" />,
+                onSelect: () => setShowRefDrawer(true)
+              },
+              {
+                key: "password",
+                label: "Ganti password…",
+                icon: <KeyRound className="w-3.5 h-3.5" />,
+                onSelect: () => setShowChangePassword(true)
+              },
+              "divider",
+              {
+                key: "logout",
+                label: "Keluar",
+                icon: <LogOut className="w-3.5 h-3.5" />,
+                danger: true,
+                onSelect: () => {
+                  if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Tetap keluar?")) return;
+                  onLogout();
+                }
+              }
+            ]}
+          />
         </div>
       </header>
 
@@ -1856,6 +2057,44 @@ export default function App() {
       )}
 
       {ctxMenu && <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
+
+      {envConfirm && (
+        <TypeToConfirmDialog
+          title={`Tulis ke env dilindungi: ${targetEnvs.find(e => e.name === envConfirm.env)?.label || envConfirm.env}`}
+          description="Perubahan ini akan langsung ditulis ke database env tersebut (versi lama tetap diarsipkan ke History)."
+          expected={envConfirm.env}
+          confirmLabel="Ya, tulis ke env ini"
+          onConfirm={() => {
+            envConfirm.resolve(true);
+            setEnvConfirm(null);
+          }}
+          onCancel={() => {
+            envConfirm.resolve(false);
+            setEnvConfirm(null);
+          }}
+        />
+      )}
+
+      {showChangePassword && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && setShowChangePassword(false)}>
+          <div className="w-full max-w-sm rounded-xl bg-slate-900 border border-slate-800 shadow-2xl p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-100">Ganti password</h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">{user.email} · sesi di perangkat lain akan dikeluarkan.</p>
+            </div>
+            <ChangePasswordForm
+              forced={false}
+              onCancel={() => setShowChangePassword(false)}
+              onDone={(u) => {
+                setUser(u);
+                setShowChangePassword(false);
+                setStatusMessage("🔐 Password berhasil diganti.");
+                setTimeout(() => setStatusMessage(null), 3500);
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {promptDialog && (
         <PromptDialog
