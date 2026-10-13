@@ -1,0 +1,4366 @@
+[
+ {
+  "name": "ApproveMoveVacancy",
+  "category": "Move Vacancy & Transfer",
+  "file": "process/workflow/executors/approve-move-vacancy.pipeline-executor.ts",
+  "summary": "Menyetujui request pindah vacancy (status WAITING): membuat lamaran baru (applicant bucket + process awal) di vacancy tujuan, lalu menandai row move vacancy sebagai APPROVED.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.moveVacancy (array); tiap iterasi ctx.satellitePayload.moveVacancy dipersempit menjadi satu item",
+   "Resolve config.payload (jmespath) menjadi { moveVacancyId }",
+   "Ambil row process.applicant_move_vacancy aktif berdasarkan moveVacancyId; harus berstatus WAITING",
+   "Dalam satu transaksi (ApproveMoveVacancyService): ambil source bucket + candidate meta, validasi ulang vacancy tujuan (eligible/applicable), cek blacklist kandidat, cek duplikasi lamaran ke vacancy tujuan",
+   "Tentukan stage tujuan: targetVacancyStageId bila ada, jika tidak fallback ke stage screening vacancy tujuan",
+   "Ambil tenant config APPLICANT_STABLE vacancy tujuan, hitung filterableAttribute & keywords, buat applicant bucket baru (source 'HRMS') + salin candidate meta",
+   "Buat process awal dengan initialStatus dari konfigurasi stage (default WAITING) dan update currentProcess bucket baru",
+   "Tandai row move vacancy: status APPROVED, respondedAt = now, newApplicantBucketId = id bucket baru",
+   "Append hasil ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve terhadap ctx menjadi ApproveMoveVacancyPayload. Di dalam loop, $satellitePayload.moveVacancy menunjuk ke satu item."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "moveVacancyId",
+    "type": "string",
+    "required": true,
+    "description": "ID row process.applicant_move_vacancy yang akan di-approve."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.moveVacancy (array, sumber loop)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'ApproveMoveVacancy', results: MoveVacancyEntity[] } ke ctx.pipelineResult (satu entity per item moveVacancy, sudah berstatus APPROVED dan berisi newApplicantBucketId). ctx lain tidak diubah (ctx internal dari ApproveMoveVacancyService tidak dikembalikan).",
+  "sideEffects": [
+   "INSERT applicant.applicant_bucket (bucket baru di vacancy tujuan)",
+   "INSERT applicant.applicant_candidate_meta (salinan candidate meta source, bila ada)",
+   "INSERT applicant.process (process awal) + UPDATE currentProcess pada bucket baru",
+   "UPDATE process.applicant_move_vacancy (status=APPROVED, respondedAt, newApplicantBucketId)",
+   "Bucket/process sumber TIDAK diubah"
+  ],
+  "errors": [
+   "NotFoundException { code: 'ERR_MOVE_VACANCY', message: 'Move vacancy request not found' } bila row tidak ada / source bucket terhapus",
+   "BadRequestException { code: 'ERR_MOVE_VACANCY', message: 'This move vacancy request has already been responded to' } bila status bukan WAITING",
+   "HttpException type 'ERR_VACANCY_NOT_ELIGIBLE' bila vacancy tujuan tidak valid/tidak bisa dilamar",
+   "ForbiddenException 'This candidate is restricted from applying to new vacancies' bila kandidat di-blacklist tenant",
+   "HttpException type 'ERR_ALREADY_APPLIED' bila kandidat sudah melamar vacancy tujuan",
+   "UnprocessableEntityException type 'TARGET_STAGE_NOT_FOUND' bila stage tujuan sudah tidak ada (atau SCREENING_STAGE_NOT_FOUND dari fallback screening)"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "ApproveMoveVacancy",
+   "config": {
+    "payload": {
+     "moveVacancyId": "$satellitePayload.moveVacancy.moveVacancyId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Executor tipe loop: bila ctx.satellitePayload.moveVacancy kosong/tidak ada, service tidak dipanggil dan results = [] (tanpa error).",
+   "Gunakan $satellitePayload.moveVacancy.<field> (tanpa [0]) di payload karena item sudah dipersempit.",
+   "Tidak mengirim email; tambahkan step SendEmail terpisah bila perlu.",
+   "Tidak ditemukan contoh config nyata di repo untuk executor ini."
+  ]
+ },
+ {
+  "name": "CloneApplicantSatellite",
+  "category": "Applicant Process",
+  "file": "process/workflow/executors/clone-applicant-satellite.pipeline-executor.ts",
+  "summary": "Menyalin data satelit (process, custom field, score, interview, form submission, attachment, pre-onboarding, offering) dari satu applicant bucket sumber ke satu/lebih applicant bucket target, dengan pemetaan stage via originalStageId.",
+  "behavior": [
+   "Resolve config.sourceApplicantId (jmespath) dan setiap elemen config.targetApplicantId, lalu hasilnya di-flat() (elemen boleh string atau string[])",
+   "config.scope, config.target, config.customFieldKeys diteruskan apa adanya (TIDAK di-resolve jmespath)",
+   "Validasi target: harus ['*'] atau daftar key handler terdaftar (applicantProcess, customFields, applicantScore, applicantInterview, applicantFormSubmission, applicantAttachment, applicantPreOnboarding, applicantOffering)",
+   "Dalam satu transaksi: ambil source bucket (tenant = ctx.authContext.tenantId); bila targetApplicantId[0] = '*', target = semua bucket aktif lain milik kandidat yang sama di tenant",
+   "Untuk setiap target unik: petakan stage sumber -> stage target lewat originalStageId (difilter scope '*' / {stageId} / {stageType})",
+   "Handler dijalankan berurutan (applicantProcess lebih dulu, priority -100) sehingga mapping process tersedia untuk handler lain",
+   "Tiap handler: soft-delete row target pada stage yang dipetakan (customFields: soft-delete per fieldKey), lalu insert salinan row sumber yang eligible",
+   "Append hasil ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "sourceApplicantId",
+    "type": "unknown (literal UUID / template jmespath)",
+    "required": true,
+    "description": "ID applicant bucket sumber."
+   },
+   {
+    "key": "targetApplicantId",
+    "type": "string[]",
+    "required": true,
+    "description": "Array UUID / ekspresi jmespath (boleh menghasilkan array, akan di-flat), atau ['*'] untuk semua bucket aktif lain milik kandidat sumber."
+   },
+   {
+    "key": "scope",
+    "type": "'*' | { stageId: string } | { stageType: string }",
+    "required": true,
+    "description": "Pilih stage sumber yang di-clone. stageType dibandingkan case-insensitive. Literal, tidak di-resolve."
+   },
+   {
+    "key": "target",
+    "type": "string[]",
+    "required": true,
+    "description": "Key satelit yang di-clone atau ['*'] untuk semua. '*' tidak boleh dicampur key lain."
+   },
+   {
+    "key": "customFieldKeys",
+    "type": "string[]",
+    "required": false,
+    "description": "Filter fieldKey untuk target customFields; ['*'] atau dihilangkan = semua field."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.authContext.tenantId",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CloneApplicantSatellite', results: Array<{ target, cloned, replaced, skipped, targetApplicantId }> } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "Soft-delete + INSERT pada applicant.process (target applicantProcess)",
+   "Soft-delete + INSERT pada applicant.applicant_custom_fields (target customFields)",
+   "Soft-delete + INSERT pada process.applicant_scores, process.applicant_interview, process.applicant_form_submission, process.applicant_attachments, process.pre_onboardings, process.applicant_offerings sesuai target",
+   "Semua dalam satu transaksi DB"
+  ],
+  "errors": [
+   "BadRequestException 'Source applicant, target applicant, and tenant context are required'",
+   "BadRequestException 'Clone target must be [\"*\"] or satellite context keys' / \"Unsupported clone target '<key>'\"",
+   "NotFoundException \"Source applicant '<id>' not found\" / \"Target applicant '<id>' not found\"",
+   "BadRequestException 'Source and target applicant must be different'",
+   "BadRequestException 'Source and target applicants must belong to a vacancy'",
+   "TypeError bila targetApplicantId bukan array (executor memanggil .flat() pada hasil resolve)"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CloneApplicantSatellite",
+   "config": {
+    "sourceApplicantId": "$requestBody.satellitePayload.cloneSource.applicantBucketId",
+    "targetApplicantId": [
+     "$pipelineResult[?name=='GetApplicantData'] | [0].results[].id"
+    ],
+    "scope": "*",
+    "target": [
+     "applicantScore"
+    ],
+    "customFieldKeys": [
+     "vacancy:districtId"
+    ]
+   }
+  },
+  "exampleSource": "process/workflow/executors/__test__/clone-applicant-satellite.pipeline-executor.spec.ts",
+  "notes": [
+   "Config tidak memakai wrapper payload; field berada langsung di config.",
+   "targetApplicantId harus berupa array di config (mis. [\"$...\"]) — string tunggal akan error.",
+   "Stage hanya bisa dipetakan bila stage sumber dan target punya originalStageId yang sama; row di stage tanpa mapping dihitung sebagai skipped.",
+   "Clone bersifat replace: row target pada stage yang dipetakan di-soft-delete dulu. Satelit yang punya applicantProcessId hanya di-clone bila process-nya ikut ter-mapping (sertakan applicantProcess di target atau process target sudah ada di stage yang sama).",
+   "Tidak ditemukan contoh config nyata di workflow config repo, hanya di unit test."
+  ]
+ },
+ {
+  "name": "CompleteOfferingLetter",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/complete-offering-letter-stable.pipeline-executor.ts",
+  "summary": "Menandai offering letter aktif (versi terbaru) pada suatu applicant process sebagai COMPLETED.",
+  "behavior": [
+   "Resolve config.payload menjadi { applicantProcessId }",
+   "Validasi applicantProcessId ada",
+   "Dalam transaksi: ambil offering aktif terbaru (order version DESC, created_at DESC) dengan lock pessimistic_write",
+   "Set offeringStatus = COMPLETED, completedAt = now, simpan",
+   "Append ringkasan hasil ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CompleteOfferingLetterPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process pemilik offering letter."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CompleteOfferingLetter', results: [{ id, version, offeringStatus, completedAt }] } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "UPDATE process.applicant_offerings (offering_status = COMPLETED, completed_at) dengan row lock"
+  ],
+  "errors": [
+   "BadRequestException 'Complete offering letter input is incomplete' bila applicantProcessId kosong",
+   "OfferingNotFoundException (404, type 'ERR_OFFERING_NOT_FOUND') bila tidak ada offering aktif"
+  ],
+  "usedInWorkflows": [
+   "COMPLETE_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "CompleteOfferingLetter",
+   "config": {
+    "payload": {
+     "applicantProcessId": "$bucket.currentProcess.processId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/complete-offering-letter.config.ts",
+  "notes": [
+   "Tidak ada guard status sebelumnya: offering dengan status apa pun akan di-set COMPLETED.",
+   "Tidak mengubah status applicant process; di config default diikuti SetStatusApplicantProcess { value: 'COMPLETED' }."
+  ]
+ },
+ {
+  "name": "CreateApplicantActivity",
+  "category": "Activity & Email",
+  "file": "process/workflow/executors/create-applicant-activity.pipeline-executor.ts",
+  "summary": "Menambahkan satu row log aktivitas applicant (append-only) dari payload yang di-resolve terhadap ctx.",
+  "behavior": [
+   "Single-shot (bukan loop): config.payload di-resolve langsung terhadap seluruh ctx",
+   "Jalankan config.moduleReferences (bila ada) untuk mengisi actorMeta, dibaca dari ctx.activity.actorMeta hasil resolve",
+   "INSERT satu row applicant activity",
+   "Append entity ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateApplicantActivityPayload."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Literal. Item { module, sourcePath, targetPath, cardinality? }; actorMeta diambil dari targetPath '$activity.actorMeta'."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi (mis. $identifier)."
+   },
+   {
+    "key": "actorId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID aktor yang melakukan aksi."
+   },
+   {
+    "key": "actionType",
+    "type": "string",
+    "required": true,
+    "description": "Jenis aksi yang dicatat."
+   },
+   {
+    "key": "description",
+    "type": "string | null",
+    "required": true,
+    "description": "Deskripsi aktivitas."
+   }
+  ],
+  "contextReads": [
+   "ctx.authContext.tenantId/groupId/actorId (scope moduleReferences)",
+   "ctx.activity.actorMeta (hasil moduleReferences)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateApplicantActivity', results: [ApplicantActivityEntity] } ke ctx.pipelineResult. ctx hasil moduleReferences tidak dikembalikan.",
+  "sideEffects": [
+   "INSERT process.applicant_activity"
+  ],
+  "errors": [
+   "BadRequestException type 'MODULE_REFERENCE_UNKNOWN_MODULE' bila module di moduleReferences tidak terdaftar",
+   "BadRequestException type 'MODULE_REFERENCE_NOT_FOUND' bila ID referensi tidak ditemukan",
+   "Error DB bila kolom wajib (mis. applicantBucketId/applicantProcessId/actionType) null — tidak ada validasi eksplisit"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreateApplicantActivity",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "vacancyStageId": "$vacancyStage.id",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "actorId": "$authContext.actorId",
+     "actionType": "INTERVIEW_SCHEDULED",
+     "description": "Interview dijadwalkan untuk $candidate.name"
+    },
+    "moduleReferences": [
+     {
+      "module": "EMPLOYEE",
+      "sourcePath": "$authContext.actorId",
+      "targetPath": "$activity.actorMeta"
+     }
+    ]
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Bukan executor loop: tidak membaca ctx.satellitePayload.<key>.",
+   "String yang mengandung token $path di tengah teks (mis. 'Interview untuk $candidate.name') akan disubstitusi (embedded template).",
+   "Nilai actionType 'INTERVIEW_SCHEDULED' dan module 'EMPLOYEE' pada contoh hanya ilustrasi; tidak ada enum actionType yang diverifikasi di pipeline-config.types."
+  ]
+ },
+ {
+  "name": "CreateApplicantAttachment",
+  "category": "Score & Attachment",
+  "file": "process/workflow/executors/create-applicant-attachment.pipeline-executor.ts",
+  "summary": "Membuat row attachment applicant untuk setiap item di ctx.satellitePayload.attachment, dengan validasi ekstensi file opsional.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.attachment (array); tiap iterasi key tersebut dipersempit menjadi satu item",
+   "Resolve config.payload menjadi CreateApplicantAttachmentPayload",
+   "Bila documentName ada dan config.allowedFileTypes tidak kosong: ekstensi (lowercase) harus termasuk allowedFileTypes",
+   "Jalankan config.moduleReferences untuk mengisi uploadedByMeta (dibaca dari ctx.attachment.uploadedByMeta)",
+   "INSERT row attachment",
+   "Append semua entity ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateApplicantAttachmentPayload; $satellitePayload.attachment menunjuk ke satu item."
+   },
+   {
+    "key": "allowedFileTypes",
+    "type": "string[]",
+    "required": false,
+    "description": "Daftar ekstensi yang diizinkan (lowercase, tanpa titik), mis. ['pdf','docx']."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Resolve uploadedByMeta via targetPath '$attachment.uploadedByMeta'."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "mediaId",
+    "type": "string",
+    "required": true,
+    "description": "ID media file yang sudah diupload."
+   },
+   {
+    "key": "documentName",
+    "type": "string | null",
+    "required": true,
+    "description": "Nama file (dipakai untuk validasi ekstensi)."
+   },
+   {
+    "key": "uploadedBy",
+    "type": "string | null",
+    "required": true,
+    "description": "ID pengunggah."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.attachment (array, sumber loop)",
+   "ctx.authContext (scope moduleReferences)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateApplicantAttachment', results: ApplicantAttachmentEntity[] } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT process.applicant_attachments (satu per item)"
+  ],
+  "errors": [
+   "BadRequestException \"File type '<ext>' is not allowed for this stage\"",
+   "BadRequestException type 'MODULE_REFERENCE_UNKNOWN_MODULE' / 'MODULE_REFERENCE_NOT_FOUND'"
+  ],
+  "usedInWorkflows": [
+   "CREATE_SCHEDULE_INTERVIEW",
+   "CREATE_SCHEDULE_INTERVIEW_SINGLE"
+  ],
+  "example": {
+   "name": "CreateApplicantAttachment",
+   "config": {
+    "payload": {
+     "mediaId": "$satellitePayload.attachment.mediaId",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "uploadedBy": "$authContext.actorId",
+     "documentName": "$satellitePayload.attachment.documentName",
+     "vacancyStageId": "$vacancyStage.id",
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/create-schedule-interview.config.ts",
+  "notes": [
+   "Bila request tidak mengirim satellitePayload.attachment, step ini no-op (results = []) — aman dipasang tanpa kondisi.",
+   "Validasi ekstensi dilewati bila documentName kosong."
+  ]
+ },
+ {
+  "name": "CreateApplicantEmail",
+  "category": "Activity & Email",
+  "file": "process/workflow/executors/create-applicant-email.pipeline-executor.ts",
+  "summary": "Menyimpan riwayat email applicant (tidak mengirim email) untuk setiap item di ctx.satellitePayload.applicantEmail, opsional dengan substitusi placeholder {{key}} master variable.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.applicantEmail (array); tiap iterasi dipersempit menjadi satu item",
+   "Resolve config.payload menjadi CreateApplicantEmailPayload",
+   "Jalankan config.moduleReferences untuk sentByMeta (dibaca dari ctx.applicantEmail.sentByMeta)",
+   "Bila config.resolveVariables === true dan payload.variables + applicantBucketId ada: ambil metadata variable via gRPC master (getVariableByKeys), bangun konteks variable applicant, resolve path (decrypt bila isEncryptedPath), substitusi {{key}} di subject & content",
+   "INSERT row riwayat email",
+   "Append entity ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateApplicantEmailPayload; $satellitePayload.applicantEmail menunjuk ke satu item."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Resolve sentByMeta via targetPath '$applicantEmail.sentByMeta'."
+   },
+   {
+    "key": "resolveVariables",
+    "type": "boolean",
+    "required": false,
+    "description": "Hanya aktif bila tepat true; substitusi placeholder {{key}} pada subject/content berdasarkan payload.variables."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "recipient",
+    "type": "string | null",
+    "required": true,
+    "description": "Alamat penerima."
+   },
+   {
+    "key": "subject",
+    "type": "string | null",
+    "required": true,
+    "description": "Subject email."
+   },
+   {
+    "key": "emailTemplateId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID template email."
+   },
+   {
+    "key": "templateStructureId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID struktur header/footer."
+   },
+   {
+    "key": "payload",
+    "type": "Record<string, unknown> | null",
+    "required": true,
+    "description": "Variabel template yang dikirim."
+   },
+   {
+    "key": "content",
+    "type": "string | null",
+    "required": true,
+    "description": "Body HTML sebagaimana diterima penerima."
+   },
+   {
+    "key": "attachments",
+    "type": "unknown[] | null",
+    "required": true,
+    "description": "Lampiran."
+   },
+   {
+    "key": "sentBy",
+    "type": "string | null",
+    "required": true,
+    "description": "ID pengirim."
+   },
+   {
+    "key": "variables",
+    "type": "string[] | null",
+    "required": false,
+    "description": "Key master variable (mis. 'Candidate_FirstName') untuk placeholder {{key}}; hanya dibaca bila resolveVariables === true."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.applicantEmail (array, sumber loop)",
+   "ctx.authContext (scope moduleReferences)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateApplicantEmail', results: ApplicantEmailEntity[] } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT process.applicant_emails (satu per item)",
+   "Panggilan gRPC master variable (getVariableByKeys) + query konteks applicant bila resolveVariables === true"
+  ],
+  "errors": [
+   "BadRequestException type 'MODULE_REFERENCE_UNKNOWN_MODULE' / 'MODULE_REFERENCE_NOT_FOUND'",
+   "Error gRPC master variable / ApplicantVariableContextService dipropagasi (kegagalan resolve per-variable di-catch dan placeholder dibiarkan)"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreateApplicantEmail",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "vacancyStageId": "$vacancyStage.id",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "recipient": "$satellitePayload.applicantEmail.recipient",
+     "subject": "$satellitePayload.applicantEmail.subject",
+     "emailTemplateId": "$satellitePayload.applicantEmail.emailTemplateId",
+     "templateStructureId": "$satellitePayload.applicantEmail.templateStructureId",
+     "payload": "$satellitePayload.applicantEmail.payload",
+     "content": "$satellitePayload.applicantEmail.content",
+     "attachments": "$satellitePayload.applicantEmail.attachments",
+     "sentBy": "$authContext.actorId",
+     "variables": "$satellitePayload.applicantEmail.variables"
+    },
+    "resolveVariables": true
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Sengaja memakai key satellitePayload.applicantEmail, BUKAN satellitePayload.email (yang dipakai/ditimpa SendEmail & Transformer). Isi applicantEmail dari request atau step Transformer.",
+   "Executor ini hanya mencatat riwayat; tidak mengirim email. Letakkan setelah (atau tanpa) SendEmail.",
+   "Tanggal ISO hasil resolve variable diformat menjadi 'YYYY-DD-MM' (sesuai kode toVariableValue: tahun-hari-bulan) — perhatikan urutannya.",
+   "Bila applicantEmail kosong/tidak ada, step no-op."
+  ]
+ },
+ {
+  "name": "CreateApplicantScore",
+  "category": "Score & Attachment",
+  "file": "process/workflow/executors/create-applicant-score.pipeline-executor.ts",
+  "summary": "Membuat row skor applicant untuk setiap item di ctx.satellitePayload.score, dengan validasi dan konversi qualitative score opsional.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.score (array); tiap iterasi dipersempit menjadi satu item",
+   "Resolve config.payload menjadi CreateApplicantScorePayload",
+   "Bila payload.qualitativeScore ada dan config.qualitativeScore tidak kosong: nilai harus ada di daftar value",
+   "Jalankan config.moduleReferences untuk scoredByMeta (dibaca dari ctx.score.scoredByMeta)",
+   "Skor = payload.score; bila null, diambil dari score milik opsi qualitativeScore yang cocok",
+   "INSERT row skor dan append ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateApplicantScorePayload; $satellitePayload.score menunjuk ke satu item."
+   },
+   {
+    "key": "qualitativeScore",
+    "type": "Array<{ value: string; score: number }>",
+    "required": false,
+    "description": "Literal. Daftar label qualitative yang valid beserta nilai numeriknya."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Resolve scoredByMeta via targetPath '$score.scoredByMeta'."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "score",
+    "type": "number | null",
+    "required": true,
+    "description": "Skor numerik; null = turunkan dari qualitativeScore."
+   },
+   {
+    "key": "qualitativeScore",
+    "type": "string | null",
+    "required": true,
+    "description": "Label qualitative (mis. 'GOOD')."
+   },
+   {
+    "key": "remarks",
+    "type": "string | null",
+    "required": true,
+    "description": "Catatan."
+   },
+   {
+    "key": "scoredBy",
+    "type": "string | null",
+    "required": true,
+    "description": "ID penilai."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.score (array, sumber loop)",
+   "ctx.authContext (scope moduleReferences)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateApplicantScore', results: ApplicantScoreEntity[] } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT process.applicant_scores (satu per item)"
+  ],
+  "errors": [
+   "BadRequestException \"qualitativeScore '<value>' is not configured for this stage\"",
+   "BadRequestException type 'MODULE_REFERENCE_UNKNOWN_MODULE' / 'MODULE_REFERENCE_NOT_FOUND'"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreateApplicantScore",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "vacancyStageId": "$vacancyStage.id",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "score": "$satellitePayload.score.score",
+     "qualitativeScore": "$satellitePayload.score.qualitativeScore",
+     "remarks": "$satellitePayload.score.remarks",
+     "scoredBy": "$authContext.actorId"
+    },
+    "qualitativeScore": [
+     {
+      "value": "GOOD",
+      "score": 80
+     },
+     {
+      "value": "BAD",
+      "score": 40
+     }
+    ]
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Bila satellitePayload.score kosong/tidak ada, step no-op.",
+   "Validasi qualitativeScore hanya berjalan bila keduanya (payload dan config) terisi."
+  ]
+ },
+ {
+  "name": "CreateApplicantTransfer",
+  "category": "Move Vacancy & Transfer",
+  "file": "process/workflow/executors/create-applicant-transfer.pipeline-executor.ts",
+  "summary": "Membuat employee di HRIS via gRPC CreateEmployee dari data kandidat/vacancy, lalu menyimpan row applicant transfer berisi employeeId hasilnya.",
+  "behavior": [
+   "Single call (bukan loop); resolve config.payload menjadi CreateApplicantTransferPayload",
+   "Ambil candidateId dari ctx.bucket.candidateId (wajib), groupId dari ctx.bucket.groupId, tenantId dari ctx.authContext.tenantId",
+   "Ambil detail kandidat (GetCandidateDetailService) dan susun request CreateEmployee (personalInformation dari kandidat, employmentInformation dari ctx.vacancy: employmentStatus.id, organization.id, jobPosition.id; mappedOnboardingItems = [])",
+   "Panggil HRIS gRPC createEmployee; wajib success + employeeId",
+   "Jalankan config.moduleReferences untuk transferredByMeta (ctx.transfer.transferredByMeta)",
+   "INSERT row transfer (joinDate dikonversi ke Date bila ada)",
+   "Kembalikan ctx hasil moduleReferences + append ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateApplicantTransferPayload."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Resolve transferredByMeta via targetPath '$transfer.transferredByMeta'."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "joinDate",
+    "type": "string | null",
+    "required": true,
+    "description": "Tanggal join (string tanggal, di-parse new Date)."
+   },
+   {
+    "key": "transferredBy",
+    "type": "string | null",
+    "required": true,
+    "description": "ID yang melakukan transfer."
+   }
+  ],
+  "contextReads": [
+   "ctx.bucket.candidateId",
+   "ctx.bucket.groupId",
+   "ctx.vacancy.employmentStatus.id / organization.id / jobPosition.id",
+   "ctx.authContext.tenantId",
+   "ctx.pipelineResult"
+  ],
+  "output": "Mengembalikan ctx hasil ResolveModuleReferences (ctx.entity di-clone; key targetPath moduleReferences ikut tertulis, mis. ctx.transfer.transferredByMeta) dan menambahkan { name: 'CreateApplicantTransfer', results: ApplicantTransferEntity } (objek tunggal, bukan array) ke ctx.pipelineResult.",
+  "sideEffects": [
+   "gRPC HRIS createEmployee (membuat data employee di HRIS)",
+   "INSERT process.applicant_transfer"
+  ],
+  "errors": [
+   "BadRequestException 'No candidateId on ctx.bucket to transfer'",
+   "BadRequestException <errorMessage dari HRIS> atau 'HRIS employee creation failed' bila response gagal / tanpa employeeId",
+   "BadRequestException type 'MODULE_REFERENCE_UNKNOWN_MODULE' / 'MODULE_REFERENCE_NOT_FOUND'",
+   "Error dari GetCandidateDetailService (mis. kandidat tidak ditemukan) dipropagasi"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreateApplicantTransfer",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "vacancyStageId": "$vacancyStage.id",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "joinDate": "$satellitePayload.transfer.joinDate",
+     "transferredBy": "$authContext.actorId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "results berupa objek tunggal, jadi akses dengan $pipelineResult[?name=='CreateApplicantTransfer'] | [0].results.employeeId (bukan results[0]).",
+   "employeeId tidak bisa disuplai lewat payload; selalu dari HRIS.",
+   "Employee di HRIS dibuat SEBELUM insert row transfer dan tidak ada rollback bila insert gagal.",
+   "Membutuhkan ctx.bucket dan ctx.vacancy sudah terhidrasi (oleh context satellite workflow)."
+  ]
+ },
+ {
+  "name": "CreateCandidateMetaSnapshot",
+  "category": "Candidate Data",
+  "file": "process/workflow/executors/create-candidate-meta-snapshot.pipeline-executor.ts",
+  "summary": "Mengambil data kandidat beserta relasi yang dipilih, memetakan menjadi snapshot, lalu menyimpannya sebagai candidate meta (version 1) untuk applicant bucket saat ini.",
+  "behavior": [
+   "Resolve SELURUH config (bukan config.payload) menjadi { candidateId, relations }",
+   "Ambil kandidat aktif dengan relasi dinamis sesuai relations",
+   "Cari tenant pool kandidat dengan tenantId = ctx.bucket.tenantId (tidak terhapus) untuk otherData",
+   "Petakan entity kandidat menjadi snapshot (mapCandidateEntitySnapshot dengan ctx.bucket.tenantId & ctx.bucket.groupId) + otherData",
+   "Simpan snapshot { applicantBucketId: ctx.bucket.id, data, version: 1 }",
+   "Append ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "candidateId",
+    "type": "string (template jmespath)",
+    "required": true,
+    "description": "ID kandidat, mis. '$candidate.id'."
+   },
+   {
+    "key": "relations",
+    "type": "string[]",
+    "required": true,
+    "description": "Relasi TypeORM CandidateEntity yang di-load, mis. 'educations', 'experiences', 'tenantPools', 'tenantPools.candidateCustomFields'."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.bucket.id",
+   "ctx.bucket.tenantId",
+   "ctx.bucket.groupId",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateCandidateMetaSnapshot', results: ApplicantCandidateMetaEntity } (objek tunggal) ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT applicant.applicant_candidate_meta (version = 1)"
+  ],
+  "errors": [
+   "NotFoundException \"Candidate '<id>' not found\"",
+   "Error TypeORM bila nama relasi di relations tidak valid",
+   "TypeError bila ctx.bucket tidak ada"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreateCandidateMetaSnapshot",
+   "config": {
+    "candidateId": "$candidate.id",
+    "relations": [
+     "educations",
+     "experiences",
+     "identities",
+     "addresses",
+     "files",
+     "cvMedia",
+     "videoResumeMedia",
+     "profilePhotoMedia",
+     "tenantPools",
+     "tenantPools.candidateCustomFields"
+    ]
+   }
+  },
+  "exampleSource": "process/workflow/executors/__test__/create-candidate-meta-snapshot.pipeline-executor.spec.ts",
+  "notes": [
+   "Config TIDAK memakai wrapper payload.",
+   "Sertakan 'tenantPools' di relations agar otherData terisi; tanpa itu otherData = [] dan data tenant-pool di snapshot kosong.",
+   "Selalu menyimpan dengan version 1 dan tanpa id (save = insert baru); belum diverifikasi apakah ada unique constraint per (applicantBucketId, version) — memanggilnya dua kali untuk bucket yang sama bisa gagal atau menghasilkan duplikat. Untuk memperbarui snapshot, gunakan UpdateCandidateMetaSnapshot.",
+   "Snapshot berisi field terenkripsi (emailEncrypted, phoneEncrypted, dateOfBirthEncrypted) apa adanya."
+  ]
+ },
+ {
+  "name": "CreateForm",
+  "category": "Form",
+  "file": "process/workflow/executors/create-form.pipeline-executor.ts",
+  "summary": "Membuat link form (via gRPC Form Service) dan row form submission PENDING untuk setiap respondent, per item di ctx.satellitePayload.formSubmission.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.formSubmission (array); tiap iterasi dipersempit menjadi satu item",
+   "Resolve config.payload menjadi CreateFormPayload; expiredInDays = config.formExpirationDays ?? 7",
+   "Untuk setiap respondent di payload.respondents: GUEST tanpa respondentId diberi uuidv7",
+   "Bangun respondentMeta: GUEST dari data input (email dienkripsi); EMPLOYEE via adapter module reference EMPLOYEE (HRIS, email dienkripsi); selain itu (CANDIDATE) via GetCandidateDetailStableService",
+   "INSERT row form submission berstatus PENDING lebih dulu (id-nya dipakai sebagai identifierId gRPC)",
+   "Panggil gRPC generateFormLink (notifyAfterSubmit = true)",
+   "Bila respondent.candidateToken ada, tambahkan query param token ke formLink",
+   "UPDATE row submission dengan formLink & expiredAt",
+   "Gabungkan (flatten) semua hasil per respondent ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateFormPayload."
+   },
+   {
+    "key": "formExpirationDays",
+    "type": "number | null",
+    "required": false,
+    "description": "Masa berlaku link form dalam hari; default 7."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "ID tenant untuk gRPC Form Service."
+   },
+   {
+    "key": "respondents",
+    "type": "FormRespondentInput[]",
+    "required": true,
+    "description": "Daftar respondent: { respondentType: 'CANDIDATE'|'INTERVIEWER'|'GUEST', grpcRespondentType: 'CANDIDATE'|'EMPLOYEE'|'GUEST', respondentId, respondentName?, respondentEmail?, respondentImage?, formTemplateId, emailTemplateId?, candidateToken? }."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.formSubmission (array, sumber loop)",
+   "ctx.authContext.tenantId/groupId/actorId (scope adapter EMPLOYEE)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateForm', results: FormRespondentResult[] } ke ctx.pipelineResult; tiap elemen { id, submissionId, respondentType, respondentId, respondentName, respondentEmail, formLink, expiredAt } (hasil semua item formSubmission digabung flat).",
+  "sideEffects": [
+   "INSERT process.applicant_form_submission (status PENDING) per respondent, lalu UPDATE formLink & expiredAt",
+   "gRPC Form Service generateFormLink",
+   "gRPC HRIS (adapter EMPLOYEE) untuk respondent EMPLOYEE; query kandidat untuk respondent CANDIDATE",
+   "Tidak mengirim email"
+  ],
+  "errors": [
+   "NotFoundException dari GetCandidateDetailStableService bila kandidat respondent tidak ditemukan",
+   "Error gRPC Form Service / HRIS dipropagasi (row submission PENDING yang sudah dibuat tidak di-rollback)",
+   "TypeError dari new URL() bila formLink hasil gRPC bukan URL valid saat candidateToken diisi"
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW"
+  ],
+  "example": {
+   "name": "CreateForm",
+   "config": {
+    "payload": {
+     "tenantId": "$authContext.tenantId",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "respondents": [
+      {
+       "respondentId": "$candidate.id",
+       "candidateToken": "$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].token",
+       "formTemplateId": "$vacancyStage.formTemplateId",
+       "respondentName": "$candidate.name",
+       "respondentType": "CANDIDATE",
+       "respondentEmail": "$candidate.emailEncrypted",
+       "grpcRespondentType": "CANDIDATE"
+      }
+     ],
+     "vacancyStageId": "$vacancyStage.id",
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId"
+    },
+    "formExpirationDays": 7
+   }
+  },
+  "exampleSource": "process/workflow/config/form-submission/send-form.config.ts",
+  "notes": [
+   "Executor tipe loop: WAJIB ada ctx.satellitePayload.formSubmission berupa array. Config default menyiapkannya dengan Transformer { outputKey: '$satellitePayload.formSubmission', transform: [{}] } sebelum CreateForm — tanpa itu step no-op.",
+   "respondents bisa ditulis literal di payload (SEND_FORM) atau disiapkan dulu ke $satellitePayload.respondents lewat Transformer (CREATE_SCHEDULE_INTERVIEW).",
+   "Ambil hasil per tipe: $pipelineResult[?name=='CreateForm'].results[] | [?respondentType=='CANDIDATE'] | [0].formLink.",
+   "Pengiriman email form dilakukan step SendEmail terpisah."
+  ]
+ },
+ {
+  "name": "CreateInterviewSchedule",
+  "category": "Interview",
+  "file": "process/workflow/executors/create-interview-schedule.pipeline-executor.ts",
+  "summary": "Membuat jadwal interview per item di ctx.satellitePayload.interview; untuk interview ONLINE Google Meet/Zoho otomatis membuat event kalender + meeting link via gRPC.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.interview (array); tiap iterasi dipersempit menjadi satu item",
+   "Resolve config.payload menjadi CreateInterviewSchedulePayload",
+   "Tentukan email kandidat: decrypt candidateEmailEncrypted (bila gagal decrypt, dipakai apa adanya), fallback candidateEmail",
+   "location hanya disimpan bila interviewType = OFFLINE",
+   "Bila ONLINE + GOOGLE_MEET/ZOHO_MEETING: panggil CalendarGrpcService.createEvent (timezone 'UTC', guests = kandidat + interviewer, interview_id = applicantProcessId; meeting_provider 'zoho' untuk Zoho) lalu ambil meet_link & event_id (+ zoho_meeting_key/start_link ke interviewMeta)",
+   "Selain itu meetingLink = payload.meetingLink (CUSTOM)",
+   "INSERT row interview dalam transaksi",
+   "Append entity interview ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateInterviewSchedulePayload; $satellitePayload.interview menunjuk ke satu item."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "candidateEmail",
+    "type": "string | null",
+    "required": true,
+    "description": "Email kandidat plaintext (fallback)."
+   },
+   {
+    "key": "candidateEmailEncrypted",
+    "type": "string | null",
+    "required": true,
+    "description": "Email kandidat terenkripsi (diutamakan, akan di-decrypt)."
+   },
+   {
+    "key": "candidateName",
+    "type": "string | null",
+    "required": true,
+    "description": "Nama kandidat (untuk judul event)."
+   },
+   {
+    "key": "stageName",
+    "type": "string",
+    "required": true,
+    "description": "Nama stage (judul event)."
+   },
+   {
+    "key": "vacancyName",
+    "type": "string",
+    "required": true,
+    "description": "Nama vacancy (judul event)."
+   },
+   {
+    "key": "interviewType",
+    "type": "InterviewType ('ONLINE' | 'OFFLINE')",
+    "required": true,
+    "description": "Tipe interview."
+   },
+   {
+    "key": "meetingLinkType",
+    "type": "MeetingLinkType | null ('GOOGLE_MEET' | 'ZOHO_MEETING' | 'CUSTOM')",
+    "required": true,
+    "description": "Provider meeting link."
+   },
+   {
+    "key": "meetingLink",
+    "type": "string | null",
+    "required": true,
+    "description": "Link manual (dipakai bila bukan Google Meet/Zoho)."
+   },
+   {
+    "key": "location",
+    "type": "string | null",
+    "required": true,
+    "description": "Lokasi (hanya untuk OFFLINE)."
+   },
+   {
+    "key": "interviewDate",
+    "type": "string",
+    "required": true,
+    "description": "Tanggal 'YYYY-MM-DD' untuk event kalender."
+   },
+   {
+    "key": "startTime",
+    "type": "string",
+    "required": true,
+    "description": "Jam mulai 'HH:mm'."
+   },
+   {
+    "key": "endTime",
+    "type": "string",
+    "required": true,
+    "description": "Jam selesai 'HH:mm'."
+   },
+   {
+    "key": "interviewers",
+    "type": "Array<{ employeeId: string; name: string; email: string }>",
+    "required": true,
+    "description": "Daftar interviewer."
+   },
+   {
+    "key": "scheduledStart",
+    "type": "Date",
+    "required": true,
+    "description": "Waktu mulai yang disimpan ke DB."
+   },
+   {
+    "key": "scheduledEnd",
+    "type": "Date",
+    "required": true,
+    "description": "Waktu selesai yang disimpan ke DB."
+   },
+   {
+    "key": "isSentToCandidate",
+    "type": "boolean",
+    "required": true,
+    "description": "Flag dikirim ke kandidat."
+   },
+   {
+    "key": "attachment",
+    "type": "unknown",
+    "required": true,
+    "description": "Data attachment (diteruskan ke entity; tidak tercantum di signature repo createInterview, sehingga belum dipastikan tersimpan)."
+   },
+   {
+    "key": "createdBy",
+    "type": "string | null",
+    "required": true,
+    "description": "ID pembuat."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.interview (array, sumber loop)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateInterviewSchedule', results: ApplicantInterviewEntity[] } ke ctx.pipelineResult. ctx.entity yang di-set di service TIDAK diteruskan (executor hanya mengambil interview).",
+  "sideEffects": [
+   "INSERT process.applicant_interview",
+   "gRPC CalendarGrpcService.createEvent (membuat event Google Calendar/Meet atau Zoho Meeting, mengundang kandidat & interviewer) untuk ONLINE + GOOGLE_MEET/ZOHO_MEETING",
+   "Tidak mengirim email"
+  ],
+  "errors": [
+   "Error gRPC calendar dipropagasi (tidak di-catch)",
+   "Error DB bila field wajib kosong — tidak ada validasi eksplisit di service",
+   "Kegagalan decrypt candidateEmailEncrypted TIDAK melempar error (hanya warning)"
+  ],
+  "usedInWorkflows": [
+   "CREATE_SCHEDULE_INTERVIEW",
+   "CREATE_SCHEDULE_INTERVIEW_SINGLE"
+  ],
+  "example": {
+   "name": "CreateInterviewSchedule",
+   "config": {
+    "payload": {
+     "endTime": "$satellitePayload.interview.endTime",
+     "location": "$satellitePayload.interview.location",
+     "createdBy": "$authContext.actorId",
+     "stageName": "$vacancyStage.stageName",
+     "stageType": "$vacancyStage.stageType",
+     "startTime": "$satellitePayload.interview.startTime",
+     "identifier": "$identifier",
+     "meetingLink": "$satellitePayload.interview.meetingLink",
+     "vacancyName": "$vacancy.name",
+     "interviewers": "$satellitePayload.interview.interviewers",
+     "scheduledEnd": "$join('', [satellitePayload.interview.interviewDate, 'T', satellitePayload.interview.endTime, ':00'])",
+     "candidateName": "$candidate.name",
+     "interviewDate": "$satellitePayload.interview.interviewDate",
+     "interviewType": "$satellitePayload.interview.interviewType",
+     "candidateEmail": "$candidate.email",
+     "scheduledStart": "$join('', [satellitePayload.interview.interviewDate, 'T', satellitePayload.interview.startTime, ':00'])",
+     "vacancyStageId": "$vacancyStage.id",
+     "meetingLinkType": "$satellitePayload.interview.meetingLinkType",
+     "applicantBucketId": "$bucket.id",
+     "isSentToCandidate": "$satellitePayload.interview.isSendCandidate",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "candidateEmailEncrypted": "$candidate.emailEncrypted"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/create-schedule-interview.config.ts",
+  "notes": [
+   "Di dalam payload pakai $satellitePayload.interview.<field> (item tunggal). Setelah step selesai satellitePayload.interview kembali menjadi array, sehingga step berikutnya memakai $satellitePayload.interview[0].<field>.",
+   "Event kalender dikirim dengan timezone 'UTC' dari interviewDate+startTime/endTime; scheduledStart/scheduledEnd yang disimpan berasal dari payload (biasanya join string tanpa timezone).",
+   "Ambil link/lokasi: $pipelineResult[?name=='CreateInterviewSchedule']|[0].results[0].meetingLink.",
+   "Status applicant process tidak diubah; config default menambahkan SetStatusApplicantProcess { value: 'SCHEDULED' }.",
+   "Config default juga menuliskan key 'service' di samping 'name'; registry executor hanya membaca 'name'."
+  ]
+ },
+ {
+  "name": "CreateMoveVacancy",
+  "category": "Move Vacancy & Transfer",
+  "file": "process/workflow/executors/create-move-vacancy.pipeline-executor.ts",
+  "summary": "Membuat proposal pindah vacancy berstatus WAITING untuk applicant bucket ke vacancy stage tujuan, per item di ctx.satellitePayload.moveVacancy.",
+  "behavior": [
+   "Loop setiap item di ctx.satellitePayload.moveVacancy (array); tiap iterasi dipersempit menjadi satu item",
+   "Resolve config.payload menjadi { applicantBucketId, vacancyStageId }",
+   "Dalam transaksi read-only: validasi source bucket (tenant = ctx.authContext.tenantId), vacancy stage tujuan, dan vacancy tujuan (eligible & applicable)",
+   "INSERT row move vacancy status WAITING (sourceVacancyId, targetVacancyId, targetVacancyStageId, invitedBy = ctx.authContext.actorId)",
+   "Kembalikan entity + properti targetVacancy, append ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateMoveVacancyPayload; $satellitePayload.moveVacancy menunjuk ke satu item."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket sumber."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string",
+    "required": true,
+    "description": "ID vacancy stage tujuan (vacancy tujuan diturunkan dari stage ini)."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.moveVacancy (array, sumber loop)",
+   "ctx.authContext.tenantId",
+   "ctx.authContext.actorId",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan { name: 'CreateMoveVacancy', results: Array<MoveVacancyEntity & { targetVacancy: VacancyEntity }> } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT process.applicant_move_vacancy (status WAITING)",
+   "Tidak auto-approve dan tidak mengirim email"
+  ],
+  "errors": [
+   "NotFoundException \"Applicant bucket '<id>' not found\"",
+   "NotFoundException \"Vacancy stage '<id>' not found\"",
+   "HttpException type 'ERR_VACANCY_NOT_ELIGIBLE' bila vacancy tujuan tidak valid / tidak bisa dilamar"
+  ],
+  "usedInWorkflows": [
+   "MOVE_TO_VACANCY"
+  ],
+  "example": {
+   "name": "CreateMoveVacancy",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "vacancyStageId": "$satellitePayload.moveVacancy.vacancyStageId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO (bentuk satellitePayload dari applicant/applicant-hub/handlers/move-to-vacancy-bulk-action.handler.ts)",
+  "notes": [
+   "Bulk action BULK_MOVE_TO_VACANCY memanggil workflow MOVE_TO_VACANCY per applicant dengan satellitePayload { moveVacancy: [{ vacancyStageId }] }; config default MOVE_TO_VACANCY tidak ditemukan di process/workflow/config (kemungkinan hanya di DB).",
+   "Tidak ada cek duplikasi proposal WAITING; cek duplikasi lamaran baru terjadi saat ApproveMoveVacancy.",
+   "Kirim notifikasi ke kandidat dengan step SendEmail terpisah; data vacancy tujuan tersedia di results[].targetVacancy."
+  ]
+ },
+ {
+  "name": "CreateOfferingLetterReminder",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/create-offering-letter-reminder-stable.pipeline-executor.ts",
+  "summary": "Mengambil offering letter aktif suatu applicant process lalu menyiapkan payload email reminder (URL careersite dengan token) ke ctx.content dan ctx.satellitePayload.email, tanpa menulis ke DB.",
+  "behavior": [
+   "Resolve config.payload menjadi { applicantProcessId }",
+   "Ambil offering (deletedAt null) berdasarkan applicantProcessId",
+   "Susun offeringUrl = `${ctx.tenant.careersiteUrl}/offering?token=${candidateToken}&offeringId=${id}&applicantBucketId=${applicantBucketId}`",
+   "Susun emailPayload { offeringLetter_candidateName, offeringLetter_urlLink, offeringLetter_vacancyName, offeringLetter_companyName, offeringLetter_offerDeadline }",
+   "Tulis ctx.content = emailPayload dan ctx.satellitePayload.email = [{ email, emailTemplateId, subject, payload }]",
+   "Append ringkasan offering ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreateOfferingLetterReminderPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process pemilik offering letter."
+   }
+  ],
+  "contextReads": [
+   "ctx.tenant.careersiteUrl dan ctx.tenant.name (diisi step GetTenantData)",
+   "ctx.email.recipient, ctx.email.templateId, ctx.email.subject, ctx.email.payload.candidateName, ctx.email.payload.vacancyName (diisi Transformer beforeExecute tenant config OFFERING_LETTER untuk event SEND_OFFERING_LETTER_REMINDER)",
+   "ctx.satellitePayload",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menulis ctx.content = { offeringLetter_candidateName, offeringLetter_urlLink, offeringLetter_vacancyName, offeringLetter_companyName, offeringLetter_offerDeadline }; ctx.satellitePayload.email = [{ email, emailTemplateId, subject, payload: <emailPayload> }] (menimpa nilai sebelumnya); dan menambahkan { name: 'CreateOfferingLetterReminder', results: [{ id, version, offeringStatus, tokenExpiredAt }] } ke ctx.pipelineResult.",
+  "sideEffects": [
+   "Tidak ada penulisan DB; hanya SELECT process.applicant_offerings",
+   "Tidak mengirim email sendiri (dikirim step SendEmail berikutnya)"
+  ],
+  "errors": [
+   "OfferingNotFoundException (404, type 'ERR_OFFERING_NOT_FOUND') bila offering tidak ada",
+   "TypeError bila ctx.tenant atau ctx.email belum ada (tidak ada guard)"
+  ],
+  "usedInWorkflows": [
+   "SEND_OFFERING_LETTER_REMINDER"
+  ],
+  "example": {
+   "name": "CreateOfferingLetterReminder",
+   "config": {
+    "payload": {
+     "applicantProcessId": "$bucket.currentProcess.processId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/send-offering-letter-reminder.config.ts",
+  "notes": [
+   "Wajib didahului GetTenantData (untuk ctx.tenant) dan tenant config beforeExecute yang mengisi ctx.email (Transformer outputKey '$email').",
+   "candidateToken & tokenExpiredAt yang dipakai adalah nilai yang sudah ada di row offering — executor ini tidak membuat/memperpanjang token.",
+   "Config default memformat ctx.content.offeringLetter_offerDeadline dengan FormatDate lalu SendEmail membaca $satellitePayload.email.* (SendEmail berjalan per item array email).",
+   "Repository findByApplicantProcessId memakai findOne tanpa order; bila ada beberapa versi offering, row yang terambil belum tentu versi terbaru."
+  ]
+ },
+ {
+  "name": "CreatePreOnboarding",
+  "category": "Pre-Onboarding",
+  "file": "process/workflow/executors/create-pre-onboarding.pipeline-executor.ts",
+  "summary": "Membuat satu row pre-onboarding berstatus WAITING_FOR_CANDIDATE dan mensnapshot item template onboarding (dokumen/pertanyaan form) dari Organization Service.",
+  "behavior": [
+   "Single call (bukan loop); resolve config.payload menjadi CreatePreOnboardingPayload",
+   "Bentuk entity dengan status WAITING_FOR_CANDIDATE dan set ctx.entity = entity",
+   "Bila onboardingTemplateId ada: ambil item template via gRPC OrganizationGrpcService.getTemplateById",
+   "Dalam transaksi: INSERT pre-onboarding, lalu untuk tiap item template tulis snapshot dokumen / pertanyaan form (+ opsi)",
+   "Kembalikan ctx (dengan ctx.entity baru) dan append ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi CreatePreOnboardingPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantBucketId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant bucket."
+   },
+   {
+    "key": "applicantProcessId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID applicant process."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID vacancy stage."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": true,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": true,
+    "description": "Identifier eksekusi."
+   },
+   {
+    "key": "onboardingTemplateId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID template onboarding; null = tanpa item snapshot."
+   },
+   {
+    "key": "createdBy",
+    "type": "string | null",
+    "required": true,
+    "description": "Ada di DTO tetapi TIDAK dipakai/disimpan oleh service."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.entity DIGANTI seluruhnya dengan { applicantBucketId, applicantProcessId, vacancyStageId, stageType, identifier, onboardingTemplateId, status: 'WAITING_FOR_CANDIDATE' }; ditambah { name: 'CreatePreOnboarding', results: PreOnboardingEntity } (objek tunggal) ke ctx.pipelineResult.",
+  "sideEffects": [
+   "INSERT process.pre_onboardings",
+   "INSERT process.pre_onboarding_document_snapshots / process.pre_onboarding_form_question_snapshots / process.pre_onboarding_form_option_snapshots sesuai item template (tanpa row pre_onboarding_items pada jalur stable)",
+   "gRPC Organization getTemplateById",
+   "Tidak mengirim email, tidak membuat token"
+  ],
+  "errors": [
+   "Error gRPC Organization dipropagasi",
+   "Error DB bila applicantBucketId kosong — tidak ada validasi eksplisit"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "CreatePreOnboarding",
+   "config": {
+    "payload": {
+     "applicantBucketId": "$bucket.id",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "vacancyStageId": "$vacancyStage.id",
+     "stageType": "$vacancyStage.stageType",
+     "identifier": "$identifier",
+     "onboardingTemplateId": "$satellitePayload.preOnboarding.onboardingTemplateId",
+     "createdBy": "$authContext.actorId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Tidak ada guard duplikasi kandidat/pre-onboarding: memanggilnya dua kali membuat dua row.",
+   "Karena ctx.entity ditimpa, nilai ctx.entity dari step sebelumnya hilang untuk step berikutnya.",
+   "results objek tunggal: akses $pipelineResult[?name=='CreatePreOnboarding'] | [0].results.id.",
+   "Tidak ditemukan contoh config nyata di repo."
+  ]
+ },
+ {
+  "name": "FilterArrayByMatch",
+  "category": "Utility",
+  "file": "process/workflow/executors/filter-array-by-match.pipeline-executor.ts",
+  "summary": "Menyaring array di ctx menjadi item-item yang field-nya sama dengan nilai tertentu dari ctx (mis. bucket.id saat ini), lalu menulis hasilnya ke path output.",
+  "behavior": [
+   "Resolve config.source (jmespath) — harus array",
+   "Resolve config.matchValue terhadap ctx",
+   "Simpan SEMUA item yang item[matchField] === matchValue (strict equality)",
+   "Bila tidak ada yang cocok, lempar error",
+   "Tulis array hasil ke config.outputKey (setContextValue) pada salinan ctx (ctx.entity di-clone shallow)",
+   "Append hasil ke ctx.pipelineResult"
+  ],
+  "configFields": [
+   {
+    "key": "source",
+    "type": "string ($-path)",
+    "required": true,
+    "description": "Path array yang disaring, mis. '$satellitePayload.interview'."
+   },
+   {
+    "key": "matchField",
+    "type": "string",
+    "required": true,
+    "description": "Nama field literal pada tiap item yang dibandingkan."
+   },
+   {
+    "key": "matchValue",
+    "type": "string ($-path)",
+    "required": true,
+    "description": "Ekspresi nilai pembanding, mis. '$bucket.id'."
+   },
+   {
+    "key": "outputKey",
+    "type": "string ($-path)",
+    "required": true,
+    "description": "Lokasi tulis hasil (array), mis. '$satellitePayload.interview'. Tidak boleh mengandung '[]'."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "Path pada config.source dan config.matchValue",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menulis array item yang cocok ke path config.outputKey (mis. ctx.satellitePayload.interview) dan menambahkan { name: 'FilterArrayByMatch', results: <matches> } ke ctx.pipelineResult.",
+  "sideEffects": [],
+  "errors": [
+   "BadRequestException type 'PIPELINE_FILTER_ARRAY_BY_MATCH_SOURCE_NOT_ARRAY' bila source tidak menghasilkan array",
+   "BadRequestException type 'PIPELINE_FILTER_ARRAY_BY_MATCH_NOT_FOUND' bila tidak ada item yang cocok",
+   "BadRequestException type 'MODULE_REFERENCE_TARGET_PATH_INVALID' bila outputKey kosong atau mengandung '[]'"
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "FilterArrayByMatch",
+   "config": {
+    "source": "$satellitePayload.interview",
+    "matchField": "applicantBucketId",
+    "matchValue": "$bucket.id",
+    "outputKey": "$satellitePayload.interview"
+   }
+  },
+  "exampleSource": "disusun dari DTO (nilai mengikuti komentar JSDoc di executor)",
+  "notes": [
+   "Dipakai untuk workflow bulk: satellitePayload yang SAMA diteruskan ke setiap eksekusi per applicantBucketId, jadi array per-applicant perlu dipersempit ke applicant saat ini sebelum step loop (CreateInterviewSchedule, CreateForm, dll).",
+   "Alasan tidak cukup pakai JMESPath: filter [?field==value] tidak bisa merujuk nilai di luar array (mis. bucket.id di root ctx).",
+   "Perbandingan strict (===): tipe harus sama (string vs number tidak cocok).",
+   "Error bila tidak ada match — bungkus dengan andCondition bila array memang opsional.",
+   "outputKey memakai setContextValue: segmen perantara yang bukan objek akan ditimpa {}."
+  ]
+ },
+ {
+  "name": "GenerateCandidateToken",
+  "category": "Utility",
+  "file": "process/workflow/executors/generate-candidate-token.pipeline-executor.ts",
+  "summary": "Membuat token kandidat (mis. untuk link form / offering letter) via gRPC Auth GenerateCandidateToken, satu token per item di ctx.satellitePayload.candidateToken.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.candidateToken (default []).",
+   "Untuk tiap item: buat itemCtx di mana ctx.satellitePayload.candidateToken diganti menjadi item tunggal tersebut.",
+   "GenerateCandidateTokenStableService me-resolve config.payload terhadap itemCtx (jmespath).",
+   "Memanggil AuthGrpcService.generateCandidateToken({ actor_id, tenant_id, token_type, ttl_seconds }).",
+   "Push { token, expiresAt } ke results.",
+   "Append { name: 'GenerateCandidateToken', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Template yang di-resolve per item menjadi GenerateCandidateTokenPayload. Bisa objek literal/template, atau langsung '$satellitePayload.candidateToken' (item yang sedang diproses)."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "actorId",
+    "type": "string",
+    "required": true,
+    "description": "ID kandidat pemilik token (mis. '$candidate.id' atau '$bucket.candidateId')."
+   },
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "Tenant ID, biasanya '$authContext.tenantId'."
+   },
+   {
+    "key": "tokenType",
+    "type": "string",
+    "required": true,
+    "description": "Jenis token, contoh nyata: 'RESPONDENT_FORM', 'OFFERING_LETTER'."
+   },
+   {
+    "key": "ttlSeconds",
+    "type": "number",
+    "required": true,
+    "description": "Masa berlaku token dalam detik (contoh: 604800 = 7 hari)."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.candidateToken",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan entri ke ctx.pipelineResult: { name: 'GenerateCandidateToken', results: Array<{ token: string, expiresAt: string }> } (satu elemen per item). Dibaca dengan \"$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].token\".",
+  "sideEffects": [
+   "Memanggil gRPC Auth GenerateCandidateToken (token dibuat/disimpan di auth service)."
+  ],
+  "errors": [
+   "Error gRPC dari auth service diteruskan apa adanya (tidak ada validasi payload di executor/service)."
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "RESEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW",
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "GenerateCandidateToken",
+   "config": {
+    "payload": {
+     "actorId": "$candidate.id",
+     "tenantId": "$authContext.tenantId",
+     "tokenType": "RESPONDENT_FORM",
+     "ttlSeconds": 604800
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/form-submission/send-form.config.ts",
+  "notes": [
+   "Executor LOOP atas ctx.satellitePayload.candidateToken; jika array kosong/tidak ada, tidak ada token yang dibuat (results []). Karena itu config default menaruh step Transformer { outputKey: '$satellitePayload.candidateToken', transform: [{}] } sebelumnya agar ada tepat 1 iterasi.",
+   "Service sebenarnya menulis ctx.entity.candidateToken/candidateTokenExpiresAt, tetapi executor MEMBUANG ctx hasil service — yang tersedia untuk step berikutnya hanya ctx.pipelineResult. Jangan referensikan $entity.candidateToken.",
+   "Bisa dipasangkan dengan PrepareOfferingLetterToken (yang mengisi satellitePayload.candidateToken) lalu payload: '$satellitePayload.candidateToken'."
+  ]
+ },
+ {
+  "name": "GenerateEmployeeToken",
+  "category": "Utility",
+  "file": "process/workflow/executors/generate-employee-token.pipeline-executor.ts",
+  "summary": "Membuat token employee (mis. interviewer yang mengisi form) via gRPC Auth GenerateEmployeeToken, satu token per item di ctx.satellitePayload.employeeToken.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.employeeToken (default []).",
+   "Untuk tiap item: buat itemCtx dengan ctx.satellitePayload.employeeToken = item tunggal.",
+   "GenerateEmployeeTokenStableService me-resolve config.payload terhadap itemCtx.",
+   "Memanggil AuthGrpcService.generateEmployeeToken({ actor_id, tenant_id, token_type, ttl_seconds }).",
+   "Push { token, expiresAt } ke results, lalu append { name: 'GenerateEmployeeToken', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Template yang di-resolve per item menjadi GenerateEmployeeTokenPayload; contoh nyata memakai '$satellitePayload.employeeToken' (item saat ini)."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "actorId",
+    "type": "string",
+    "required": true,
+    "description": "ID employee (mis. interviewer.employeeId)."
+   },
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "Tenant ID."
+   },
+   {
+    "key": "tokenType",
+    "type": "string",
+    "required": true,
+    "description": "Jenis token, contoh: 'RESPONDENT_FORM'."
+   },
+   {
+    "key": "ttlSeconds",
+    "type": "number",
+    "required": true,
+    "description": "Masa berlaku token (detik)."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.employeeToken",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan ke ctx.pipelineResult: { name: 'GenerateEmployeeToken', results: Array<{ token: string, expiresAt: string }> } dengan urutan sama seperti input array (dipakai sebagai pairSource di Transformer forEach).",
+  "sideEffects": [
+   "Memanggil gRPC Auth GenerateEmployeeToken."
+  ],
+  "errors": [
+   "Error gRPC dari auth service diteruskan; tidak ada validasi payload."
+  ],
+  "usedInWorkflows": [
+   "CREATE_SCHEDULE_INTERVIEW"
+  ],
+  "example": {
+   "name": "GenerateEmployeeToken",
+   "config": {
+    "payload": "$satellitePayload.employeeToken"
+   },
+   "andCondition": [
+    {
+     "left": "$vacancyStage.interviewerFormId",
+     "right": null,
+     "operator": "!="
+    }
+   ]
+  },
+  "exampleSource": "process/workflow/config/interview/create-schedule-interview.config.ts",
+  "notes": [
+   "Seperti GenerateCandidateToken: loop atas array; array kosong = tidak ada token. Pada CREATE_SCHEDULE_INTERVIEW array diisi oleh Transformer forEach atas interviewers.",
+   "ctx.entity.employeeToken yang ditulis service tidak dipropagasi oleh executor; gunakan $pipelineResult[?name=='GenerateEmployeeToken']|[0].results."
+  ]
+ },
+ {
+  "name": "GenerateMeetLink",
+  "category": "Interview",
+  "file": "process/workflow/executors/generate-meet-link.pipeline-executor.ts",
+  "summary": "Membuat event kalender online (dengan meet link) via gRPC Facilitator CalendarService.CreateEvent dan mengembalikan link meeting serta event id.",
+  "behavior": [
+   "Resolve config.payload terhadap ctx menjadi GenerateMeetLinkPayload (single call, tidak loop).",
+   "Memanggil CalendarGrpcService.createEvent dengan name, description, location 'Online', started_at = `${interviewDate}T${startTime}:00`, ended_at = `${interviewDate}T${endTime}:00`, timezone, guests, meet: true, interview_id: requestId.",
+   "Mengembalikan { meetingLink: event.meet_link, meetingIdentifierId: event.event_id }.",
+   "Append { name: 'GenerateMeetLink', results: [meeting] } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Template yang di-resolve menjadi GenerateMeetLinkPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "requestId",
+    "type": "string",
+    "required": true,
+    "description": "Dikirim sebagai interview_id ke calendar service (spec memakai '$identifier')."
+   },
+   {
+    "key": "name",
+    "type": "string",
+    "required": true,
+    "description": "Judul event."
+   },
+   {
+    "key": "description",
+    "type": "string",
+    "required": false,
+    "description": "Deskripsi event."
+   },
+   {
+    "key": "interviewDate",
+    "type": "string",
+    "required": true,
+    "description": "Tanggal format yyyy-MM-dd (digabung dengan startTime/endTime)."
+   },
+   {
+    "key": "startTime",
+    "type": "string",
+    "required": true,
+    "description": "Jam mulai HH:mm (service menambahkan ':00')."
+   },
+   {
+    "key": "endTime",
+    "type": "string",
+    "required": true,
+    "description": "Jam selesai HH:mm."
+   },
+   {
+    "key": "timezone",
+    "type": "string",
+    "required": true,
+    "description": "Timezone IANA, mis. 'Asia/Jakarta'."
+   },
+   {
+    "key": "guests",
+    "type": "string[]",
+    "required": true,
+    "description": "Daftar email tamu."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "Menambahkan ke ctx.pipelineResult: { name: 'GenerateMeetLink', results: [{ meetingLink: string, meetingIdentifierId: string }] }.",
+  "sideEffects": [
+   "Membuat event kalender + meet link di Facilitator CalendarService (gRPC CreateEvent)."
+  ],
+  "errors": [
+   "Error gRPC dari CalendarService diteruskan; tidak ada validasi payload."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "GenerateMeetLink",
+   "config": {
+    "payload": {
+     "requestId": "$identifier",
+     "name": "$satellitePayload.meeting.name",
+     "description": "$satellitePayload.meeting.description",
+     "interviewDate": "$satellitePayload.meeting.interviewDate",
+     "startTime": "$satellitePayload.meeting.startTime",
+     "endTime": "$satellitePayload.meeting.endTime",
+     "timezone": "$satellitePayload.meeting.timezone",
+     "guests": "$satellitePayload.meeting.guests"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO (GenerateMeetLinkPayload + SatellitePayload.meeting: WorkflowMeetingPayload); requestId '$identifier' dari spec __test__/generate-meet-link.pipeline-executor.spec.ts",
+  "notes": [
+   "Belum dipakai di default workflow config mana pun.",
+   "Tidak menyimpan apa pun ke DB ATS; jika link perlu disimpan ke interview, referensikan \"$pipelineResult[?name=='GenerateMeetLink']|[0].results[0].meetingLink\" di step berikutnya (mis. CreateInterviewSchedule.meetingLink).",
+   "Format waktu dibentuk dengan string concat; pastikan startTime/endTime HH:mm (tanpa detik)."
+  ]
+ },
+ {
+  "name": "GenerateOfferingLetterDocument",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/generate-offering-letter-document-stable.pipeline-executor.ts",
+  "summary": "Merender template HTML offering letter dengan variabel, mengonversinya ke PDF via Converter gRPC, lalu menyimpan record media PDF tersebut.",
+  "behavior": [
+   "Jalankan ResolveModuleReferencesService dengan config.moduleReferences (mis. DOCUMENT_TEMPLATE -> ctx.entity.documentTemplate) menghasilkan resolvedCtx.",
+   "Resolve config.payload terhadap resolvedCtx menjadi GenerateOfferingLetterDocumentPayload.",
+   "Dalam transaksi DB: substitusi placeholder {{name}} di templateContent dengan variableComponents (value null -> '').",
+   "Panggil ConverterGrpcService.convertFile (type HTML_TO_PDF, bucket privat 'ats-offering-letters', fileName 'offering-letter-<candidateName>', appType ATS).",
+   "INSERT ke candidate.media: url = key hasil converter, isFullUrl false, type PRIVATE, function ATS_OFFERING_LETTER, mime application/pdf, status ACTIVE, metadata { identifier }.",
+   "Set ctx.entity.generatedOfferingDocument = MediaEntity dan append pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Template yang di-resolve menjadi GenerateOfferingLetterDocumentPayload (di-resolve SETELAH moduleReferences, jadi bisa memakai $entity.documentTemplate.*)."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Referensi modul yang di-fetch via gRPC dan ditaruh di ctx.entity (contoh: { module: 'DOCUMENT_TEMPLATE', sourcePath: '$satellitePayload.offeringLetter.documentTemplateId', targetPath: '$entity.documentTemplate' })."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "identifier",
+    "type": "string",
+    "required": true,
+    "description": "Disimpan di media.metadata.identifier (biasanya '$identifier')."
+   },
+   {
+    "key": "candidateName",
+    "type": "string",
+    "required": true,
+    "description": "Dipakai untuk nama file PDF."
+   },
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "Dikirim ke converter."
+   },
+   {
+    "key": "groupId",
+    "type": "string",
+    "required": true,
+    "description": "Dikirim ke converter (biasanya '$bucket.groupId')."
+   },
+   {
+    "key": "templateContent",
+    "type": "string",
+    "required": true,
+    "description": "HTML template berisi placeholder {{namaVariabel}}."
+   },
+   {
+    "key": "variableComponents",
+    "type": "Array<{ name: string; value: string | null }>",
+    "required": true,
+    "description": "Nilai untuk placeholder; harus array (di-.map tanpa guard)."
+   }
+  ],
+  "contextReads": [
+   "ctx.authContext.tenantId/groupId/actorId (scope moduleReferences)",
+   "ctx.entity",
+   "ctx.pipelineResult"
+  ],
+  "output": "Mengembalikan resolvedCtx (termasuk hasil moduleReferences di ctx.entity, mis. ctx.entity.documentTemplate) dengan ctx.entity.generatedOfferingDocument = MediaEntity tersimpan, dan ctx.pipelineResult += { name: 'GenerateOfferingLetterDocument', results: [{ id: media.id }] }.",
+  "sideEffects": [
+   "Generate & upload PDF via gRPC Facilitator Converter (bucket privat ats-offering-letters).",
+   "INSERT ke tabel candidate.media."
+  ],
+  "errors": [
+   "BadRequestException MODULE_REFERENCE_UNKNOWN_MODULE bila module di moduleReferences tidak terdaftar.",
+   "TypeError bila variableComponents null/bukan array.",
+   "Error gRPC converter diteruskan (transaksi DB rollback; file yang sudah ter-upload tidak dihapus)."
+  ],
+  "usedInWorkflows": [
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "GenerateOfferingLetterDocument",
+   "config": {
+    "payload": {
+     "groupId": "$bucket.groupId",
+     "tenantId": "$authContext.tenantId",
+     "identifier": "$identifier",
+     "candidateName": "$bucket.candidateMeta.name",
+     "templateContent": "$entity.documentTemplate.html",
+     "variableComponents": "$satellitePayload.offeringLetter.variableComponents"
+    },
+    "moduleReferences": [
+     {
+      "module": "DOCUMENT_TEMPLATE",
+      "sourcePath": "$satellitePayload.offeringLetter.documentTemplateId",
+      "targetPath": "$entity.documentTemplate"
+     }
+    ]
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/send-offering-letter.config.ts",
+  "notes": [
+   "Karena executor mengembalikan resolvedCtx, ctx.entity.documentTemplate tetap tersedia untuk step berikutnya (UpdateOfferingLetter memakai '$entity.documentTemplate.id/name/html' dan '$entity.generatedOfferingDocument.id').",
+   "Placeholder harus persis {{name}} (replaceAll literal, tanpa spasi)."
+  ]
+ },
+ {
+  "name": "GetApplicantData",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/get-applicant-data.pipeline-executor.ts",
+  "summary": "Query generik ke applicant.applicant_bucket (TypeORM find) dengan filter, relasi, select, paging dan sort dari config; hasil ditaruh di pipelineResult.",
+  "behavior": [
+   "Untuk tiap entri config.where: resolve condition.value terhadap ctx, lalu map operator: IN -> In(value), NOT_IN -> Not(In(value)), EQUALS -> value.",
+   "Paksa filter tenantId = ctx.bucket.tenantId dan deletedAt IS NULL (menimpa where dengan key sama).",
+   "Bangun select bersarang dari path bertitik (mis. 'customFields.id'); jika select tidak ada atau mengandung '*', semua kolom diambil.",
+   "applicantRepository.find({ where, relations, select, take: limit, skip: offset, order: sort }).",
+   "Append { name: 'GetApplicantData', results: applicants } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "where",
+    "type": "Record<string, { operator: 'EQUALS' | 'IN' | 'NOT_IN'; value: unknown }>",
+    "required": false,
+    "description": "Filter per kolom ApplicantBucketEntity; value boleh template jmespath (array di-resolve per elemen)."
+   },
+   {
+    "key": "relations",
+    "type": "string[]",
+    "required": false,
+    "description": "Relasi TypeORM yang di-join, mis. ['customFields','candidateMetas','applicantInfo']."
+   },
+   {
+    "key": "select",
+    "type": "string[]",
+    "required": false,
+    "description": "Daftar kolom (path bertitik untuk relasi). '*' = semua."
+   },
+   {
+    "key": "limit",
+    "type": "number",
+    "required": false,
+    "description": "take."
+   },
+   {
+    "key": "offset",
+    "type": "number",
+    "required": false,
+    "description": "skip."
+   },
+   {
+    "key": "sort",
+    "type": "Record<string, 'ASC' | 'DESC'>",
+    "required": false,
+    "description": "order."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.bucket.tenantId",
+   "ctx.pipelineResult",
+   "path apa pun yang dirujuk where[*].value"
+  ],
+  "output": "Menambahkan ke ctx.pipelineResult: { name: 'GetApplicantData', results: ApplicantBucketEntity[] } (sesuai select/relations).",
+  "sideEffects": [
+   "SELECT dari applicant.applicant_bucket (+ tabel relasi). Tidak ada write."
+  ],
+  "errors": [
+   "Error('Unsupported GetApplicantData operator: <op>') untuk operator selain EQUALS/IN/NOT_IN.",
+   "TypeError bila ctx.bucket tidak ada.",
+   "Error TypeORM bila nama kolom/relasi/select tidak valid."
+  ],
+  "usedInWorkflows": [
+   "GET_APPLICANT_DATA"
+  ],
+  "example": {
+   "name": "GetApplicantData",
+   "config": {
+    "where": {
+     "id": {
+      "operator": "NOT_IN",
+      "value": [
+       "$bucket.id"
+      ]
+     },
+     "candidateId": {
+      "operator": "EQUALS",
+      "value": "$bucket.candidateId"
+     }
+    },
+    "select": [
+     "id",
+     "candidateId",
+     "vacancyId",
+     "createdAt",
+     "customFields.id",
+     "customFields.fieldKey",
+     "candidateMetas.id",
+     "candidateMetas.data",
+     "applicantInfo.id",
+     "applicantInfo.vacancyStageId"
+    ],
+    "relations": [
+     "customFields",
+     "candidateMetas",
+     "applicantInfo"
+    ],
+    "limit": 20,
+    "offset": 0,
+    "sort": {
+     "createdAt": "DESC",
+     "id": "ASC"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/applicant/get-applicant-data.config.ts (select dipersingkat)",
+  "notes": [
+   "Tidak memakai config.payload — field config dibaca langsung; hanya where[*].value yang di-resolve jmespath.",
+   "Tenant scoping otomatis via ctx.bucket.tenantId, tidak bisa di-override.",
+   "Field relasi di select harus disertai relasinya di relations."
+  ]
+ },
+ {
+  "name": "GetCache",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/get-cache.pipeline-executor.ts",
+  "summary": "Membaca nilai JSON dari Redis (RedisCacheService) berdasarkan key hasil resolve dan menaruhnya di ctx[target].",
+  "behavior": [
+   "Resolve config.key terhadap ctx; harus string/number non-kosong.",
+   "RedisCacheService.get(key) (JSON.parse); hit = value !== null.",
+   "Set ctx[config.target ?? 'cache'] = value (null bila miss).",
+   "Append { name: 'GetCache', results: { hit, value } } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "key",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Key Redis. String penuh '$...' di-resolve sebagai ekspresi; string yang mengandung token '$a.b' di tengah di-substitusi (template embedded). Dipakai apa adanya tanpa prefix/tenant."
+   },
+   {
+    "key": "target",
+    "type": "string",
+    "required": false,
+    "description": "Nama properti top-level ctx tempat value ditaruh (default 'cache'); bukan path jmespath."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "path yang dirujuk config.key (mis. ctx.bulkPosition.requestId, ctx.authContext.tenantId)",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx[target] (default ctx.cache) = nilai cache atau null; ctx.pipelineResult += { name: 'GetCache', results: { hit: boolean, value: unknown } } (results berupa objek, bukan array).",
+  "sideEffects": [
+   "GET ke Redis (shared store, bukan CACHE_MANAGER in-memory)."
+  ],
+  "errors": [
+   "BadRequestException ERR_CACHE_KEY_REQUIRED bila key tidak resolve ke string/number non-kosong.",
+   "ServiceUnavailableException ERR_CACHE_UNAVAILABLE bila Redis tidak terhubung (tidak di-degrade jadi miss)."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "GetCache",
+   "config": {
+    "key": "wf:$authContext.tenantId:$bulkPosition.requestId:emails",
+    "target": "cachedEmails"
+   }
+  },
+  "exampleSource": "disusun dari DTO (GetCacheConfig) dan komentar BulkPosition di execute-satellite-workflow-stable.usecase.ts; spec memakai { key: 'k', target: 'cachedForm' }",
+  "notes": [
+   "Scoping key: key GLOBAL tanpa prefix/tenant — penulis config wajib memasukkan tenant dan scope sendiri. Untuk akumulasi lintas item dalam satu bulk, pakai $bulkPosition.requestId (ID batch stabil dari AsynchronousProcessEntity; ctx.bulkPosition = { index, total, isLast, requestId } hanya ada pada run bulk). $bulkPosition.isLast bisa dipakai di andCondition untuk step akhir batch.",
+   "Pada run non-bulk ctx.bulkPosition tidak ada: key '$bulkPosition.requestId' penuh -> null -> ERR_CACHE_KEY_REQUIRED; sedangkan token embedded diganti '' sehingga key menjadi mis. 'wf:tenant::emails' dan bisa bertabrakan antar request.",
+   "Jangan memakai target yang sudah dipakai ctx (mis. 'entity', 'bucket') karena akan ditimpa.",
+   "Nilai null tidak pernah bisa disimpan (SetCache menolak), jadi null selalu berarti miss."
+  ]
+ },
+ {
+  "name": "GetTenantData",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/get-tenant-data.pipeline-executor.ts",
+  "summary": "Mengambil data tenant dari Organization service (TenantGrpcService.getById) dan menaruhnya di ctx.tenant serta pipelineResult.",
+  "behavior": [
+   "Resolve config.payload terhadap ctx menjadi { tenantId }.",
+   "TenantGrpcService.getById(tenantId); bila kosong lempar TenantNotFoundException.",
+   "Set ctx.tenant = tenant.",
+   "Append { name: 'GetTenantData', results: tenant } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve menjadi GetTenantDataPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "Tenant ID, biasanya '$authContext.tenantId'."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.tenant = TenantResult (record tenant dari org service, berbeda dari $tenantConfig); ctx.pipelineResult += { name: 'GetTenantData', results: TenantResult } (objek, bukan array).",
+  "sideEffects": [
+   "Panggilan gRPC read-only ke Organization TenantService."
+  ],
+  "errors": [
+   "TenantNotFoundException (404, ERR_TENANT_NOT_FOUND) bila tenant tidak ditemukan.",
+   "Error gRPC diteruskan."
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "RESEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW_SINGLE",
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER",
+   "SEND_OFFERING_LETTER_REMINDER"
+  ],
+  "example": {
+   "name": "GetTenantData",
+   "config": {
+    "payload": {
+     "tenantId": "$authContext.tenantId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/send-offering-letter.config.ts",
+  "notes": [
+   "Karena results berupa objek, contoh config membaca nama perusahaan dengan \"$pipelineResult[?name=='GetTenantData'].results.name | [0]\"; alternatif yang lebih sederhana: '$tenant.name'."
+  ]
+ },
+ {
+  "name": "PrepareOfferingLetterToken",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/prepare-offering-letter-token-stable.pipeline-executor.ts",
+  "summary": "Adapter: menghitung TTL token dari expiredAt offering letter dan menulis satu item ke ctx.satellitePayload.candidateToken untuk dipakai GenerateCandidateToken. Tidak membuat/menyimpan token.",
+  "behavior": [
+   "Resolve config.payload terhadap ctx menjadi PrepareOfferingLetterTokenPayload.",
+   "ttlSeconds = floor((new Date(expiredAt) - now) / 1000) via OfferingLetterStableService.calculateTokenTtl.",
+   "Timpa ctx.satellitePayload.candidateToken = [{ actorId, tenantId, tokenType, ttlSeconds }]."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve menjadi PrepareOfferingLetterTokenPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "expiredAt",
+    "type": "string | Date",
+    "required": true,
+    "description": "Batas waktu offering letter; TTL dihitung sampai titik ini."
+   },
+   {
+    "key": "actorId",
+    "type": "string",
+    "required": true,
+    "description": "ID kandidat."
+   },
+   {
+    "key": "tenantId",
+    "type": "string",
+    "required": true,
+    "description": "Tenant ID."
+   },
+   {
+    "key": "tokenType",
+    "type": "string",
+    "required": true,
+    "description": "Jenis token, mis. 'OFFERING_LETTER'."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload"
+  ],
+  "output": "ctx.satellitePayload.candidateToken = [{ actorId, tenantId, tokenType, ttlSeconds }] (menimpa nilai sebelumnya). Tidak menambah entri pipelineResult.",
+  "sideEffects": [],
+  "errors": [
+   "Tidak ada validasi: expiredAt di masa lalu menghasilkan ttlSeconds negatif, expiredAt tidak valid menghasilkan NaN — error baru muncul di auth service saat GenerateCandidateToken."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "PrepareOfferingLetterToken",
+   "config": {
+    "payload": {
+     "expiredAt": "$satellitePayload.offeringLetter.expiredAt",
+     "actorId": "$bucket.candidateId",
+     "tenantId": "$authContext.tenantId",
+     "tokenType": "OFFERING_LETTER"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO (PrepareOfferingLetterTokenPayload, WorkflowOfferingLetterItem.expiredAt)",
+  "notes": [
+   "Pasangkan langsung dengan step berikutnya { name: 'GenerateCandidateToken', config: { payload: '$satellitePayload.candidateToken' } }.",
+   "Default config SEND/RESEND_OFFERING_LETTER saat ini tidak memakai executor ini (memakai ttlSeconds tetap 604800)."
+  ]
+ },
+ {
+  "name": "RejectMoveVacancy",
+  "category": "Move Vacancy & Transfer",
+  "file": "process/workflow/executors/reject-move-vacancy.pipeline-executor.ts",
+  "summary": "Menandai permintaan move vacancy (status WAITING) menjadi REJECTED, satu per item di ctx.satellitePayload.moveVacancy.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.moveVacancy (default []).",
+   "Untuk tiap item: itemCtx dengan satellitePayload.moveVacancy = item tunggal; resolve config.payload menjadi { moveVacancyId }.",
+   "Cari row aktif (deletedAt IS NULL) di process.applicant_move_vacancy; tidak ada -> NotFound.",
+   "Jika status != WAITING -> BadRequest (sudah direspons).",
+   "Update status = REJECTED, respondedAt = now (MarkMoveVacancyRespondedService -> repo.save).",
+   "Append { name: 'RejectMoveVacancy', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve per item menjadi RejectMoveVacancyPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "moveVacancyId",
+    "type": "string",
+    "required": true,
+    "description": "ID row applicant_move_vacancy yang ditolak."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.moveVacancy",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.pipelineResult += { name: 'RejectMoveVacancy', results: MoveVacancyEntity[] } (entity yang sudah di-update).",
+  "sideEffects": [
+   "UPDATE process.applicant_move_vacancy (status REJECTED, responded_at)."
+  ],
+  "errors": [
+   "NotFoundException { code: 'ERR_MOVE_VACANCY', message: 'Move vacancy request not found' }.",
+   "BadRequestException { code: 'ERR_MOVE_VACANCY', message: 'This move vacancy request has already been responded to' } bila status bukan WAITING."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "RejectMoveVacancy",
+   "config": {
+    "payload": {
+     "moveVacancyId": "$satellitePayload.moveVacancy.moveVacancyId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO (RejectMoveVacancyPayload)",
+  "notes": [
+   "Loop atas array satellitePayload.moveVacancy; array kosong = tidak ada yang diproses.",
+   "DTO WorkflowMoveVacancyItem saat ini hanya mendefinisikan vacancyStageId, bukan moveVacancyId — sumber moveVacancyId pada contoh di atas adalah asumsi; belum ada config nyata, sesuaikan dengan payload BFF/ctx yang tersedia.",
+   "Tidak ada side effect lain (tidak memindahkan applicant, tidak kirim notifikasi)."
+  ]
+ },
+ {
+  "name": "SaveOfferingLetterDraft",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/save-offering-letter-draft-stable.pipeline-executor.ts",
+  "summary": "Memperbarui row offering letter yang sudah ada (berdasarkan applicantProcessId) dengan data draft dan menyetel offeringStatus = DRAFT.",
+  "behavior": [
+   "CreateOfferingLetterDraftStableService menjalankan moduleReferences (mis. DOCUMENT_TEMPLATE) lalu resolve config.payload terhadap ctx hasilnya.",
+   "Dalam transaksi: cari process.applicant_offerings by applicantProcessId (deletedAt IS NULL); tidak ada -> OfferingNotFoundException.",
+   "Hanya field yang !== undefined di payload yang ditulis: documentTemplateId, templateName, documentTemplateContent, expiredAt -> tokenExpiredAt (Date atau null), variableComponents (value dienkripsi PiiService), payrollComponents (dienkripsi PiiService.encryptValue).",
+   "Set offeringStatus = DRAFT, simpan.",
+   "Append { name: 'SaveOfferingLetterDraft', results: [{ id, version, offeringStatus, updatedAt }] }."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve (setelah moduleReferences) menjadi SaveOfferingLetterDraftPayload."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Referensi modul untuk mengisi ctx.entity sebelum resolve payload (contoh: DOCUMENT_TEMPLATE -> $entity.documentTemplate)."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "Kunci pencarian offering (biasanya '$bucket.currentProcess.processId')."
+   },
+   {
+    "key": "documentTemplateId",
+    "type": "string | null",
+    "required": false,
+    "description": "ID template dokumen."
+   },
+   {
+    "key": "templateName",
+    "type": "string | null",
+    "required": false,
+    "description": "Nama template."
+   },
+   {
+    "key": "documentTemplateContent",
+    "type": "string | null",
+    "required": false,
+    "description": "HTML template."
+   },
+   {
+    "key": "expiredAt",
+    "type": "string | null",
+    "required": false,
+    "description": "Disimpan ke tokenExpiredAt."
+   },
+   {
+    "key": "variableComponents",
+    "type": "Array<{ name: string; value: string | null }> | null",
+    "required": false,
+    "description": "Value tiap komponen dienkripsi."
+   },
+   {
+    "key": "payrollComponents",
+    "type": "Record<string, unknown> | null",
+    "required": false,
+    "description": "Dienkripsi utuh."
+   }
+  ],
+  "contextReads": [
+   "ctx.authContext (scope moduleReferences)",
+   "ctx.entity",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.pipelineResult += { name: 'SaveOfferingLetterDraft', results: [{ id, version, offeringStatus: 'DRAFT', updatedAt }] }. ctx lain tidak berubah (hasil moduleReferences TIDAK dipropagasi ke step berikutnya).",
+  "sideEffects": [
+   "UPDATE process.applicant_offerings (kolom draft terenkripsi + offering_status DRAFT)."
+  ],
+  "errors": [
+   "OfferingNotFoundException (404, ERR_OFFERING_NOT_FOUND) bila belum ada offering untuk applicantProcessId — executor ini tidak membuat row baru.",
+   "BadRequestException MODULE_REFERENCE_UNKNOWN_MODULE untuk module tidak dikenal."
+  ],
+  "usedInWorkflows": [
+   "SAVE_OFFERING_LETTER_DRAFT"
+  ],
+  "example": {
+   "name": "SaveOfferingLetterDraft",
+   "config": {
+    "payload": {
+     "expiredAt": "$satellitePayload.offeringLetter.expiredAt",
+     "templateName": "$entity.documentTemplate.name",
+     "payrollComponents": "$satellitePayload.offeringLetter.payrollComponents",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "documentTemplateId": "$satellitePayload.offeringLetter.documentTemplateId",
+     "variableComponents": "$satellitePayload.offeringLetter.variableComponents",
+     "documentTemplateContent": "$entity.documentTemplate.html"
+    },
+    "moduleReferences": [
+     {
+      "module": "DOCUMENT_TEMPLATE",
+      "sourcePath": "$satellitePayload.offeringLetter.documentTemplateId",
+      "targetPath": "$entity.documentTemplate"
+     }
+    ]
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/save-offering-letter-draft.config.ts",
+  "notes": [
+   "Path jmespath yang tidak ada resolve ke null (bukan undefined), sehingga kolom tersebut DIKOSONGKAN. Untuk tidak menyentuh kolom, hapus key-nya dari payload config.",
+   "Default workflow menyusulkan SetStatusApplicantProcess { value: 'DRAFT' }."
+  ]
+ },
+ {
+  "name": "SendEmail",
+  "category": "Activity & Email",
+  "file": "process/workflow/executors/send-email.pipeline-executor.ts",
+  "summary": "Mengirim email (template atau HTML mentah) dengan mem-publish pesan ke Redis stream 'stream:email' (provider SENDGRID), satu per item di ctx.satellitePayload.email.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.email (default []).",
+   "Untuk tiap item: itemCtx dengan satellitePayload.email = item tunggal; resolve config.payload menjadi SendEmailPayload.",
+   "Validasi: email wajib, dan emailTemplateId atau content (non-blank) wajib.",
+   "Publish ke stream 'stream:email': { subject, email, templateId, provider: 'SENDGRID', attachments? , ...payload.payload, content?, templateStructureId? }.",
+   "Push { sent: true }; append { name: 'SendEmail', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve per item menjadi SendEmailPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "email",
+    "type": "string",
+    "required": true,
+    "description": "Alamat penerima (config default sering memakai '$candidate.emailEncrypted')."
+   },
+   {
+    "key": "emailTemplateId",
+    "type": "string",
+    "required": false,
+    "description": "ID template; wajib bila content kosong."
+   },
+   {
+    "key": "content",
+    "type": "string",
+    "required": false,
+    "description": "Body HTML mentah; bila diisi dipakai alih-alih template."
+   },
+   {
+    "key": "templateStructureId",
+    "type": "string",
+    "required": false,
+    "description": "Struktur header/footer pembungkus body."
+   },
+   {
+    "key": "subject",
+    "type": "string",
+    "required": false,
+    "description": "Subjek email."
+   },
+   {
+    "key": "attachments",
+    "type": "string[]",
+    "required": false,
+    "description": "Lampiran; hanya dikirim bila non-empty."
+   },
+   {
+    "key": "payload",
+    "type": "Record<string, unknown>",
+    "required": true,
+    "description": "Merge variable template; di-spread FLAT ke pesan stream."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.email",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.pipelineResult += { name: 'SendEmail', results: Array<{ sent: true }> }.",
+  "sideEffects": [
+   "XADD/publish ke Redis stream 'stream:email' (dikonsumsi communication service, provider SENDGRID). Tidak menulis history email ke DB (gunakan CreateApplicantEmail untuk itu)."
+  ],
+  "errors": [
+   "BadRequestException 'Email and either an email template or content are required'.",
+   "Error RedisStreamProducer diteruskan."
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "RESEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW",
+   "CREATE_SCHEDULE_INTERVIEW_SINGLE",
+   "RESCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW_SINGLE",
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER",
+   "SEND_OFFERING_LETTER_REMINDER"
+  ],
+  "example": {
+   "name": "SendEmail",
+   "config": {
+    "payload": {
+     "email": "$satellitePayload.email.email",
+     "payload": "$satellitePayload.email.payload",
+     "subject": "$satellitePayload.email.subject",
+     "emailTemplateId": "$satellitePayload.email.emailTemplateId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/create-schedule-interview.config.ts",
+  "notes": [
+   "Loop atas array satellitePayload.email; array kosong = tidak ada email terkirim. Isi array dulu dengan Transformer (outputKey '$satellitePayload.email'), termasuk transform: [{}] bila payload sepenuhnya diambil dari tempat lain.",
+   "Di dalam payload, '$satellitePayload.email' merujuk ke ITEM saat ini (objek), bukan array.",
+   "Key di payload.payload di-spread setelah subject/email/templateId/provider sehingga merge variable bernama sama akan menimpa field tersebut; content & templateStructureId selalu menang.",
+   "Apakah consumer mendekripsi alamat email terenkripsi (emailEncrypted) tidak terlihat dari kode ATS ini."
+  ]
+ },
+ {
+  "name": "SetCache",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/set-cache.pipeline-executor.ts",
+  "summary": "Menyimpan nilai (hasil resolve) ke Redis dengan key hasil resolve dan TTL (default 300 detik).",
+  "behavior": [
+   "Resolve config.key; harus string/number non-kosong.",
+   "Resolve config.value; tidak boleh null/undefined.",
+   "ttlSeconds = config.ttlSeconds ?? 300; harus integer positif.",
+   "RedisCacheService.set(key, JSON.stringify(value), EX ttl) — overwrite penuh.",
+   "Append { name: 'SetCache', results: value } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "key",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Sama seperti GetCache.key: global, tanpa prefix/tenant."
+   },
+   {
+    "key": "value",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Nilai yang disimpan (di-resolve rekursif; boleh objek/array berisi template)."
+   },
+   {
+    "key": "ttlSeconds",
+    "type": "number",
+    "required": false,
+    "description": "Integer > 0; default 300. Entry selalu expire."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "path yang dirujuk key/value",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.pipelineResult += { name: 'SetCache', results: <value tersimpan> } (nilai mentah, bukan dibungkus array). ctx lain tidak berubah.",
+  "sideEffects": [
+   "SET key ke Redis dengan EX ttlSeconds."
+  ],
+  "errors": [
+   "BadRequestException ERR_CACHE_KEY_REQUIRED.",
+   "BadRequestException ERR_CACHE_VALUE_REQUIRED bila value resolve ke null/undefined (path tidak ada -> null).",
+   "BadRequestException ERR_CACHE_TTL_INVALID.",
+   "ServiceUnavailableException ERR_CACHE_UNAVAILABLE bila Redis tidak terhubung."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "SetCache",
+   "config": {
+    "key": "wf:$authContext.tenantId:$bulkPosition.requestId:emails",
+    "value": "$satellitePayload.email",
+    "ttlSeconds": 600
+   }
+  },
+  "exampleSource": "disusun dari DTO (SetCacheConfig) dan komentar BulkPosition; spec memakai { key: 'k', value: [{ x: 1 }] }",
+  "notes": [
+   "Scoping key sama dengan GetCache: tambahkan tenant + $bulkPosition.requestId untuk data per-batch bulk; tanpa itu key bisa bertabrakan lintas tenant/request.",
+   "SET menimpa nilai lama (tidak append). Akumulasi lintas item bulk harus dilakukan dengan GetCache dulu lalu menyusun value baru dari $cache + data item saat ini.",
+   "TTL berlaku ulang tiap set; pilih TTL > durasi batch bulk."
+  ]
+ },
+ {
+  "name": "SetInactiveForm",
+  "category": "Form",
+  "file": "process/workflow/executors/set-inactive-form.pipeline-executor.ts",
+  "summary": "Menonaktifkan form submission (revoke di Form service lalu status INACTIVE di ATS), satu per item di ctx.satellitePayload.formSubmission.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.formSubmission (default []).",
+   "Untuk tiap item: itemCtx dengan satellitePayload.formSubmission = item tunggal; resolve config.payload menjadi { submissionId }.",
+   "Cari process.applicant_form_submission by id (deletedAt IS NULL); tidak ada -> NotFound.",
+   "Jika status COMPLETED -> BadRequest.",
+   "FormGrpcService.revokeForm({ identifierIds: [submission.id] }), lalu UPDATE status = INACTIVE.",
+   "Append { name: 'SetInactiveForm', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve per item menjadi SetInactiveFormPayload; bisa '$satellitePayload.formSubmission' bila item sudah berbentuk { submissionId }."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "submissionId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant_form_submission."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.formSubmission",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.pipelineResult += { name: 'SetInactiveForm', results: Array<{ submissionId: string, status: 'INACTIVE' }> }.",
+  "sideEffects": [
+   "gRPC Form RevokeForm.",
+   "UPDATE process.applicant_form_submission SET status = INACTIVE."
+  ],
+  "errors": [
+   "NotFoundException \"No form submission found for id '<id>'\".",
+   "BadRequestException \"Submission '<id>' has already been completed\".",
+   "Error gRPC revokeForm diteruskan (status ATS belum diubah bila revoke gagal)."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "SetInactiveForm",
+   "config": {
+    "payload": "$satellitePayload.formSubmission"
+   }
+  },
+  "exampleSource": "process/workflow/executors/__test__/set-inactive-form.pipeline-executor.spec.ts",
+  "notes": [
+   "Loop atas array; WorkflowFormSubmissionItem di DTO bertipe Record<string, unknown>, jadi bentuk item ({ submissionId }) ditentukan oleh config/BFF.",
+   "Tidak ada transaksi gabungan antara revoke gRPC dan update DB."
+  ]
+ },
+ {
+  "name": "SetStatusApplicantProcess",
+  "category": "Applicant Process",
+  "file": "process/workflow/executors/set-status-applicant-process.pipeline-executor.ts",
+  "summary": "Menulis status literal ke applicant process saat ini (bucket + vacancy stage di ctx), opsional dengan condition AND/OR; juga menyinkronkan status di applicant_bucket.",
+  "behavior": [
+   "Ambil ctx.bucket.id dan ctx.vacancyStage.id; jika salah satu tidak ada -> NotFound.",
+   "Evaluasi config.condition (andCondition/orCondition) dengan TenantRuleConditionEvaluatorService; jika gagal, return { process: null } tanpa write.",
+   "Dalam transaksi: cari applicant.process terbaru (createdAt DESC) untuk applicantBucketId + vacancyStageId (deletedAt IS NULL); tidak ada -> NotFound.",
+   "Set process.status = config.value, save.",
+   "UPDATE applicant.applicant_bucket: filterableAttribute.status = value, currentProcess.status = value dan currentProcess.updatedAt = now; juga dimutasi langsung di ctx.bucket.",
+   "Set ctx.entity.applicantProcessId dan ctx.entity.status; append pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "value",
+    "type": "StatusApplicantProcess",
+    "required": true,
+    "description": "Status yang ditulis, LITERAL (tidak di-resolve jmespath). Kolom DB varchar, jadi string status per stage dipakai di config default: SCHEDULED, IN_PROGRESS, DRAFT, OFFERED, REVIEW_NEEDED, COMPLETED, HIRED."
+   },
+   {
+    "key": "condition",
+    "type": "SetStatusApplicantProcessCondition",
+    "required": false,
+    "description": "{ andCondition?: TenantValidationConditionEntry[]; orCondition?: TenantValidationConditionEntry[] }. Semua andCondition harus lolos DAN (bila orCondition ada) minimal satu orCondition lolos. Kosong/absen = selalu diterapkan."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.bucket.id",
+   "ctx.bucket.filterableAttribute",
+   "ctx.bucket.currentProcess",
+   "ctx.vacancyStage.id",
+   "ctx.entity",
+   "path yang dirujuk condition"
+  ],
+  "output": "Bila diterapkan: ctx.entity = { ...ctx.entity, applicantProcessId, status }, ctx.bucket.filterableAttribute/currentProcess ter-update, ctx.pipelineResult += { name: 'SetStatusApplicantProcess', results: ProcessEntity } (objek). Bila condition gagal: ctx tidak berubah kecuali pipelineResult += { name: 'SetStatusApplicantProcess', results: null }.",
+  "sideEffects": [
+   "UPDATE applicant.process (status).",
+   "UPDATE applicant.applicant_bucket (filterable_attribute.status, current_process.status/updatedAt).",
+   "Tidak ada audit log, notifikasi, atau logika mover."
+  ],
+  "errors": [
+   "NotFoundException 'No current bucket/vacancyStage on ctx to target an applicant process'.",
+   "NotFoundException 'Applicant process not found for bucket <id> / stage <id>'."
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW",
+   "CREATE_SCHEDULE_INTERVIEW_SINGLE",
+   "SAVE_OFFERING_LETTER_DRAFT",
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER",
+   "SEND_OFFERING_LETTER_REMINDER",
+   "SUBMIT_SIGNED_OFFERING_LETTER",
+   "COMPLETE_OFFERING_LETTER",
+   "HIRE_CANDIDATE"
+  ],
+  "example": {
+   "name": "SetStatusApplicantProcess",
+   "config": {
+    "value": "SCHEDULED",
+    "condition": {
+     "andCondition": [
+      {
+       "left": "$vacancyStage.formTemplateId",
+       "operator": "!=",
+       "right": null
+      }
+     ],
+     "orCondition": []
+    }
+   }
+  },
+  "exampleSource": "value dari process/workflow/config/interview/create-schedule-interview.config.ts; bentuk condition disusun dari DTO (SetStatusApplicantProcessCondition) karena config default tidak memakai condition",
+  "notes": [
+   "Entri condition boleh flat { left, operator, right } atau legacy { when: { left, operator, right } }. Operator: EQUALS, NOT_EQUALS, '=', '!=', '<', '<=', '>', '>='; EQUALS/'=' memakai strict ===.",
+   "Operand '$a.b' di condition di-resolve dengan dot-path sederhana (TenantRuleValueResolverService.resolveOperand), BUKAN jmespath: tidak mendukung filter/fungsi/indeks [0]; path tidak ada -> undefined (sehingga '!= null' bernilai true).",
+   "Beda dengan andCondition/orCondition di level entri pipeline: entri-level melewati step sepenuhnya (tanpa pipelineResult), sedangkan config.condition tetap menambah pipelineResult dengan results null.",
+   "Target process selalu bucket/stage saat ini; tidak bisa diarahkan ke process lain.",
+   "Field 'service' yang muncul di beberapa config default diabaikan oleh PipelineWorkflowExecutorService (hanya name/config/andCondition/orCondition yang dibaca)."
+  ]
+ },
+ {
+  "name": "SubmitPreOnboardingItems",
+  "category": "Pre-Onboarding",
+  "file": "process/workflow/executors/submit-pre-onboarding-items.pipeline-executor.ts",
+  "summary": "Menyimpan jawaban/dokumen kandidat ke snapshot dokumen & pertanyaan form pre-onboarding dalam satu transaksi dan menandainya SUBMITTED.",
+  "behavior": [
+   "Resolve config.payload terhadap ctx menjadi { preOnboardingId, documents?, forms? } (single call, tidak loop).",
+   "Jika documents dan forms sama-sama kosong: return tanpa write (results []).",
+   "Dalam transaksi: untuk tiap document, cari snapshot by documentSnapshotId dalam preOnboardingId; set submittedMediaId & answers (null bila tidak diisi); reviewStatus -> SUBMITTED kecuali sudah APPROVED. ID yang tidak cocok dilewati diam-diam.",
+   "Untuk tiap form: snapshot by formSnapshotId; set submittedAnswer; reviewStatus -> SUBMITTED kecuali APPROVED.",
+   "Jika tidak ada row yang ter-update -> PreOnboardingNotFoundException.",
+   "UPDATE process.pre_onboardings.submittedAt = now (status tidak diubah).",
+   "Set ctx.entity = { preOnboardingId, submittedAt }; append pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": false,
+    "description": "Di-resolve menjadi SubmitPreOnboardingItemsPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "preOnboardingId",
+    "type": "string",
+    "required": true,
+    "description": "ID pre_onboardings."
+   },
+   {
+    "key": "documents",
+    "type": "SubmitPreOnboardingDocumentInput[]",
+    "required": false,
+    "description": "[{ documentSnapshotId: string; submittedMediaId?: string | null; answers?: { fieldName: string; answer: string | null }[] }]."
+   },
+   {
+    "key": "forms",
+    "type": "SubmitPreOnboardingFormInput[]",
+    "required": false,
+    "description": "[{ formSnapshotId: string; submittedAnswer?: Record<string, unknown> | null }]."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.entity DIGANTI (shallow, bukan merge) menjadi { preOnboardingId, submittedAt: Date }; ctx.pipelineResult += { name: 'SubmitPreOnboardingItems', results: [...documentSnapshots, ...formSnapshots] } (entity yang ter-update).",
+  "sideEffects": [
+   "UPDATE process.pre_onboarding_document_snapshots (submitted_media_id, answers, review_status).",
+   "UPDATE process.pre_onboarding_form_question_snapshots (submitted_answer, review_status).",
+   "UPDATE process.pre_onboardings (submitted_at)."
+  ],
+  "errors": [
+   "PreOnboardingNotFoundException (404, ERR_PRE_ONBOARDING_NOT_FOUND) bila tidak ada snapshot yang cocok dengan id yang dikirim."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "SubmitPreOnboardingItems",
+   "config": {
+    "payload": "$satellitePayload.submitPreOnboarding"
+   }
+  },
+  "exampleSource": "disusun dari DTO (SubmitPreOnboardingItemsPayload, SatellitePayload.submitPreOnboarding)",
+  "notes": [
+   "Tidak loop: satu call = satu pre-onboarding. Key satellite di DTO adalah 'submitPreOnboarding' (komentar executor menyebut 'preOnboarding').",
+   "Isi ctx.entity sebelumnya hilang setelah step ini; letakkan step yang butuh $entity.* sebelumnya.",
+   "Tidak ada pengecekan kelengkapan item wajib maupun notifikasi; itu tanggung jawab step lain.",
+   "Field yang tidak diisi (submittedMediaId/answers/submittedAnswer) di-set null, bukan dibiarkan."
+  ]
+ },
+ {
+  "name": "SubmitSignedOfferingLetter",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/submit-signed-offering-letter-stable.pipeline-executor.ts",
+  "summary": "Menyimpan dokumen offering letter yang sudah ditandatangani kandidat: mengaktifkan media dokumen tersebut dan mengubah status offering aktif menjadi REVIEW_NEEDED.",
+  "behavior": [
+   "Resolve config.payload (template jmespath) terhadap ctx menjadi { applicantProcessId, signedDocumentId } (SubmitSignedOfferingLetterStableService).",
+   "Dalam satu transaksi DB: ambil offering aktif terbaru untuk applicantProcessId (deleted_at IS NULL, order version DESC, created_at DESC) dengan lock pessimistic_write.",
+   "Cari media dengan id = signedDocumentId (deleted_at IS NULL) di candidate.media.",
+   "Set media.status = ACTIVE dan media.type = PRIVATE, lalu simpan.",
+   "Set offering.signedDocumentMediaId = media.id, candidateUploadedAt = now, offeringStatus = REVIEW_NEEDED, lalu simpan.",
+   "Append entry { name: 'SubmitSignedOfferingLetter', results: [{ id, signedDocumentMediaId, offeringStatus, candidateUploadedAt }] } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi SubmitSignedOfferingLetterPayload. Tanpa payload, applicantProcessId undefined sehingga offering tidak ditemukan."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process pemilik offering; biasanya $bucket.currentProcess.processId."
+   },
+   {
+    "key": "signedDocumentId",
+    "type": "string",
+    "required": true,
+    "description": "ID media (candidate.media) dokumen bertanda tangan yang di-upload kandidat; biasanya $satellitePayload.offeringLetter.signedDocumentId."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'SubmitSignedOfferingLetter', results: [ { id, signedDocumentMediaId, offeringStatus: 'REVIEW_NEEDED', candidateUploadedAt } ] }.",
+  "sideEffects": [
+   "UPDATE candidate.media (status = ACTIVE, type = PRIVATE) untuk signedDocumentId.",
+   "UPDATE process.applicant_offerings (signed_document_media_id, candidate_uploaded_at, offering_status = REVIEW_NEEDED) pada offering aktif terbaru.",
+   "Semua dalam satu transaksi dengan row lock pada offering."
+  ],
+  "errors": [
+   "OfferingNotFoundException (404, type ERR_OFFERING_NOT_FOUND) jika tidak ada offering aktif untuk applicantProcessId.",
+   "BadRequestException('Signed document not found') jika media signedDocumentId tidak ada / sudah dihapus."
+  ],
+  "usedInWorkflows": [
+   "SUBMIT_SIGNED_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "SubmitSignedOfferingLetter",
+   "config": {
+    "payload": {
+     "signedDocumentId": "$satellitePayload.offeringLetter.signedDocumentId",
+     "applicantProcessId": "$bucket.currentProcess.processId"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/submit-signed-offering-letter.config.ts",
+  "notes": [
+   "Tidak memvalidasi status offering saat ini (mis. harus OFFERED) maupun token kandidat; validasi seperti itu harus dilakukan sebelum step ini (lifecycle/andCondition).",
+   "Tidak mengubah status applicant process; pada config default diikuti step SetStatusApplicantProcess { value: 'REVIEW_NEEDED' }.",
+   "Tidak mengirim email/notifikasi."
+  ]
+ },
+ {
+  "name": "UpdateApplicantAttachment",
+  "category": "Score & Attachment",
+  "file": "process/workflow/executors/update-applicant-attachment.pipeline-executor.ts",
+  "summary": "Memperbarui (re-upload) satu atau lebih baris applicant attachment yang sudah ada, berdasarkan array ctx.satellitePayload.attachment.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.attachment (default []).",
+   "Untuk setiap item: buat ctx salinan di mana satellitePayload.attachment = item tunggal tersebut, lalu panggil UpdateApplicantAttachmentService.",
+   "Service me-resolve config.payload terhadap ctx item menjadi { id, mediaId, documentName, uploadedBy }.",
+   "Validasi id wajib ada; cari attachment aktif by id.",
+   "documentName = payload.documentName ?? existing.documentName; jika config.allowedFileTypes diisi, ekstensi documentName (lowercase) harus termasuk daftar.",
+   "Resolve config.moduleReferences terhadap ctx (untuk mengisi attachment.uploadedByMeta).",
+   "UPDATE baris: mediaId, documentName, uploadedBy (fallback ke nilai lama bila null/undefined), uploadedByMeta = resolvedCtx.attachment.uploadedByMeta ?? nilai lama.",
+   "Kumpulkan entity hasil update; append { name: 'UpdateApplicantAttachment', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve per item menjadi UpdateApplicantAttachmentPayload. Referensikan item via $satellitePayload.attachment.<field> (sudah berupa objek tunggal, bukan array)."
+   },
+   {
+    "key": "allowedFileTypes",
+    "type": "string[]",
+    "required": false,
+    "description": "Daftar ekstensi file yang diizinkan (lowercase, tanpa titik), dicek terhadap ekstensi documentName."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Literal (tidak di-resolve lewat payload). Dipakai untuk mengisi uploadedByMeta dengan targetPath $attachment.uploadedByMeta."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "id",
+    "type": "string",
+    "required": true,
+    "description": "ID baris applicant attachment yang akan diupdate."
+   },
+   {
+    "key": "mediaId",
+    "type": "string | null",
+    "required": false,
+    "description": "Media baru; null/undefined mempertahankan mediaId lama."
+   },
+   {
+    "key": "documentName",
+    "type": "string | null",
+    "required": false,
+    "description": "Nama dokumen baru (dipakai juga untuk cek ekstensi); null mempertahankan nilai lama."
+   },
+   {
+    "key": "uploadedBy",
+    "type": "string | null",
+    "required": false,
+    "description": "Actor yang meng-upload; null mempertahankan nilai lama. Biasanya $authContext.actorId."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.attachment (array, di-loop)",
+   "ctx.pipelineResult",
+   "ctx.attachment.uploadedByMeta (hasil moduleReferences)"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateApplicantAttachment', results: ApplicantAttachmentEntity[] } (satu entity per item). ctx.satellitePayload asli tidak diubah.",
+  "sideEffects": [
+   "UPDATE process.applicant_attachments (media_id, document_name, uploaded_by, uploaded_by_meta) per item."
+  ],
+  "errors": [
+   "BadRequestException('id is required to update an applicant attachment') jika payload.id kosong.",
+   "NotFoundException(\"Applicant attachment '<id>' not found\") jika attachment tidak aktif/tidak ada.",
+   "BadRequestException(\"File type '<ext>' is not allowed for this stage\") jika ekstensi tidak termasuk allowedFileTypes."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "UpdateApplicantAttachment",
+   "config": {
+    "payload": {
+     "id": "$satellitePayload.attachment.id",
+     "mediaId": "$satellitePayload.attachment.mediaId",
+     "documentName": "$satellitePayload.attachment.documentName",
+     "uploadedBy": "$authContext.actorId"
+    },
+    "allowedFileTypes": [
+     "pdf",
+     "docx",
+     "jpg",
+     "png"
+    ]
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Executor ini LOOP atas ctx.satellitePayload.attachment; jika array kosong/tidak ada, service tidak dipanggil sama sekali dan results = [] (tanpa error).",
+   "Item satellitePayload.attachment (WorkflowUpdateAttachmentItem) berbentuk { id, mediaId?, documentName? }.",
+   "Tidak memvalidasi bahwa mediaId baru ada di tabel media, dan tidak mengubah status media.",
+   "Tidak ditemukan pemakaian di config workflow default; nama modul moduleReferences untuk uploadedByMeta tidak diverifikasi."
+  ]
+ },
+ {
+  "name": "UpdateApplicantProcessStatus",
+  "category": "Applicant Process",
+  "file": "process/workflow/executors/update-applicant-process-status.pipeline-executor.ts",
+  "summary": "Mengubah status applicant process stage saat ini dengan nilai yang dikirim client di requestBody.satellitePayload.applicantProcessStatus (varian dinamis dari SetStatusApplicantProcess).",
+  "behavior": [
+   "Baca ctx.requestBody.satellitePayload.applicantProcessStatus; harus string non-kosong.",
+   "Panggil SetStatusApplicantProcessStableService dengan { ...config, value: status }.",
+   "Service mengambil ctx.bucket.id dan ctx.vacancyStage.id; jika salah satu tidak ada, lempar NotFound.",
+   "Jika config.condition (andCondition/orCondition) ada dan tidak lolos (dievaluasi terhadap ctx), dilewati dan process = null.",
+   "Jika lolos, dalam transaksi: ambil applicant process terbaru (bucket + vacancyStage, deleted_at null, createdAt DESC), set status, simpan.",
+   "Update applicant_bucket: filterable_attribute.status dan current_process.status (+updatedAt), serta patch ctx.bucket.filterableAttribute/currentProcess in-place.",
+   "ctx.entity di-merge dengan { applicantProcessId, status }.",
+   "Append { name: 'UpdateApplicantProcessStatus', results: process } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "condition",
+    "type": "SetStatusApplicantProcessCondition ({ andCondition?: TenantValidationConditionEntry[]; orCondition?: TenantValidationConditionEntry[] })",
+    "required": false,
+    "description": "Gate opsional; kosong/tidak ada berarti selalu diterapkan. Semua andCondition harus lolos, dan bila orCondition ada minimal satu harus lolos."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.requestBody.satellitePayload.applicantProcessStatus",
+   "ctx.bucket.id, ctx.bucket.filterableAttribute, ctx.bucket.currentProcess",
+   "ctx.vacancyStage.id",
+   "ctx.entity",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.entity = { ...ctx.entity, applicantProcessId, status }; ctx.bucket.filterableAttribute/currentProcess dipatch; append ke ctx.pipelineResult: { name: 'UpdateApplicantProcessStatus', results: ProcessEntity | null } (null jika condition tidak lolos).",
+  "sideEffects": [
+   "UPDATE applicant.process.status (baris terbaru untuk bucket + stage saat ini).",
+   "UPDATE applicant.applicant_bucket.filterable_attribute (key status) dan current_process (status, updatedAt)."
+  ],
+  "errors": [
+   "BadRequestException { type: 'APPLICANT_PROCESS_STATUS_INVALID' } jika applicantProcessStatus bukan string non-kosong.",
+   "NotFoundException jika ctx.bucket/ctx.vacancyStage tidak ada.",
+   "NotFoundException('Applicant process not found for bucket ... / stage ...') jika baris process tidak ditemukan."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "UpdateApplicantProcessStatus",
+   "config": {}
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Status dibaca dari ctx.requestBody.satellitePayload (body asli), BUKAN dari ctx.satellitePayload, sehingga Transformer di beforeExecute tidak berpengaruh.",
+   "Nilai status tidak divalidasi terhadap enum StatusApplicantProcess; string apa pun yang dikirim client akan ditulis.",
+   "Tidak ada log audit/notifikasi/mover logic.",
+   "Tidak ditemukan pemakaian di config workflow default."
+  ]
+ },
+ {
+  "name": "UpdateApplicantScore",
+  "category": "Score & Attachment",
+  "file": "process/workflow/executors/update-applicant-score.pipeline-executor.ts",
+  "summary": "Memperbarui satu atau lebih baris applicant score yang sudah ada berdasarkan array ctx.satellitePayload.score.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.score (default []).",
+   "Untuk setiap item: buat ctx salinan di mana satellitePayload.score = item tunggal, lalu panggil UpdateApplicantScoreService.",
+   "Service me-resolve config.payload menjadi { id, score, qualitativeScore, remarks, scoredBy }; id wajib.",
+   "Cari score aktif by id.",
+   "qualitativeScore = payload.qualitativeScore ?? existing.qualitativeScore; jika config.qualitativeScore diisi, nilainya harus ada di daftar value.",
+   "Resolve config.moduleReferences (untuk scoredByMeta via $score.scoredByMeta).",
+   "UPDATE: score = payload.score ?? skor numerik dari mapping qualitativeScore (atau null); qualitativeScore; scoredBy/scoredByMeta/remarks fallback ke nilai lama.",
+   "Append { name: 'UpdateApplicantScore', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve per item menjadi UpdateApplicantScorePayload; referensikan item via $satellitePayload.score.<field>."
+   },
+   {
+    "key": "qualitativeScore",
+    "type": "Array<{ value: string; score: number }>",
+    "required": false,
+    "description": "Literal. Daftar label kualitatif yang diizinkan beserta skor numeriknya (dipakai bila payload.score kosong)."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Literal. Untuk mengisi scoredByMeta dengan targetPath $score.scoredByMeta."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "id",
+    "type": "string",
+    "required": true,
+    "description": "ID baris applicant score."
+   },
+   {
+    "key": "score",
+    "type": "number | null",
+    "required": false,
+    "description": "Skor numerik; jika null diambil dari mapping qualitativeScore."
+   },
+   {
+    "key": "qualitativeScore",
+    "type": "string | null",
+    "required": false,
+    "description": "Label kualitatif; null mempertahankan nilai lama."
+   },
+   {
+    "key": "remarks",
+    "type": "string | null",
+    "required": false,
+    "description": "Catatan; null mempertahankan nilai lama."
+   },
+   {
+    "key": "scoredBy",
+    "type": "string | null",
+    "required": false,
+    "description": "Actor penilai; null mempertahankan nilai lama. Biasanya $authContext.actorId."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.score (array, di-loop)",
+   "ctx.pipelineResult",
+   "ctx.score.scoredByMeta (hasil moduleReferences)"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateApplicantScore', results: ApplicantScoreEntity[] }.",
+  "sideEffects": [
+   "UPDATE process.applicant_scores (score, qualitative_score, scored_by, scored_by_meta, remarks) per item."
+  ],
+  "errors": [
+   "BadRequestException('id is required to update an applicant score').",
+   "NotFoundException(\"Applicant score '<id>' not found\").",
+   "BadRequestException(\"qualitativeScore '<x>' is not configured for this stage\") jika label tidak ada di config.qualitativeScore."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "UpdateApplicantScore",
+   "config": {
+    "payload": {
+     "id": "$satellitePayload.score.id",
+     "score": "$satellitePayload.score.score",
+     "qualitativeScore": "$satellitePayload.score.qualitativeScore",
+     "remarks": "$satellitePayload.score.remarks",
+     "scoredBy": "$authContext.actorId"
+    },
+    "qualitativeScore": [
+     {
+      "value": "GOOD",
+      "score": 80
+     },
+     {
+      "value": "FAIR",
+      "score": 60
+     }
+    ]
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "LOOP atas ctx.satellitePayload.score; array kosong/tidak ada = no-op (results []).",
+   "Gotcha: score TIDAK fallback ke nilai lama. Jika payload.score null/undefined dan tidak ada mapping qualitativeScore yang cocok, kolom score menjadi null.",
+   "Item satellitePayload.score (WorkflowUpdateScoreItem) berbentuk { id, score?, qualitativeScore?, remarks? }.",
+   "Tidak ditemukan pemakaian di config workflow default."
+  ]
+ },
+ {
+  "name": "UpdateCandidateMetaSnapshot",
+  "category": "Candidate Data",
+  "file": "process/workflow/executors/update-candidate-meta-snapshot.pipeline-executor.ts",
+  "summary": "Memperbarui snapshot data kandidat (applicant_candidate_meta.data) milik applicant bucket saat ini dari requestBody.satellitePayload.candidateMeta, termasuk validasi tenant config, enkripsi PII, module references, dan custom fields.",
+  "behavior": [
+   "Baca payload = ctx.requestBody.satellitePayload.candidateMeta (config pipeline diabaikan).",
+   "Kumpulkan media id (profilePhotoId, resumeId, introductionVideoId, files[].mediaId), cek semuanya ada dan tidak terhapus di candidate.media.",
+   "Bangun input ctx { ...ctx, event: requestBody.workflowName, requestBody: payload, entity: {} } lalu jalankan validasi ctx.tenantConfig.validation.",
+   "Resolve custom fields (ctx.tenantConfig.customData, dari payload.customFields) dan module references (ctx.tenantConfig.moduleReferences) ke entity.",
+   "Bangun baris custom field (tenantId/groupId dari ctx.bucket, parentId = ctx.candidateTenantPool.id).",
+   "Dalam transaksi: lock applicant_bucket, ambil snapshot aktif versi tertinggi (lock), lalu hitung data baru.",
+   "data = { ...current, ...meta hasil module reference }, set name, nationality, domicileSameAsIdentityAddress, profilePhotoMedia/cvMedia/videoResumeMedia (objek media lengkap atau null).",
+   "email/phone/dateOfBirth (bila tidak undefined) dienkripsi ke <field>Encrypted.",
+   "Koleksi educations/experiences/identities/addresses/files diganti penuh dari payload: row dengan id di-merge dengan row lama (id harus ada di snapshot), row tanpa id diberi uuidv7; identityNumber dienkripsi+hash, addressLine1/addressLine2/postalCode dienkripsi, isStillHere=true mengosongkan endDate.",
+   "customFields diganti dengan baris hasil payload (id lama dipertahankan per fieldKey).",
+   "Simpan snapshot (UPDATE in-place), append { name: 'UpdateCandidateMetaSnapshot', results: saved } ke ctx.pipelineResult."
+  ],
+  "configFields": [],
+  "payloadFields": [
+   {
+    "key": "name",
+    "type": "string",
+    "required": true,
+    "description": "Nama kandidat."
+   },
+   {
+    "key": "email / phone / dateOfBirth",
+    "type": "string | null (optional)",
+    "required": false,
+    "description": "Dienkripsi ke emailEncrypted/phoneEncrypted/dateOfBirthEncrypted; undefined = tidak diubah, null/'' = dikosongkan."
+   },
+   {
+    "key": "genderId, religionId, maritalStatusId, placeOfBirthId, provinceId, cityId, totalWorkExperienceId",
+    "type": "string | null",
+    "required": true,
+    "description": "Referensi master data; meta-nya di-resolve lewat moduleReferences tenant config."
+   },
+   {
+    "key": "nationality",
+    "type": "string | null",
+    "required": true,
+    "description": "Kewarganegaraan."
+   },
+   {
+    "key": "interestIds",
+    "type": "string[]",
+    "required": true,
+    "description": "Daftar minat."
+   },
+   {
+    "key": "experiences / educations / identities / addresses / files",
+    "type": "WorkflowCandidateMeta*[]",
+    "required": true,
+    "description": "Koleksi lengkap (replace). Wajib berupa array; row dengan id harus sudah ada di snapshot."
+   },
+   {
+    "key": "resumeId / introductionVideoId / profilePhotoId",
+    "type": "string | null",
+    "required": true,
+    "description": "ID media; null mengosongkan media terkait."
+   },
+   {
+    "key": "customFields",
+    "type": "Record<string, unknown>",
+    "required": true,
+    "description": "Nilai custom field, divalidasi terhadap tenantConfig.customData.fields."
+   },
+   {
+    "key": "domicileSameAsIdentityAddress",
+    "type": "boolean",
+    "required": true,
+    "description": "Flag domisili sama dengan alamat identitas."
+   }
+  ],
+  "contextReads": [
+   "ctx.requestBody.satellitePayload.candidateMeta",
+   "ctx.requestBody.workflowName",
+   "ctx.tenantConfig.validation / customData / moduleReferences",
+   "ctx.bucket.id / tenantId / groupId",
+   "ctx.candidateTenantPool.id",
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateCandidateMetaSnapshot', results: ApplicantCandidateMetaEntity } (entity tersimpan, field data berisi snapshot baru).",
+  "sideEffects": [
+   "SELECT ... FOR UPDATE applicant.applicant_bucket (lock).",
+   "UPDATE applicant.applicant_candidate_meta.data pada snapshot aktif versi tertinggi (tidak membuat versi baru)."
+  ],
+  "errors": [
+   "NotFoundException('Media not found') jika ada media id yang tidak ditemukan atau sudah dihapus.",
+   "BadRequestException dari TenantConfigurationRuleValidatorService jika validasi tenant config gagal.",
+   "NotFoundException('<key>[<index>] not found in snapshot') jika row koleksi memakai id yang tidak ada di snapshot.",
+   "NotFoundException('Active candidate meta snapshot not found').",
+   "EntityNotFoundError (findOneOrFail) jika applicant bucket tidak ada/terhapus.",
+   "TypeError bila payload.files atau koleksi lain tidak dikirim (kode memanggil .map tanpa default)."
+  ],
+  "usedInWorkflows": [
+   "UPDATE_CANDIDATE_META_SNAPSHOT"
+  ],
+  "example": {
+   "name": "UpdateCandidateMetaSnapshot",
+   "config": {}
+  },
+  "exampleSource": "process/workflow/config/candidate-meta-snapshot/update-candidate-meta-snapshot.config.ts",
+  "notes": [
+   "Workflow harus menyetel tenantConfigType = 'APPLICANT_CANDIDATE_META_STABLE' agar ctx.tenantConfig berisi validation/customData/moduleReferences yang sesuai.",
+   "Koleksi dan customFields bersifat REPLACE penuh: row/field yang tidak dikirim akan hilang dari snapshot.",
+   "Tidak mengubah data master kandidat (schema candidate), hanya snapshot di applicant."
+  ]
+ },
+ {
+  "name": "UpdateForm",
+  "category": "Form",
+  "file": "process/workflow/executors/update-form.pipeline-executor.ts",
+  "summary": "Resend link form: mengganti query param token pada formLink baris applicant_form_submission yang sudah ada dengan token kandidat baru, tanpa memanggil Form Service.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.formSubmission (default []).",
+   "Untuk setiap item: ctx salinan dengan satellitePayload.formSubmission = item tunggal, lalu panggil UpdateFormStableService.",
+   "Resolve config.payload menjadi { submissionId, candidateToken, candidateTokenExpiresAt }.",
+   "Cari submission by id (deleted_at null); tolak jika status COMPLETED atau formLink belum ada.",
+   "Set searchParam token = candidateToken pada formLink.",
+   "UPDATE form_link, sent_at = now, expired_at = candidateTokenExpiresAt.",
+   "Kumpulkan { submissionId, formLink } per item dan append { name: 'UpdateForm', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve per item menjadi UpdateFormPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "submissionId",
+    "type": "string",
+    "required": true,
+    "description": "ID baris process.applicant_form_submission; mis. $applicantFormSubmission[0].id."
+   },
+   {
+    "key": "candidateToken",
+    "type": "string",
+    "required": true,
+    "description": "Token baru dari step GenerateCandidateToken sebelumnya."
+   },
+   {
+    "key": "candidateTokenExpiresAt",
+    "type": "string",
+    "required": true,
+    "description": "ISO timestamp kedaluwarsa token; disimpan ke expired_at."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.formSubmission (array, di-loop)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateForm', results: Array<{ submissionId: string; formLink: string }> }.",
+  "sideEffects": [
+   "UPDATE process.applicant_form_submission (form_link, sent_at, expired_at)."
+  ],
+  "errors": [
+   "NotFoundException(\"No form submission found for id '<id>'\").",
+   "BadRequestException(\"Submission '<id>' has already been completed\").",
+   "BadRequestException(\"Submission '<id>' has no form link yet — use CreateForm, not UpdateForm\").",
+   "TypeError dari new URL() jika formLink tersimpan bukan URL valid."
+  ],
+  "usedInWorkflows": [
+   "RESEND_FORM"
+  ],
+  "example": {
+   "name": "UpdateForm",
+   "config": {
+    "payload": {
+     "submissionId": "$applicantFormSubmission[0].id",
+     "candidateToken": "$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].token",
+     "candidateTokenExpiresAt": "$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].expiresAt"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/form-submission/resend-form.config.ts",
+  "notes": [
+   "LOOP atas ctx.satellitePayload.formSubmission; jika kosong executor tidak melakukan apa-apa. Config default menaruh Transformer { outputKey: '$satellitePayload.formSubmission', transform: [{}] } sebelumnya agar loop jalan tepat sekali.",
+   "Tidak mengirim email; config default diikuti Transformer + SendEmail yang memakai $pipelineResult[?name=='UpdateForm']|[0].results[0].formLink.",
+   "Butuh step GenerateCandidateToken sebelumnya (yang juga butuh satellitePayload.candidateToken diisi Transformer)."
+  ]
+ },
+ {
+  "name": "UpdateInterviewSchedule",
+  "category": "Interview",
+  "file": "process/workflow/executors/update-interview-schedule.pipeline-executor.ts",
+  "summary": "Reschedule interview: membuat/mengedit event kalender (Google Meet/Zoho) via gRPC bila online, lalu menandai baris interview lama DELETED dan membuat baris interview baru berstatus ACTIVE.",
+  "behavior": [
+   "Ambil array ctx.satellitePayload.interview; untuk tiap item buat ctx dengan satellitePayload.interview = item tunggal dan panggil UpdateInterviewScheduleStableService.",
+   "Resolve config.payload menjadi UpdateInterviewSchedulePayload; cari interview by interviewId (deleted_at null) dan harus berstatus ACTIVE.",
+   "Simpan jadwal lama sebagai previous { interviewDate, startTime, endTime } (dari scheduledStart/End, UTC).",
+   "interviewDate/startTime/endTime/meetingLinkType/meetingLink default ke nilai lama bila tidak dikirim.",
+   "Jika ONLINE + GOOGLE_MEET/ZOHO_MEETING: guest = email kandidat (candidateEmailEncrypted didekripsi, fallback plaintext) + email interviewer; Zoho dengan event & meeting key lama -> editEvent zoho; ada meetingIdentifierId -> editEvent; selain itu createEvent (meet: true). meetingLink/meetingIdentifierId diambil dari respon.",
+   "location hanya dipertahankan untuk OFFLINE (online -> null). interviewMeta: untuk Zoho digabung dengan zohoMeetingKey/zohoStartLink, selain itu payload.interviewMeta atau nilai lama.",
+   "Dalam transaksi: set status interview lama = DELETED, buat baris interview baru (ACTIVE) dengan data gabungan.",
+   "Push { ...interviewBaru, previous } ke results; append { name: 'UpdateInterviewSchedule', results } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve per item menjadi UpdateInterviewSchedulePayload; referensikan item via $satellitePayload.interview.<field>."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "interviewId",
+    "type": "string",
+    "required": true,
+    "description": "ID interview ACTIVE yang akan di-reschedule."
+   },
+   {
+    "key": "interviewType",
+    "type": "InterviewType",
+    "required": true,
+    "description": "ONLINE/OFFLINE; dipakai langsung (tidak fallback ke nilai lama)."
+   },
+   {
+    "key": "interviewers",
+    "type": "Array<{ employeeId: string; name: string; email: string }>",
+    "required": true,
+    "description": "Daftar interviewer; dipakai langsung dan untuk guest kalender."
+   },
+   {
+    "key": "candidateEmail",
+    "type": "string | null",
+    "required": false,
+    "description": "Email kandidat plaintext (dipakai bila candidateEmailEncrypted kosong)."
+   },
+   {
+    "key": "candidateEmailEncrypted",
+    "type": "string | null",
+    "required": false,
+    "description": "Email kandidat terenkripsi; gagal dekripsi dianggap plaintext."
+   },
+   {
+    "key": "candidateName",
+    "type": "string | null",
+    "required": false,
+    "description": "Tidak dipakai oleh service saat ini."
+   },
+   {
+    "key": "interviewDate",
+    "type": "string",
+    "required": false,
+    "description": "yyyy-MM-dd; default tanggal lama."
+   },
+   {
+    "key": "startTime",
+    "type": "string",
+    "required": false,
+    "description": "HH:mm; default jam lama."
+   },
+   {
+    "key": "endTime",
+    "type": "string",
+    "required": false,
+    "description": "HH:mm; default jam lama."
+   },
+   {
+    "key": "meetingLinkType",
+    "type": "MeetingLinkType | null",
+    "required": false,
+    "description": "GOOGLE_MEET/ZOHO_MEETING/...; default nilai lama."
+   },
+   {
+    "key": "meetingLink",
+    "type": "string | null",
+    "required": false,
+    "description": "Link manual; ditimpa hasil gRPC bila meet otomatis."
+   },
+   {
+    "key": "location",
+    "type": "string | null",
+    "required": false,
+    "description": "Lokasi, hanya untuk OFFLINE."
+   },
+   {
+    "key": "interviewMeta",
+    "type": "unknown",
+    "required": false,
+    "description": "Meta tambahan (non-Zoho)."
+   },
+   {
+    "key": "rescheduleReason",
+    "type": "string",
+    "required": false,
+    "description": "Alasan reschedule; default nilai lama."
+   }
+  ],
+  "contextReads": [
+   "ctx.satellitePayload.interview (array, di-loop)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateInterviewSchedule', results: Array<ApplicantInterviewEntity & { previous: { interviewDate, startTime, endTime } }> }. Perubahan ctx.entity yang dilakukan service dibuang oleh executor.",
+  "sideEffects": [
+   "gRPC CalendarGrpcService.editEvent / createEvent (Google Meet atau Zoho) untuk interview ONLINE dengan meetingLinkType GOOGLE_MEET/ZOHO_MEETING.",
+   "UPDATE process.applicant_interview lama: status = DELETED.",
+   "INSERT process.applicant_interview baru (status ACTIVE, id baru)."
+  ],
+  "errors": [
+   "InterviewScheduleNotFoundException (404, code ERR_SCHEDULE_NOT_FOUND) jika interview tidak ada / bukan ACTIVE.",
+   "Error gRPC kalender diteruskan apa adanya.",
+   "TypeError jika interviewers tidak dikirim pada interview online meet (interviewers.map)."
+  ],
+  "usedInWorkflows": [
+   "RESCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW_SINGLE"
+  ],
+  "example": {
+   "name": "UpdateInterviewSchedule",
+   "config": {
+    "payload": {
+     "endTime": "$satellitePayload.interview.endTime",
+     "location": "$satellitePayload.interview.location",
+     "startTime": "$satellitePayload.interview.startTime",
+     "interviewId": "$satellitePayload.interview.interviewId",
+     "meetingLink": "$satellitePayload.interview.meetingLink",
+     "interviewers": "$satellitePayload.interview.interviewers",
+     "interviewDate": "$satellitePayload.interview.interviewDate",
+     "interviewType": "$satellitePayload.interview.interviewType",
+     "meetingLinkType": "$satellitePayload.interview.meetingLinkType",
+     "rescheduleReason": "$satellitePayload.interview.rescheduleReason"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/reschedule-interview.config.ts",
+  "notes": [
+   "LOOP atas ctx.satellitePayload.interview; array kosong = no-op.",
+   "Reschedule menghasilkan baris interview dengan id BARU; id lama berstatus DELETED.",
+   "Waktu dikirim ke kalender dengan timezone 'UTC'; jam di previous juga UTC. Untuk tampilan email gunakan ConvertTimezone pada results[0].scheduledStart.",
+   "Tidak mengirim email; config default diikuti ConvertTimezone + Transformer + SendEmail."
+  ]
+ },
+ {
+  "name": "UpdateOfferingLetter",
+  "category": "Offering Letter",
+  "file": "process/workflow/executors/update-offering-letter-stable.pipeline-executor.ts",
+  "summary": "Mengirim (atau mengirim ulang) offering letter: menyimpan template, variable/payroll component terenkripsi, dokumen hasil generate dan token kandidat ke offering aktif (atau versi baru), lalu menyiapkan payload email offering di ctx.",
+  "behavior": [
+   "Resolve config.payload menjadi UpdateOfferingLetterPayload (UpdateOfferingLetterStableService).",
+   "Dalam transaksi: ambil offering aktif terbaru (lock pessimistic_write) untuk applicantProcessId.",
+   "Jika status ACTION_NEEDED atau DRAFT (kirim pertama): update baris itu in-place.",
+   "Selain itu (resend): soft delete baris lama, buat baris baru dengan version + 1, menyalin identitas (process/bucket/candidate/vacancy/group/stage/identifier/status) dan mereset signed document/review/completedAt.",
+   "Field yang ditulis: documentTemplateId, templateName, documentTemplateContent, variableComponents (value dienkripsi PII), payrollComponents (dienkripsi), generatedDocumentMediaId, candidateToken, tokenExpiredAt, offeringStatus = OFFERED, sentBy, sentAt = now.",
+   "Executor membangun offeringUrl = <ctx.tenant.careersiteUrl>/offering?token=<candidateToken>&offeringId=<id>&applicantBucketId=<bucketId>.",
+   "Membangun emailPayload { offeringLetter_candidateName, offeringLetter_urlLink, offeringLetter_vacancyName, offeringLetter_companyName, offeringLetter_employmentType, offeringLetter_offerDeadline, offeringLetter_updatedDate }.",
+   "Set ctx.content = emailPayload, ctx.satellitePayload.email = [{ email, emailTemplateId, subject, payload: emailPayload }] dan append hasil ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi UpdateOfferingLetterPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "applicantProcessId",
+    "type": "string",
+    "required": true,
+    "description": "ID applicant process pemilik offering; biasanya $bucket.currentProcess.processId."
+   },
+   {
+    "key": "documentTemplateId",
+    "type": "string",
+    "required": true,
+    "description": "ID document template."
+   },
+   {
+    "key": "templateName",
+    "type": "string",
+    "required": true,
+    "description": "Nama template."
+   },
+   {
+    "key": "documentTemplateContent",
+    "type": "string",
+    "required": true,
+    "description": "HTML template."
+   },
+   {
+    "key": "variableComponents",
+    "type": "Array<{ name: string; value: string | null }>",
+    "required": true,
+    "description": "Variabel template; value non-null dienkripsi. Wajib array (di-.map)."
+   },
+   {
+    "key": "payrollComponents",
+    "type": "Record<string, unknown> | null",
+    "required": false,
+    "description": "Komponen payroll; dienkripsi bila tidak null/undefined."
+   },
+   {
+    "key": "generatedDocumentMediaId",
+    "type": "string",
+    "required": true,
+    "description": "ID media PDF hasil GenerateOfferingLetterDocument ($entity.generatedOfferingDocument.id)."
+   },
+   {
+    "key": "candidateToken",
+    "type": "string",
+    "required": true,
+    "description": "Token dari GenerateCandidateToken."
+   },
+   {
+    "key": "tokenExpiredAt",
+    "type": "string | Date",
+    "required": true,
+    "description": "Kedaluwarsa token / offer deadline."
+   },
+   {
+    "key": "sentBy",
+    "type": "string",
+    "required": true,
+    "description": "Actor pengirim; biasanya $authContext.actorId."
+   }
+  ],
+  "contextReads": [
+   "ctx.tenant.careersiteUrl, ctx.tenant.name (diisi step GetTenantData)",
+   "ctx.email.payload.candidateName, ctx.email.payload.vacancyName, ctx.email.recipient, ctx.email.templateId, ctx.email.subject (diisi Transformer di beforeExecute tenant config)",
+   "ctx.vacancy.employmentStatus.meta.name",
+   "ctx.satellitePayload",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.content = emailPayload; ctx.satellitePayload = { ...ctx.satellitePayload, email: [{ email, emailTemplateId, subject, payload: emailPayload }] }; append ke ctx.pipelineResult: { name: 'UpdateOfferingLetter', results: [{ id, version, offeringStatus, sentAt, tokenExpiredAt }] }.",
+  "sideEffects": [
+   "UPDATE process.applicant_offerings (kirim pertama, status ACTION_NEEDED/DRAFT), atau soft delete baris lama + INSERT baris versi baru (resend).",
+   "Enkripsi PII untuk variable_components dan payroll_components."
+  ],
+  "errors": [
+   "OfferingNotFoundException (404, ERR_OFFERING_NOT_FOUND) jika tidak ada offering aktif.",
+   "TypeError jika ctx.email atau ctx.tenant tidak ada (diakses tanpa optional chaining), atau variableComponents bukan array."
+  ],
+  "usedInWorkflows": [
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "UpdateOfferingLetter",
+   "config": {
+    "payload": {
+     "sentBy": "$authContext.actorId",
+     "templateName": "$entity.documentTemplate.name",
+     "candidateToken": "$pipelineResult[?name == 'GenerateCandidateToken'] | [0].results[0].token",
+     "tokenExpiredAt": "$pipelineResult[?name == 'GenerateCandidateToken'] | [0].results[0].expiresAt",
+     "payrollComponents": "$satellitePayload.offeringLetter.payrollComponents",
+     "applicantProcessId": "$bucket.currentProcess.processId",
+     "documentTemplateId": "$entity.documentTemplate.id",
+     "variableComponents": "$satellitePayload.offeringLetter.variableComponents",
+     "documentTemplateContent": "$entity.documentTemplate.html",
+     "generatedDocumentMediaId": "$entity.generatedOfferingDocument.id"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/send-offering-letter.config.ts",
+  "notes": [
+   "Wajib didahului GetTenantData (mengisi ctx.tenant) dan GenerateCandidateToken; ctx.email harus sudah dibangun Transformer di beforeExecute tenant config (list-offering-letter-stable: outputKey '$email' dengan recipient/templateId/subject/payload).",
+   "ctx.content dan satellitePayload.email[0].payload adalah objek yang SAMA, sehingga step FormatDate berikutnya (yang memformat ctx.content in-place) ikut memformat payload email.",
+   "Tidak mengirim email sendiri; step SendEmail berikutnya membaca $satellitePayload.email.",
+   "Tidak mengubah status applicant process (gunakan SetStatusApplicantProcess)."
+  ]
+ },
+ {
+  "name": "UpdatePreOnboarding",
+  "category": "Pre-Onboarding",
+  "file": "process/workflow/executors/update-pre-onboarding.pipeline-executor.ts",
+  "summary": "Mem-patch satu baris pre-onboarding (status, joinDate, hiredAt, dll.) dengan field yang ada pada payload hasil resolve.",
+  "behavior": [
+   "Resolve config.payload menjadi { id, ...patch } (UpdatePreOnboardingStableService); tidak di-loop.",
+   "Set ctx.entity = patch (shallow, menggantikan ctx.entity sebelumnya).",
+   "Dalam transaksi: findOne pre-onboarding by id, Object.assign(existing, patch), save.",
+   "Append { name: 'UpdatePreOnboarding', results: preOnboarding } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi UpdatePreOnboardingPayload."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "id",
+    "type": "string",
+    "required": true,
+    "description": "ID pre-onboarding; mis. $applicantPreOnboarding[0].id."
+   },
+   {
+    "key": "status",
+    "type": "PreOnboardingStatus",
+    "required": false,
+    "description": "WAITING_FOR_CANDIDATE | UNDER_REVIEW | NEEDS_REVISION | NEED_ACTION | COMPLETED | TRANSFERED | HIRED."
+   },
+   {
+    "key": "joinDate",
+    "type": "string | null",
+    "required": false,
+    "description": "Tanggal join."
+   },
+   {
+    "key": "hiredAt",
+    "type": "Date | null",
+    "required": false,
+    "description": "Waktu hired."
+   },
+   {
+    "key": "vacancyStageId",
+    "type": "string | null",
+    "required": false,
+    "description": "Stage terkait."
+   },
+   {
+    "key": "stageType",
+    "type": "string | null",
+    "required": false,
+    "description": "Tipe stage."
+   },
+   {
+    "key": "identifier",
+    "type": "string | null",
+    "required": false,
+    "description": "Identifier."
+   },
+   {
+    "key": "onboardingTemplateId",
+    "type": "string | null",
+    "required": false,
+    "description": "Template onboarding."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.entity diganti menjadi objek patch (tanpa id); append ke ctx.pipelineResult: { name: 'UpdatePreOnboarding', results: PreOnboardingEntity }.",
+  "sideEffects": [
+   "UPDATE process.pre_onboardings dengan field yang ada di patch."
+  ],
+  "errors": [
+   "PreOnboardingNotFoundException (404, ERR_PRE_ONBOARDING_NOT_FOUND) jika id tidak ditemukan."
+  ],
+  "usedInWorkflows": [
+   "HIRE_CANDIDATE"
+  ],
+  "example": {
+   "name": "UpdatePreOnboarding",
+   "config": {
+    "payload": {
+     "id": "$applicantPreOnboarding[0].id",
+     "status": "HIRED",
+     "joinDate": "$satellitePayload.hire.joinDate"
+    }
+   }
+  },
+  "exampleSource": "process/workflow/config/pre-onboarding/hire-candidate.config.ts",
+  "notes": [
+   "Key yang di-resolve ke null tetap ikut di-patch (menimpa kolom dengan null); key yang tidak ditulis di payload tidak disentuh. Jangan tulis key yang tidak ingin diubah.",
+   "Lookup by id tidak memfilter deleted_at.",
+   "ctx.entity sebelumnya hilang (ditimpa patch) — perhatikan bila step berikutnya membaca $entity.*.",
+   "Tidak ada sync filterable attribute / notifikasi; status applicant process diatur terpisah (SetStatusApplicantProcess)."
+  ]
+ },
+ {
+  "name": "UpdateVacancyCompletionStatus",
+  "category": "Applicant Process",
+  "file": "process/workflow/executors/update-vacancy-completion-status.pipeline-executor.ts",
+  "summary": "Mengecek apakah jumlah applicant HIRED/CONVERTED pada vacancy bucket saat ini sudah mencapai headcount quota; bila ya, menandai vacancy FULLFILED.",
+  "behavior": [
+   "Ambil ctx.bucket.vacancyId; wajib ada.",
+   "Dalam transaksi: lock vacancy (pessimistic_write, deleted_at null).",
+   "Jika completionStatus sudah FULLFILED, langsung kembalikan FULLFILED.",
+   "Hitung applicant_bucket pada vacancy (deleted_at null) yang filterable_attribute.status = 'HIRED' atau 'CONVERTED'.",
+   "Jika hitungan < headcountQuota: kembalikan completionStatus saat ini (default INCOMPLETE) tanpa menulis apa pun.",
+   "Jika tercapai: UPDATE vacancy.completion_status = FULLFILED dan merge filterable_attribute.completionStatus = FULLFILED.",
+   "Append { name: 'UpdateVacancyCompletionStatus', results: <status> } ke ctx.pipelineResult."
+  ],
+  "configFields": [],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.bucket.vacancyId",
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpdateVacancyCompletionStatus', results: 'FULLFILED' | 'INCOMPLETE' | 'EXPIRED' } (string enum VacancyCompletionStatus).",
+  "sideEffects": [
+   "UPDATE vacancy.vacancy.completion_status = 'FULLFILED' dan vacancy.vacancy.filterable_attribute (|| { completionStatus: 'FULLFILED' }) bila quota tercapai."
+  ],
+  "errors": [
+   "BadRequestException('Current applicant bucket has no vacancy') jika ctx.bucket.vacancyId kosong.",
+   "NotFoundException('Vacancy <id> not found')."
+  ],
+  "usedInWorkflows": [
+   "HIRE_CANDIDATE"
+  ],
+  "example": {
+   "name": "UpdateVacancyCompletionStatus",
+   "config": {}
+  },
+  "exampleSource": "process/workflow/config/pre-onboarding/hire-candidate.config.ts",
+  "notes": [
+   "Penghitungan membaca applicant_bucket.filterable_attribute.status, jadi harus dijalankan SETELAH step yang menulis status HIRED (mis. SetStatusApplicantProcess { value: 'HIRED' }, yang juga mengupdate filterable_attribute.status).",
+   "Ejaan enum memang 'FULLFILED'.",
+   "Config diabaikan; cukup {}."
+  ]
+ },
+ {
+  "name": "UpsertApplicantFilterableAttribute",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/upsert-applicant-filterable-attribute.pipeline-executor.ts",
+  "summary": "Upsert key-key ke kolom jsonb filterable_attribute milik applicant bucket saat ini (merge SQL ||), tanpa menyentuh key lain.",
+  "behavior": [
+   "Ambil ctx.bucket.id; wajib ada.",
+   "Resolve config.payload ({ key: literal | '$jmespath' }) terhadap ctx.",
+   "Buang entry yang nilainya null/undefined (jmespath miss tidak menimpa nilai lama).",
+   "Jika tidak ada entry tersisa, kembalikan ctx.bucket.filterableAttribute apa adanya (tanpa query).",
+   "UPDATE applicant_bucket SET filterable_attribute = COALESCE(filterable_attribute,'{}') || patch WHERE id = bucket AND deleted_at IS NULL RETURNING filterable_attribute.",
+   "Patch ctx.bucket.filterableAttribute in-place dengan hasil, lalu append { name: 'UpsertApplicantFilterableAttribute', results: filterableAttribute } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Objek datar { <filterableKey>: <literal | '$jmespath'> }. Key literal, harus sesuai tenant config filterable[].key (bukan nama kolom)."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "<filterableKey>",
+    "type": "unknown (Record<string, unknown>)",
+    "required": false,
+    "description": "Nilai yang akan disimpan di filterable_attribute.<filterableKey>; null/undefined dilewati."
+   }
+  ],
+  "contextReads": [
+   "ctx.bucket.id",
+   "ctx.bucket.filterableAttribute",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.bucket.filterableAttribute dipatch in-place; append ke ctx.pipelineResult: { name: 'UpsertApplicantFilterableAttribute', results: Record<string, unknown> } (filterable_attribute lengkap setelah merge).",
+  "sideEffects": [
+   "UPDATE applicant.applicant_bucket.filterable_attribute (merge jsonb ||, atomic)."
+  ],
+  "errors": [
+   "NotFoundException('No current bucket on ctx to upsert filterable attributes into').",
+   "NotFoundException('Applicant bucket <id> not found') jika UPDATE tidak mengenai baris."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "UpsertApplicantFilterableAttribute",
+   "config": {
+    "payload": {
+     "joinDate": "$satellitePayload.hire.joinDate",
+     "source": "REFERRAL"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Merge bersifat shallow di level top-level key: nilai objek/array untuk key yang sama diganti total.",
+   "Tidak bisa menghapus key (null dilewati).",
+   "Target selalu bucket saat ini (ctx.bucket), tidak di-loop.",
+   "Tidak ditemukan pemakaian di config workflow default; key contoh di atas hanya ilustrasi."
+  ]
+ },
+ {
+  "name": "UpsertApplicantKeywords",
+  "category": "Data & Cache",
+  "file": "process/workflow/executors/upsert-applicant-keywords.pipeline-executor.ts",
+  "summary": "Menambahkan keyword ke kolom text[] keywords milik applicant bucket saat ini; keyword yang sudah ada (exact match) diabaikan.",
+  "behavior": [
+   "Ambil ctx.bucket.id; wajib ada.",
+   "Resolve config.payload (array literal / '$jmespath') terhadap ctx.",
+   "Flatten hingga 2 level, ambil hanya string non-blank, dedupe.",
+   "Jika kosong, kembalikan ctx.bucket.keywords apa adanya.",
+   "UPDATE applicant_bucket SET keywords = COALESCE(keywords,'{}') || (incoming yang belum ada) RETURNING keywords — urutan lama dipertahankan.",
+   "Patch ctx.bucket.keywords in-place, append { name: 'UpsertApplicantKeywords', results: keywords } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Array berisi string literal atau '$jmespath' yang menghasilkan string / string[]; bisa juga satu '$jmespath' yang menghasilkan array."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "[]",
+    "type": "Array<string | string[] | null>",
+    "required": false,
+    "description": "Item non-string/blank/null dilewati; item array di-flatten."
+   }
+  ],
+  "contextReads": [
+   "ctx.bucket.id",
+   "ctx.bucket.keywords",
+   "ctx.pipelineResult"
+  ],
+  "output": "ctx.bucket.keywords dipatch in-place; append ke ctx.pipelineResult: { name: 'UpsertApplicantKeywords', results: string[] } (keywords lengkap setelah append).",
+  "sideEffects": [
+   "UPDATE applicant.applicant_bucket.keywords (append atomic di SQL)."
+  ],
+  "errors": [
+   "NotFoundException('No current bucket on ctx to upsert keywords into').",
+   "NotFoundException('Applicant bucket <id> not found')."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "UpsertApplicantKeywords",
+   "config": {
+    "payload": [
+     "$vacancy.name",
+     "$candidate.name",
+     "REFERRAL"
+    ]
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "Hanya menambah; tidak pernah menghapus atau mengubah urutan keyword lama.",
+   "Pencocokan case-sensitive (exact string).",
+   "Tidak ditemukan pemakaian di config workflow default."
+  ]
+ },
+ {
+  "name": "UpsertCustomFields",
+  "category": "Candidate Data",
+  "file": "process/workflow/executors/upsert-custom-fields.pipeline-executor.ts",
+  "summary": "Upsert nilai custom field ke tabel custom field yang ditentukan tenant config (customData.table), per fieldKey untuk satu parentId.",
+  "behavior": [
+   "Tentukan tenant config: jika config.configType diisi, ambil via GetTenantConfigurationValueService (tenantId dari ctx.authContext); selain itu pakai ctx.tenantConfig.",
+   "Wajib ada customData.table dan customData.fields; semua field type harus termasuk CustomFieldType (TEXT, NUMBER, BOOLEAN, DATE, UUID, JSONB).",
+   "Resolve config.parentId dan config.payload terhadap ctx.",
+   "UpsertCustomFieldsService: butuh authContext.tenantId, groupId dan parentId; payload kosong -> [] tanpa query.",
+   "Tiap key payload harus terdefinisi di customData.fields; nilai dipetakan ke kolom value_text/value_number/value_id/value_bool/value_date/jsonb_value + meta.",
+   "Field UUID dengan module referensi: meta di-resolve batch via ModuleReferenceRegistry.",
+   "Dalam transaksi: cari baris existing (tenantId, parentId, fieldKey IN ..., deleted_at null); merge bila ada, create bila belum; save semua.",
+   "Append { name: 'UpsertCustomFields', results: entity[] } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "configType",
+    "type": "ConfigType",
+    "required": false,
+    "description": "Tenant config yang dipakai untuk definisi customData (mis. 'CANDIDATE_STABLE'); default ctx.tenantConfig."
+   },
+   {
+    "key": "parentId",
+    "type": "unknown (literal UUID atau '$jmespath')",
+    "required": true,
+    "description": "ID parent pemilik custom field (mis. $candidateTenantPool.id)."
+   },
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Objek { fieldKey: value } atau '$jmespath' yang menghasilkan objek tersebut."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "<fieldKey>",
+    "type": "unknown (Record<string, unknown>)",
+    "required": false,
+    "description": "Nilai custom field; key harus ada di customData.fields tenant config."
+   }
+  ],
+  "contextReads": [
+   "ctx.authContext.tenantId / groupId / actorId",
+   "ctx.tenantConfig.customData (bila configType tidak diisi)",
+   "ctx.pipelineResult"
+  ],
+  "output": "Append ke ctx.pipelineResult: { name: 'UpsertCustomFields', results: IBaseCustomFieldEntity[] } (baris tersimpan).",
+  "sideEffects": [
+   "INSERT/UPDATE pada tabel customData.table dari tenant config (mis. candidate.candidate_custom_fields untuk CANDIDATE_STABLE), set deleted_at = null.",
+   "Query ke adapter module reference untuk field UUID ber-module."
+  ],
+  "errors": [
+   "BadRequestException('Tenant customData configuration is required').",
+   "BadRequestException(\"Unsupported custom field type '<type>'\").",
+   "BadRequestException('tenantId, groupId and parentId are required').",
+   "BadRequestException('Custom field key must not be blank').",
+   "BadRequestException(\"Custom field '<key>' is not configured\").",
+   "TypeError bila payload ter-resolve ke null/undefined (Object.keys) atau module referensi tidak terdaftar di registry."
+  ],
+  "usedInWorkflows": [
+   "UPSERT_CANDIDATE_CUSTOM_FIELDS"
+  ],
+  "example": {
+   "name": "UpsertCustomFields",
+   "config": {
+    "configType": "CANDIDATE_STABLE",
+    "parentId": "$candidateTenantPool.id",
+    "payload": "$requestBody.satellitePayload.customFields"
+   }
+  },
+  "exampleSource": "process/workflow/config/custom-field/upsert-candidate-custom-fields.config.ts",
+  "notes": [
+   "Hanya upsert key yang dikirim; field lain milik parent tidak dihapus.",
+   "Tabel tujuan ditentukan oleh tenant config, bukan oleh config pipeline.",
+   "Konversi nilai per tipe dilakukan CustomResolverService (tidak ditelusuri lebih dalam); nilai yang tidak cocok tipe mungkin menghasilkan error/nilai null."
+  ]
+ },
+ {
+  "name": "VerifyPreOnboardingItems",
+  "category": "Pre-Onboarding",
+  "file": "process/workflow/executors/verify-pre-onboarding-items.pipeline-executor.ts",
+  "summary": "Menerapkan batch keputusan review recruiter (APPROVED/REJECTED) pada snapshot dokumen dan pertanyaan form pre-onboarding, opsional menghitung status akhir COMPLETED/NEEDS_REVISION.",
+  "behavior": [
+   "Resolve config.payload menjadi VerifyPreOnboardingItemsPayload (satu panggilan, tidak di-loop).",
+   "Resolve config.moduleReferences terhadap ctx; reviewedByMeta = resolvedCtx.verify.reviewedByMeta ?? null.",
+   "Dalam transaksi: ambil semua document snapshot dan form question snapshot untuk preOnboardingId; jika keduanya kosong -> not found.",
+   "Validasi: keputusan REJECTED (pada item yang belum APPROVED) wajib punya remarks non-blank.",
+   "Terapkan keputusan: item yang sudah APPROVED atau id yang tidak dikenal dilewati; set reviewStatus, remarks (hanya untuk REJECTED, selain itu null), reviewedBy, reviewedByMeta, simpan.",
+   "Jika finalizeReview = true: bila masih ada item unresolved (null/UNSUBMITTED/SUBMITTED/PENDING) yang wajib atau sudah diisi -> error; jika ada REJECTED -> NEEDS_REVISION, selain itu COMPLETED.",
+   "ctx dikembalikan = resolvedCtx dengan ctx.entity = { preOnboardingId, computedStatus }.",
+   "Append { name: 'VerifyPreOnboardingItems', results: [...documents, ...forms], computedStatus } ke ctx.pipelineResult."
+  ],
+  "configFields": [
+   {
+    "key": "payload",
+    "type": "unknown (template jmespath)",
+    "required": true,
+    "description": "Template yang di-resolve menjadi VerifyPreOnboardingItemsPayload; biasanya dari $satellitePayload.verifyPreOnboarding.*."
+   },
+   {
+    "key": "moduleReferences",
+    "type": "ModuleReferenceItem[]",
+    "required": false,
+    "description": "Literal. Untuk mengisi reviewedByMeta dengan targetPath $verify.reviewedByMeta."
+   }
+  ],
+  "payloadFields": [
+   {
+    "key": "preOnboardingId",
+    "type": "string",
+    "required": true,
+    "description": "ID pre-onboarding."
+   },
+   {
+    "key": "documentDecisions",
+    "type": "VerifyPreOnboardingDocumentDecisionInput[] ({ documentSnapshotId: string; status: VerificationStatus; remarks?: string | null })",
+    "required": false,
+    "description": "Keputusan per document snapshot."
+   },
+   {
+    "key": "formDecisions",
+    "type": "VerifyPreOnboardingFormDecisionInput[] ({ formSnapshotId: string; status: VerificationStatus; remarks?: string | null })",
+    "required": false,
+    "description": "Keputusan per form question snapshot."
+   },
+   {
+    "key": "finalizeReview",
+    "type": "boolean",
+    "required": true,
+    "description": "true = hitung computedStatus (dan validasi semua item sudah resolved)."
+   },
+   {
+    "key": "reviewedBy",
+    "type": "string | null",
+    "required": true,
+    "description": "Actor reviewer; biasanya $authContext.actorId."
+   }
+  ],
+  "contextReads": [
+   "ctx.pipelineResult",
+   "ctx.verify.reviewedByMeta (hasil moduleReferences)"
+  ],
+  "output": "ctx.entity diganti menjadi { preOnboardingId, computedStatus }; ctx berisi hasil moduleReferences (mis. ctx.verify); append ke ctx.pipelineResult: { name: 'VerifyPreOnboardingItems', results: Array<DocumentSnapshot | FormQuestionSnapshot>, computedStatus: 'COMPLETED' | 'NEEDS_REVISION' | null }.",
+  "sideEffects": [
+   "UPDATE process.pre_onboarding_document_snapshots (review_status, remarks, reviewed_by, reviewed_by_meta).",
+   "UPDATE process.pre_onboarding_form_question_snapshots (review_status, remarks, reviewed_by, reviewed_by_meta)."
+  ],
+  "errors": [
+   "PreOnboardingNotFoundException (404, ERR_PRE_ONBOARDING_NOT_FOUND) jika tidak ada snapshot untuk preOnboardingId.",
+   "RejectReasonRequiredException (422, ERR_REJECT_REASON_REQUIRED) jika REJECTED tanpa remarks.",
+   "InvalidTransitionException (422, ERR_INVALID_TRANSITION) jika finalizeReview = true namun masih ada item wajib/terisi yang belum di-review."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "VerifyPreOnboardingItems",
+   "config": {
+    "payload": {
+     "preOnboardingId": "$satellitePayload.verifyPreOnboarding.preOnboardingId",
+     "documentDecisions": "$satellitePayload.verifyPreOnboarding.documentDecisions",
+     "formDecisions": "$satellitePayload.verifyPreOnboarding.formDecisions",
+     "finalizeReview": "$satellitePayload.verifyPreOnboarding.finalizeReview",
+     "reviewedBy": "$authContext.actorId"
+    }
+   }
+  },
+  "exampleSource": "disusun dari DTO",
+  "notes": [
+   "TIDAK menulis process.pre_onboardings.status; untuk menyimpan computedStatus rangkai step UpdatePreOnboarding dengan status \"$pipelineResult[?name=='VerifyPreOnboardingItems']|[0].computedStatus\" (sebaiknya di-gate andCondition agar tidak menulis null saat finalizeReview = false).",
+   "Item yang sudah APPROVED terkunci dan dilewati tanpa error.",
+   "Komentar di file executor menyebut payload 'decisions[]', tetapi kode sebenarnya memakai documentDecisions/formDecisions.",
+   "Tenant config list-pre-onboarding-stable menyalin requestBody.satellitePayload.verifyPreOnboarding ke ctx.satellitePayload.verifyPreOnboarding untuk event VERIFY_PRE_ONBOARDING; tidak ditemukan config workflow default yang memakai executor ini."
+  ]
+ },
+ {
+  "name": "Transformer",
+  "category": "Utility",
+  "file": "common/lifecycle/services/transformer.lifecycle-service.ts",
+  "summary": "Membangun bentuk JSON arbitrer dari nilai-nilai ctx (template '$jmespath') dan menuliskannya ke path ctx tertentu (outputKey). Didaftarkan dari LifecycleService, bukan file di executors/.",
+  "behavior": [
+   "Validasi config.outputKey wajib ada.",
+   "Mode forEach (prioritas): resolve forEach.source (harus array); untuk tiap elemen resolve forEach.template terhadap { ...ctx, [itemKey]: elemen, [pairKey]: elemen pairSource ber-index sama }.",
+   "Mode biasa: resolve config.transform (objek/array/string) terhadap ctx; leaf string '$...' di-resolve, string yang mengandung token $path disubstitusi, sisanya literal.",
+   "Buat ctx baru (shallow copy root + entity), tulis hasil ke outputKey via setContextValue (membuat objek perantara bila perlu).",
+   "Jika forEach.append = true: hasil di-concat ke array yang sudah ada di outputKey."
+  ],
+  "configFields": [
+   {
+    "key": "outputKey",
+    "type": "string",
+    "required": true,
+    "description": "Path tujuan berawalan '$', dot-notation (mis. '$satellitePayload.email'). Tidak mendukung marker []."
+   },
+   {
+    "key": "transform",
+    "type": "unknown",
+    "required": false,
+    "description": "Bentuk JSON apa pun dengan leaf '$jmespath'. Diabaikan bila forEach diisi."
+   },
+   {
+    "key": "forEach.source",
+    "type": "string",
+    "required": false,
+    "description": "'$path' yang harus menghasilkan array."
+   },
+   {
+    "key": "forEach.itemKey",
+    "type": "string",
+    "required": false,
+    "description": "Nama key elemen di template (default 'item')."
+   },
+   {
+    "key": "forEach.template",
+    "type": "unknown",
+    "required": false,
+    "description": "Bentuk per elemen; bisa mengakses $<itemKey>.x dan field ctx lain."
+   },
+   {
+    "key": "forEach.append",
+    "type": "boolean",
+    "required": false,
+    "description": "true = concat ke array yang sudah ada di outputKey."
+   },
+   {
+    "key": "forEach.pairSource",
+    "type": "string",
+    "required": false,
+    "description": "'$path' array kedua dengan panjang sama, dipasangkan per index."
+   },
+   {
+    "key": "forEach.pairKey",
+    "type": "string",
+    "required": false,
+    "description": "Nama key elemen pasangan (default 'pairItem')."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "Seluruh ctx (sesuai template)"
+  ],
+  "output": "Menulis hasil resolve ke path outputKey di ctx (mis. ctx.satellitePayload.email). Tidak menambah entry ke ctx.pipelineResult.",
+  "sideEffects": [],
+  "errors": [
+   "BadRequestException { type: 'LIFECYCLE_TRANSFORMER_OUTPUT_KEY_REQUIRED' } jika outputKey kosong.",
+   "BadRequestException { type: 'LIFECYCLE_TRANSFORMER_FOREACH_SOURCE_NOT_ARRAY' } jika forEach.source bukan array.",
+   "BadRequestException { type: 'LIFECYCLE_TRANSFORMER_FOREACH_PAIR_SOURCE_MISMATCH' } jika pairSource bukan array atau panjangnya beda.",
+   "BadRequestException { type: 'MODULE_REFERENCE_TARGET_PATH_INVALID' } jika outputKey kosong setelah '$' atau memakai '[]'."
+  ],
+  "usedInWorkflows": [
+   "SEND_FORM",
+   "RESEND_FORM",
+   "CREATE_SCHEDULE_INTERVIEW",
+   "CREATE_SCHEDULE_INTERVIEW_SINGLE",
+   "RESCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW_SINGLE",
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER"
+  ],
+  "example": {
+   "name": "Transformer",
+   "config": {
+    "forEach": {
+     "append": true,
+     "source": "$satellitePayload.interview[0].interviewers",
+     "itemKey": "interviewer",
+     "template": {
+      "email": "$interviewer.email",
+      "payload": {
+       "candidate_name": "$candidate.name",
+       "interviewer_name": "$interviewer.name",
+       "vacancy_name": "$vacancy.name"
+      },
+      "subject": "An interview you're on has been rescheduled",
+      "emailTemplateId": "$tenantConfig.emailTemplates.interviewerInterviewRescheduledEmailTemplateId"
+     }
+    },
+    "outputKey": "$satellitePayload.email"
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/reschedule-interview.config.ts (dipangkas, field payload dikurangi)",
+  "notes": [
+   "Juga dipakai di beforeExecute/afterExecute tenant config (mis. menyalin $requestBody.satellitePayload.X ke $satellitePayload.X atau membangun $email).",
+   "Pola umum: { outputKey: '$satellitePayload.formSubmission', transform: [{}] } untuk memaksa executor loop (UpdateForm, GenerateCandidateToken, dll.) berjalan tepat sekali.",
+   "setContextValue menulis in-place ke objek nested yang dibagi dengan ctx sebelumnya (hanya root dan entity yang di-copy).",
+   "Jika segmen perantara outputKey berupa array, segmen itu diganti objek kosong."
+  ]
+ },
+ {
+  "name": "FormatDate",
+  "category": "Utility",
+  "file": "common/lifecycle/services/format-date.lifecycle-service.ts",
+  "summary": "Memformat field tanggal pada ctx.content (objek atau array objek) in-place memakai format Luxon. Didaftarkan dari LifecycleService, bukan file di executors/.",
+  "behavior": [
+   "rows = ctx.content bila array, selain itu [ctx.content].",
+   "Untuk tiap row objek dan tiap entry fields: lewati jika field tidak ada di row.",
+   "Parse nilai: Date (UTC), string ISO (setZone), atau string SQL; gagal parse -> log warning dan lewati.",
+   "Ganti nilai field dengan hasil toFormat(targetFormat) (default 'yyyy-MM-dd').",
+   "Kembalikan ctx yang sama (mutasi in-place)."
+  ],
+  "configFields": [
+   {
+    "key": "fields",
+    "type": "Array<string | { field: string; targetFormat?: string }>",
+    "required": true,
+    "description": "Nama field di ctx.content yang diformat; string = format default 'yyyy-MM-dd'."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "ctx.content"
+  ],
+  "output": "Tidak menambah key baru; memodifikasi nilai field di ctx.content in-place (objek yang sama).",
+  "sideEffects": [],
+  "errors": [],
+  "usedInWorkflows": [
+   "SEND_OFFERING_LETTER",
+   "RESEND_OFFERING_LETTER",
+   "SEND_OFFERING_LETTER_REMINDER"
+  ],
+  "example": {
+   "name": "FormatDate",
+   "config": {
+    "fields": [
+     {
+      "field": "offeringLetter_offerDeadline",
+      "targetFormat": "dd MMMM yyyy"
+     }
+    ]
+   }
+  },
+  "exampleSource": "process/workflow/config/offering-letter/send-offering-letter.config.ts",
+  "notes": [
+   "Hanya bekerja pada ctx.content; di pipeline offering letter, ctx.content diisi oleh UpdateOfferingLetter dan merupakan objek yang sama dengan satellitePayload.email[0].payload, sehingga payload email ikut terformat.",
+   "Untuk string ISO, zona waktu dari string dipertahankan (tidak dikonversi); gunakan ConvertTimezone bila butuh konversi zona.",
+   "Locale bulan mengikuti default Luxon (umumnya bahasa Inggris)."
+  ]
+ },
+ {
+  "name": "ConvertTimezone",
+  "category": "Utility",
+  "file": "common/lifecycle/services/convert-timezone.lifecycle-service.ts",
+  "summary": "Mengonversi nilai tanggal/waktu UTC dari ctx ke zona waktu tertentu untuk keperluan tampilan, lalu menulis { date, time, timezone } ke outputKey. Didaftarkan dari LifecycleService, bukan file di executors/.",
+  "behavior": [
+   "Validasi source, timezone, outputKey wajib ada.",
+   "Resolve source dan timezone (boleh literal atau '$path') terhadap ctx.",
+   "Parse source sebagai UTC: Date, string ISO, atau string SQL; gagal parse -> log warning dan kembalikan ctx tanpa perubahan.",
+   "setZone(timezone), format date (default 'yyyy-MM-dd') dan time (default 'HH:mm').",
+   "Tulis { date, time, timezone } ke outputKey pada ctx baru (shallow copy root + entity)."
+  ],
+  "configFields": [
+   {
+    "key": "source",
+    "type": "string",
+    "required": true,
+    "description": "'$path' ke nilai Date/ISO/SQL (dianggap UTC)."
+   },
+   {
+    "key": "timezone",
+    "type": "string",
+    "required": true,
+    "description": "Zona IANA (mis. 'Asia/Jakarta') atau '$path' (mis. $tenantConfig.timezone)."
+   },
+   {
+    "key": "outputKey",
+    "type": "string",
+    "required": true,
+    "description": "Path tujuan berawalan '$'."
+   },
+   {
+    "key": "dateFormat",
+    "type": "string",
+    "required": false,
+    "description": "Format Luxon untuk tanggal (default 'yyyy-MM-dd')."
+   },
+   {
+    "key": "timeFormat",
+    "type": "string",
+    "required": false,
+    "description": "Format Luxon untuk jam (default 'HH:mm')."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "Path yang ditunjuk source dan timezone"
+  ],
+  "output": "Menulis { date: string, time: string, timezone: string } ke path outputKey (mis. ctx.satellitePayload.scheduleDisplay). Tidak menambah entry ke ctx.pipelineResult.",
+  "sideEffects": [],
+  "errors": [
+   "BadRequestException { type: 'LIFECYCLE_CONVERT_TIMEZONE_CONFIG_INVALID' } jika source/timezone/outputKey kosong.",
+   "BadRequestException { type: 'MODULE_REFERENCE_TARGET_PATH_INVALID' } jika outputKey tidak valid."
+  ],
+  "usedInWorkflows": [
+   "CREATE_SCHEDULE_INTERVIEW",
+   "RESCHEDULE_INTERVIEW"
+  ],
+  "example": {
+   "name": "ConvertTimezone",
+   "config": {
+    "outputKey": "$satellitePayload.scheduleDisplay",
+    "source": "$pipelineResult[?name=='UpdateInterviewSchedule']|[0].results[0].scheduledStart",
+    "timezone": "Asia/Jakarta"
+   }
+  },
+  "exampleSource": "process/workflow/config/interview/reschedule-interview.config.ts",
+  "notes": [
+   "Hanya untuk tampilan; tidak menulis ke DB.",
+   "Gagal parse tidak melempar error, sehingga outputKey tidak terisi dan template email berikutnya akan mendapat null/kosong.",
+   "Timezone tidak valid tidak divalidasi eksplisit; perilaku mengikuti Luxon (kemungkinan hasil 'Invalid DateTime')."
+  ]
+ },
+ {
+  "name": "GroupArrayByMatch",
+  "category": "Utility",
+  "file": "process/workflow/executors/group-array-by-match.pipeline-executor.ts",
+  "summary": "Memecah array `source` menjadi satu subset per item `groupBy` (pasangan paralel dari FilterArrayByMatch). Hasilnya array dengan panjang & urutan SAMA dengan `groupBy`, sehingga bisa dipasangkan per indeks oleh Transformer `forEach` berikutnya.",
+  "behavior": [
+   "Resolve `config.source` (template `$...`) terhadap ctx; jika bukan array → error.",
+   "Resolve `config.groupBy` terhadap ctx; jika bukan array → error.",
+   "Untuk setiap item `groupBy`: ambil nilai `item[groupByField]`, lalu filter `source` yang `item[matchField] === nilai tersebut` (perbandingan strict).",
+   "Tulis array hasil (satu subset per group, subset boleh kosong) ke path `config.outputKey` pada salinan ctx (`ctx.entity` di-clone dangkal).",
+   "Tambahkan `{ name: \"GroupArrayByMatch\", results: <hasil> }` ke `ctx.pipelineResult`."
+  ],
+  "configFields": [
+   {
+    "key": "source",
+    "type": "string (template `$`-path)",
+    "required": true,
+    "description": "Path ke array yang dipecah, mis. `$satellitePayload.interviewerFormAccumulator`."
+   },
+   {
+    "key": "matchField",
+    "type": "string",
+    "required": true,
+    "description": "Nama field pada setiap item `source` yang dibandingkan dengan `groupByField`."
+   },
+   {
+    "key": "groupBy",
+    "type": "string (template `$`-path)",
+    "required": true,
+    "description": "Path ke array kunci grup, mis. `$satellitePayload.interview[0].interviewers`."
+   },
+   {
+    "key": "groupByField",
+    "type": "string",
+    "required": true,
+    "description": "Nama field pada setiap item `groupBy` yang menjadi nilai pembanding."
+   },
+   {
+    "key": "outputKey",
+    "type": "string (path ctx)",
+    "required": true,
+    "description": "Lokasi penulisan hasil di ctx via `setContextValue`, mis. `$satellitePayload.interviewerForms` (awalan `$` opsional, dibuang otomatis). Tidak boleh mengandung `[]`."
+   }
+  ],
+  "payloadFields": [],
+  "contextReads": [
+   "Path apa pun yang dirujuk `config.source` dan `config.groupBy`",
+   "ctx.pipelineResult"
+  ],
+  "output": "Menulis `Array<Array<item source>>` ke `config.outputKey` (panjang = jumlah item `groupBy`, urutan sama) dan menambah entri `{ name: \"GroupArrayByMatch\", results }` ke `ctx.pipelineResult`.",
+  "sideEffects": [
+   "Tidak ada (murni transformasi ctx, tanpa DB / IO)."
+  ],
+  "errors": [
+   "`PIPELINE_GROUP_ARRAY_BY_MATCH_SOURCE_NOT_ARRAY` (400) — `source` tidak ter-resolve menjadi array.",
+   "`PIPELINE_GROUP_ARRAY_BY_MATCH_GROUP_BY_NOT_ARRAY` (400) — `groupBy` tidak ter-resolve menjadi array."
+  ],
+  "usedInWorkflows": [],
+  "example": {
+   "name": "GroupArrayByMatch",
+   "config": {
+    "source": "$satellitePayload.interviewerFormAccumulator",
+    "matchField": "employeeId",
+    "groupBy": "$satellitePayload.interview[0].interviewers",
+    "groupByField": "employeeId",
+    "outputKey": "$satellitePayload.interviewerForms"
+   }
+  },
+  "exampleSource": "disusun dari komentar JSDoc di executor (belum ada config nyata yang memakainya)",
+  "notes": [
+   "Berbeda dengan FilterArrayByMatch, subset kosong untuk sebuah grup dianggap valid dan TIDAK melempar error.",
+   "Perbandingan memakai `===` (strict): tipe harus sama (mis. string vs number tidak cocok).",
+   "Dipakai karena JMESPath filter tidak bisa membandingkan dengan nilai di luar array yang sedang difilter; pasangkan hasilnya per indeks memakai Transformer `forEach.pairSource`/`pairKey`.",
+   "Executor ini baru ditambahkan di ATS (file dibuat 13 Okt 2026) dan belum dipakai di default config mana pun."
+  ]
+ }
+]

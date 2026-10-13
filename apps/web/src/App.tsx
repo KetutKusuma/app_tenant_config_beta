@@ -27,16 +27,20 @@ import {
   ArrowLeft,
   Zap,
   Database,
-  BookOpen,
   Trash2,
   Braces,
   ChevronDown,
   ChevronUp,
   ArrowLeftRight,
+  ChevronRight,
+  CircleHelp,
+  Workflow,
   GitCompare,
   Sparkles
 } from "lucide-react";
 import { DocsModal } from "./components/DocsModal";
+import { WorkflowDocsModal } from "./components/WorkflowDocsModal";
+import { MenuButton, SplitButton, Chip, PromptDialog, ContextMenu, Stepper, type ContextMenuState } from "./components/ui";
 
 interface Tenant {
   tenantId: string;
@@ -83,6 +87,8 @@ interface SyncRow {
   filePath: string | null;
   linkSource: "saved" | "auto" | null;
   status: "identical" | "different" | "no_file" | "file_missing" | "invalid_json";
+  pullRequired?: boolean;
+  duplicateType?: boolean;
   fileMtime: number | null;
 }
 
@@ -107,6 +113,19 @@ const SYNC_STATUS_BADGE: Record<
   invalid_json: { label: "JSON Rusak", cls: "bg-red-500/10 text-red-300 border-red-500/30" }
 };
 
+// Domain konfigurasi aktif: menentukan tabel DB yang dipakai BFF (lewat header X-Config-Domain)
+type ConfigDomain = "tenant_config" | "workflow_pipeline";
+const DOMAIN_LABEL: Record<ConfigDomain, string> = {
+  tenant_config: "Tenant Config",
+  workflow_pipeline: "Workflow Pipeline"
+};
+let activeDomain: ConfigDomain = "tenant_config";
+const api = (input: string, init: RequestInit = {}) =>
+  fetch(input, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), "X-Config-Domain": activeDomain }
+  });
+
 export default function App() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
@@ -119,13 +138,29 @@ export default function App() {
 
   const [jsonContent, setJsonContent] = useState<string>("{}");
   const [originalContent, setOriginalContent] = useState<string>("{}");
+  // Versi DB (updated_at) saat config terakhir dimuat; wajib dikirim saat menyimpan (optimistic locking)
+  const [configVersion, setConfigVersion] = useState<string | null>(null);
+  const [configDomain, setConfigDomain] = useState<ConfigDomain>("tenant_config");
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
+  // Dialog catatan commit (pengganti window.prompt); resolve(null) = batal
+  const [promptDialog, setPromptDialog] = useState<null | {
+    title: string;
+    description?: string;
+    defaultValue: string;
+    resolve: (value: string | null) => void;
+  }>(null);
+  const askSummary = (title: string, defaultValue: string, description?: string) =>
+    new Promise<string | null>((resolve) => setPromptDialog({ title, description, defaultValue, resolve }));
+  // Snapshot DB terbaru yang sedang dibandingkan (split "db") dan penanda DB sudah lebih baru dari editor
+  const [dbSnapshotVersion, setDbSnapshotVersion] = useState<string | null>(null);
+  const [isDbNewer, setIsDbNewer] = useState(false);
   const [isLoadingConfig, setIsLoadingConfig] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   // Split Screen & Comparison State
   const [isSplitScreen, setIsSplitScreen] = useState(false);
   const [splitMode, setSplitMode] = useState<"side-by-side" | "diff" | "json-delta">("side-by-side");
-  const [splitSourceType, setSplitSourceType] = useState<"preset" | "tenant" | "history">("preset");
+  const [splitSourceType, setSplitSourceType] = useState<"preset" | "tenant" | "history" | "db">("preset");
   const [splitJsonContent, setSplitJsonContent] = useState<string>("{}");
   const [splitTitle, setSplitTitle] = useState<string>("Reference / Comparison");
   const [localFilePath, setLocalFilePath] = useState<string | null>(null);
@@ -139,6 +174,7 @@ export default function App() {
   const [compareConfigType, setCompareConfigType] = useState<string | null>(null);
   const [compareConfigs, setCompareConfigs] = useState<ConfigItem[]>([]);
   const [compareTenantOriginalContent, setCompareTenantOriginalContent] = useState<string>("{}");
+  const [compareConfigVersion, setCompareConfigVersion] = useState<string | null>(null);
   const [isSavingCompareTenant, setIsSavingCompareTenant] = useState(false);
   const isCompareTenantDirty = Boolean(compareTenant && splitJsonContent !== compareTenantOriginalContent);
 
@@ -222,7 +258,7 @@ export default function App() {
   const handleExportSkillOnly = async () => {
     try {
       setIsExportingSkill(true);
-      const res = await fetch("/api/references/export-skill", {
+      const res = await api("/api/references/export-skill", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ dir: presetDirPath })
@@ -260,7 +296,7 @@ export default function App() {
           return;
         }
 
-        const res = await fetch("/api/references/save", {
+        const res = await api("/api/references/save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -280,7 +316,7 @@ export default function App() {
         setStatusMessage(`💾 ${data.message}`);
       } else {
         // Bulk Export: current_tenant atau all_tenants
-        const res = await fetch("/api/references/export-bulk", {
+        const res = await api("/api/references/export-bulk", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -349,20 +385,27 @@ export default function App() {
     }
 
     try {
-      const res = await fetch("/api/references/sync-single", {
+      const res = await api("/api/references/sync-single", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           configId: selectedConfigId,
           content: parsed,
-          sourceFilename: splitTitle
+          sourceFilename: splitTitle,
+          expectedVersion: configVersion
         })
       });
       const data = await res.json();
+      if (res.status === 409) {
+        handleStaleConfig(data.error);
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "Gagal sinkronisasi");
 
       setJsonContent(splitJsonContent);
       setOriginalContent(splitJsonContent);
+      setConfigVersion(data.versionToken || null);
+      setIsDbNewer(false);
       setStatusMessage(`⚡ ${data.message}`);
       setTimeout(() => setStatusMessage(null), 3500);
 
@@ -386,7 +429,7 @@ export default function App() {
         setIsSavingLocal(false);
         return;
       }
-      const res = await fetch("/api/references/file", {
+      const res = await api("/api/references/file", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: localFilePath, content: parsed })
@@ -451,10 +494,26 @@ export default function App() {
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncApplyResult | null>(null);
+  // Wizard Sync Center: 1 = pilih, 2 = pratinjau diff, 3 = hasil
+  const [syncStep, setSyncStep] = useState<1 | 2 | 3>(1);
+  const [syncDirection, setSyncDirection] = useState<"push" | "pull" | null>(null);
+  const [syncPreviewLoading, setSyncPreviewLoading] = useState(false);
+  const [syncPreview, setSyncPreview] = useState<Array<{
+    configType: string;
+    filePath: string;
+    added: number;
+    removed: number;
+    modified: number;
+    total: number;
+    blocked?: string;
+    error?: string;
+  }>>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
 
   const openSyncCenter = () => {
     setShowSyncTenantModal(true);
+    setSyncStep(1);
+    setSyncDirection(null);
     setSyncResult(null);
     setSyncError(null);
     fetchSyncStatus();
@@ -465,7 +524,7 @@ export default function App() {
     setSyncLoading(true);
     setSyncError(null);
     try {
-      const res = await fetch(`/api/sync/status?tenantId=${encodeURIComponent(selectedTenant.tenantId)}&dir=${encodeURIComponent(presetDirPath)}`);
+      const res = await api(`/api/sync/status?tenantId=${encodeURIComponent(selectedTenant.tenantId)}&dir=${encodeURIComponent(presetDirPath)}`);
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Gagal mengambil status sinkronisasi");
       setSyncRows(json.data || []);
@@ -495,7 +554,7 @@ export default function App() {
   const handleSyncLink = async (row: SyncRow, newPath: string) => {
     if (!selectedTenant) return;
     try {
-      const res = await fetch("/api/sync/link", {
+      const res = await api("/api/sync/link", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -516,7 +575,7 @@ export default function App() {
     if (!row.filePath) return;
     try {
       await loadConfig(row.configId, row.configType, row.groupId);
-      const res = await fetch(`/api/references/file?path=${encodeURIComponent(row.filePath)}`);
+      const res = await api(`/api/references/file?path=${encodeURIComponent(row.filePath)}`);
       const json = await res.json();
       if (json.content) {
         const pretty = JSON.stringify(json.content, null, 2);
@@ -533,6 +592,45 @@ export default function App() {
     }
   };
 
+  // Langkah 2 wizard: hitung perubahan per item sebelum benar-benar menulis apa pun
+  const goSyncPreview = async (direction: "push" | "pull") => {
+    const rows = syncRows.filter(r => syncSelected.has(r.configType) && r.filePath);
+    if (rows.length === 0) {
+      alert("Tidak ada item terpilih yang memiliki file lokal!");
+      return;
+    }
+    setSyncDirection(direction);
+    setSyncStep(2);
+    setSyncPreviewLoading(true);
+    const preview = await Promise.all(rows.map(async (row) => {
+      const base = { configType: row.configType, filePath: row.filePath!, added: 0, removed: 0, modified: 0, total: 0 };
+      try {
+        const [dbRes, fileRes] = await Promise.all([
+          api(`/api/configs/${row.configId}`).then(r => r.json()),
+          api(`/api/references/file?path=${encodeURIComponent(row.filePath!)}`).then(r => r.json())
+        ]);
+        if (!dbRes.data) return { ...base, error: "Config DB tidak ditemukan" };
+        if (fileRes.content === undefined) return { ...base, error: fileRes.error || "File tidak bisa dibaca" };
+        const dbValue = dbRes.data.value || {};
+        // Baseline = sisi yang akan ditimpa, target = isi barunya
+        const delta = direction === "push"
+          ? calculateJsonDelta(dbValue, fileRes.content, "DB", "File")
+          : calculateJsonDelta(fileRes.content, dbValue, "File", "DB");
+        const { addedCount, removedCount, modifiedCount, totalChanges } = delta.summary;
+        const blocked = row.duplicateType
+          ? "tipe kembar"
+          : direction === "push" && row.pullRequired && totalChanges > 0
+          ? "perlu pull dulu"
+          : undefined;
+        return { ...base, added: addedCount, removed: removedCount, modified: modifiedCount, total: totalChanges, blocked };
+      } catch (err: any) {
+        return { ...base, error: err.message };
+      }
+    }));
+    setSyncPreview(preview);
+    setSyncPreviewLoading(false);
+  };
+
   const runSyncApply = async (direction: "push" | "pull") => {
     if (!selectedTenant || syncSelected.size === 0) return;
     const targetItems = syncRows
@@ -544,16 +642,11 @@ export default function App() {
       return;
     }
 
-    const actionDesc = direction === "push"
-      ? `MENGGANTI konfigurasi di database dengan isi file lokal untuk ${targetItems.length} config terpilih (riwayat DB akan disimpan)?`
-      : `MENGGANTI file preset lokal di disk dengan isi database untuk ${targetItems.length} config terpilih (file lama dicadangkan sebagai .bak)?`;
-
-    if (!confirm(`Apakah Anda yakin ingin ${actionDesc}`)) return;
-
+    // Konfirmasi sudah dilakukan lewat langkah Pratinjau di wizard
     setSyncBusy(true);
     setSyncResult(null);
     try {
-      const res = await fetch("/api/sync/apply", {
+      const res = await api("/api/sync/apply", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -604,7 +697,7 @@ export default function App() {
 
   const fetchTenants = async (selectCode?: string) => {
     try {
-      const res = await fetch("/api/tenants");
+      const res = await api("/api/tenants");
       const json = await res.json();
       if (json.data && json.data.length > 0) {
         setTenants(json.data);
@@ -622,7 +715,7 @@ export default function App() {
 
   const fetchReferences = async (dirToFetch: string) => {
     try {
-      const res = await fetch(`/api/references?dir=${encodeURIComponent(dirToFetch)}`);
+      const res = await api(`/api/references?dir=${encodeURIComponent(dirToFetch)}`);
       const json = await res.json();
       if (json.data) {
         setReferences(json.data);
@@ -649,7 +742,7 @@ export default function App() {
     setSelectedTenant(tenant);
     setCurrentGroupId(tenant.groupId || "");
     try {
-      const res = await fetch(`/api/tenants/${tenant.tenantId}/configs`);
+      const res = await api(`/api/tenants/${tenant.tenantId}/configs`);
       const json = await res.json();
       if (json.data) {
         setConfigs(json.data);
@@ -667,19 +760,45 @@ export default function App() {
     }
   };
 
+  // Ganti domain: Tenant Config <-> Workflow Pipeline (public.pipeline_workflow_configurations)
+  const handleSwitchDomain = async (next: ConfigDomain) => {
+    if (next === configDomain) return;
+    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah domain dan buang perubahan tersebut?")) return;
+    activeDomain = next;
+    setConfigDomain(next);
+    setIsSplitScreen(false);
+    setValidationIssues([]);
+    setShowValidationPanel(false);
+    setHistories([]);
+    setConfigs([]);
+    setSelectedConfigId(null);
+    setActiveConfigType("");
+    setJsonContent("{}");
+    setOriginalContent("{}");
+    setConfigVersion(null);
+    setIsDbNewer(false);
+    // Muat ulang daftar tenant (jumlah config per domain) dan pertahankan tenant yang sedang dipilih
+    await fetchTenants(selectedTenant?.code);
+    setStatusMessage(`🔀 Domain aktif: ${DOMAIN_LABEL[next]}`);
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
   // 3. Load Main Config JSON
   const loadConfig = async (configId: string, configType: string, grpId?: string | null) => {
     setIsLoadingConfig(true);
     setSelectedConfigId(configId);
     setActiveConfigType(configType);
     setCurrentGroupId(grpId || "");
+    setConfigVersion(null);
     try {
-      const res = await fetch(`/api/configs/${configId}`);
+      const res = await api(`/api/configs/${configId}`);
       const json = await res.json();
       if (json.data && json.data.value) {
         const pretty = JSON.stringify(json.data.value, null, 2);
         setJsonContent(pretty);
         setOriginalContent(pretty);
+        setConfigVersion(json.data.version_token || null);
+        setIsDbNewer(false);
         if (json.data.group_id) {
           setCurrentGroupId(json.data.group_id);
         }
@@ -695,7 +814,7 @@ export default function App() {
   // 4. Fetch Histories from Neon DB
   const fetchHistories = async (configId: string) => {
     try {
-      const res = await fetch(`/api/configs/${configId}/histories`);
+      const res = await api(`/api/configs/${configId}/histories`);
       const json = await res.json();
       if (json.data) {
         setHistories(json.data);
@@ -706,7 +825,7 @@ export default function App() {
   };
 
   // 5. Pre-flight Validator / Linting
-  const handleValidate = async () => {
+  const handleValidate = async (): Promise<boolean> => {
     try {
       let parsed: any;
       try {
@@ -718,10 +837,10 @@ export default function App() {
         setShowValidationPanel(true);
         setStatusMessage("❌ Sintaks JSON tidak valid! Buka panel validasi di bawah.");
         setTimeout(() => setStatusMessage(null), 4000);
-        return;
+        return false;
       }
 
-      const res = await fetch("/api/validator/check", {
+      const res = await api("/api/validator/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config: parsed })
@@ -740,39 +859,144 @@ export default function App() {
         setStatusMessage("✅ Validasi lolos! Siap disimpan ke database.");
       }
       setTimeout(() => setStatusMessage(null), 4000);
+      return !(data.issues || []).some((i: any) => i.severity === "error");
     } catch (err: any) {
       setValidationIssues([{ severity: "error", message: `Error koneksi validator: ${err.message}` }]);
       setShowValidationPanel(true);
+      return false;
     }
   };
 
+  // Ambil isi config aktif TERBARU dari database (tanpa menyentuh editor)
+  const fetchLatestDbConfig = async (): Promise<{ pretty: string; version: string | null } | null> => {
+    if (!selectedConfigId) return null;
+    const res = await api(`/api/configs/${selectedConfigId}`);
+    const json = await res.json();
+    if (!res.ok || !json.data) throw new Error(json.error || "Config tidak ditemukan");
+    return { pretty: JSON.stringify(json.data.value || {}, null, 2), version: json.data.version_token || null };
+  };
+
+  // Bandingkan isi editor (kanan) dengan versi database terbaru (kiri) dalam Visual Diff
+  const handleCompareWithDb = async () => {
+    try {
+      const latest = await fetchLatestDbConfig();
+      if (!latest) return;
+      setSplitJsonContent(latest.pretty);
+      setLocalFileOriginalContent(latest.pretty);
+      setDbSnapshotVersion(latest.version);
+      setLocalFilePath(null);
+      setCompareTenant(null);
+      setCompareConfigId(null);
+      setSplitSourceType("db");
+      setSplitTitle(`DB Terbaru (${new Date().toLocaleTimeString("id-ID")})`);
+      setSplitMode("diff");
+      setIsSplitScreen(true);
+      setIsDbNewer(latest.version !== configVersion);
+      if (latest.pretty === jsonContent) {
+        setStatusMessage("✅ Isi editor sama persis dengan database terbaru.");
+        setTimeout(() => setStatusMessage(null), 3500);
+      }
+    } catch (err: any) {
+      alert("Gagal mengambil data terbaru dari database: " + err.message);
+    }
+  };
+
+  // Ganti isi editor dengan snapshot DB yang sedang dibandingkan (ikut memperbarui versi untuk Save)
+  const handleApplyDbSnapshot = () => {
+    if (jsonContent !== originalContent && !confirm("Perubahan di editor yang belum disimpan akan diganti dengan isi database terbaru. Lanjutkan?")) return;
+    setJsonContent(splitJsonContent);
+    setOriginalContent(splitJsonContent);
+    setConfigVersion(dbSnapshotVersion);
+    setIsDbNewer(false);
+    setStatusMessage("🔄 Editor diperbarui dengan isi database terbaru.");
+    setTimeout(() => setStatusMessage(null), 3500);
+  };
+
+  // Muat ulang config aktif dari database (tanpa perlu restart aplikasi)
+  const handleReloadFromDb = async () => {
+    if (!selectedConfigId) return;
+    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Muat ulang dari database dan buang perubahan tersebut?\n\nTips: pakai 'Bandingkan DB' dulu untuk melihat perbedaannya.")) return;
+    await loadConfig(selectedConfigId, activeConfigType, currentGroupId);
+    setStatusMessage("🔄 Konfigurasi dimuat ulang dari database.");
+    setTimeout(() => setStatusMessage(null), 3000);
+  };
+
+  // Cek ringan apakah DB sudah berubah sejak config dimuat: saat tab kembali fokus & tiap 60 detik
+  useEffect(() => {
+    if (!selectedConfigId || !configVersion) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const res = await api(`/api/configs/${selectedConfigId}`);
+        const json = await res.json();
+        if (!cancelled && json.data) setIsDbNewer(json.data.version_token !== configVersion);
+      } catch {
+        /* abaikan: hanya indikator */
+      }
+    };
+    const timer = setInterval(check, 60000);
+    window.addEventListener("focus", check);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", check);
+    };
+  }, [selectedConfigId, configVersion]);
+
+  // Simpan ditolak karena DB berubah sejak dimuat: tawarkan pull ulang, isi editor diamankan ke clipboard
+  const handleStaleConfig = async (message: string) => {
+    if (!selectedConfigId) return;
+    if (!confirm(`${message}\n\nMuat ulang (pull) versi terbaru dari database sekarang? Isi editor Anda akan disalin ke clipboard terlebih dahulu.`)) return;
+    try {
+      await navigator.clipboard.writeText(jsonContent);
+    } catch {
+      /* clipboard tidak tersedia: tetap lanjut, user sudah dikonfirmasi */
+    }
+    await loadConfig(selectedConfigId, activeConfigType, currentGroupId);
+    setStatusMessage("🔄 Versi terbaru dimuat dari database. Isi editor sebelumnya ada di clipboard.");
+    setTimeout(() => setStatusMessage(null), 5000);
+  };
+
   // 6. Save Configuration
-  const handleSave = async () => {
+  const handleSave = async (quick = false) => {
     if (!selectedConfigId) return;
     try {
       const parsed = JSON.parse(jsonContent);
       setIsSaving(true);
-      const summary = prompt("Keterangan perubahan (Commit Summary):", "Update via Tenant Studio");
+      const summary = quick
+        ? "Update via Tenant Studio"
+        : await askSummary(
+            `Simpan ${activeConfigType}`,
+            "Update via Tenant Studio",
+            `${DOMAIN_LABEL[configDomain]} · ${selectedTenant?.name || ""}. Versi sebelumnya otomatis diarsipkan ke History.`
+          );
       if (summary === null) {
         setIsSaving(false);
         return;
       }
 
-      const res = await fetch(`/api/configs/${selectedConfigId}`, {
+      const res = await api(`/api/configs/${selectedConfigId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           value: parsed,
           groupId: currentGroupId || null,
           changeSummary: summary,
-          authorName: "Studio Developer"
+          authorName: "Studio Developer",
+          expectedVersion: configVersion
         })
       });
 
       const data = await res.json();
+      if (res.status === 409) {
+        handleStaleConfig(data.error);
+        return;
+      }
       if (data.success) {
         setStatusMessage(`✅ Berhasil disimpan! Versi ${data.version} tercatat di Neon DB.`);
         setOriginalContent(jsonContent);
+        setConfigVersion(data.versionToken || null);
+        setIsDbNewer(false);
         fetchHistories(selectedConfigId);
         setTimeout(() => setStatusMessage(null), 4000);
       } else {
@@ -785,6 +1009,27 @@ export default function App() {
     }
   };
 
+  const handleValidateAndSave = async () => {
+    if (await handleValidate()) {
+      handleSave();
+    } else {
+      alert("Validasi menemukan error. Perbaiki dulu (lihat panel Linter) sebelum menyimpan.");
+    }
+  };
+
+  // Bandingkan editor dengan isi saat config pertama dimuat (sebelum diedit)
+  const handleCompareWithOriginal = () => {
+    setSplitJsonContent(originalContent);
+    setLocalFileOriginalContent(originalContent);
+    setLocalFilePath(null);
+    setCompareTenant(null);
+    setCompareConfigId(null);
+    setSplitSourceType("history");
+    setSplitTitle("Versi Awal (sebelum diedit)");
+    setSplitMode("diff");
+    setIsSplitScreen(true);
+  };
+
   // 7. Add or Edit Tenant Submit Handler
   const handleTenantFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -795,7 +1040,7 @@ export default function App() {
 
     try {
       const tagsArray = tenantForm.tags.split(",").map(s => s.trim()).filter(Boolean);
-      const res = await fetch("/api/tenants", {
+      const res = await api("/api/tenants", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -871,7 +1116,7 @@ export default function App() {
         }
       }
 
-      const res = await fetch("/api/configs", {
+      const res = await api("/api/configs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -888,7 +1133,7 @@ export default function App() {
         setShowAddConfigModal(false);
         setStatusMessage(`✅ Konfigurasi ${newConfigForm.configType} berhasil ditambahkan!`);
         // Refresh daftar konfigurasi tenant ini
-        const cfgRes = await fetch(`/api/tenants/${selectedTenant.tenantId}/configs`);
+        const cfgRes = await api(`/api/tenants/${selectedTenant.tenantId}/configs`);
         const cfgJson = await cfgRes.json();
         if (cfgJson.data) {
           setConfigs(cfgJson.data);
@@ -924,7 +1169,7 @@ export default function App() {
     setDeleteError(null);
 
     try {
-      const res = await fetch(`/api/configs/${configToDelete.id}`, {
+      const res = await api(`/api/configs/${configToDelete.id}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -942,7 +1187,7 @@ export default function App() {
 
       // Refresh configs for current tenant
       if (selectedTenant) {
-        const cfgRes = await fetch(`/api/tenants/${selectedTenant.tenantId}/configs`);
+        const cfgRes = await api(`/api/tenants/${selectedTenant.tenantId}/configs`);
         const cfgJson = await cfgRes.json();
         const remainingConfigs: ConfigItem[] = cfgJson.data || [];
         setConfigs(remainingConfigs);
@@ -973,7 +1218,7 @@ export default function App() {
   // 9. Load Reference File into Split Pane
   const handleLoadReferenceToSplit = async (refItem: ReferenceItem) => {
     try {
-      const res = await fetch(`/api/references/file?path=${encodeURIComponent(refItem.path)}`);
+      const res = await api(`/api/references/file?path=${encodeURIComponent(refItem.path)}`);
       const json = await res.json();
       if (json.content) {
         const pretty = JSON.stringify(json.content, null, 2);
@@ -1037,7 +1282,7 @@ export default function App() {
 
   const fetchCompareTenantConfigs = async (tenantId: string, preferType?: string) => {
     try {
-      const res = await fetch(`/api/tenants/${tenantId}/configs`);
+      const res = await api(`/api/tenants/${tenantId}/configs`);
       const json = await res.json();
       const items: ConfigItem[] = json.data || [];
       setCompareConfigs(items);
@@ -1066,7 +1311,7 @@ export default function App() {
       const targetTenant = tenants.find(t => t.tenantId === tid);
       if (!targetTenant) return;
 
-      const cfgRes = await fetch(`/api/tenants/${tid}/configs`);
+      const cfgRes = await api(`/api/tenants/${tid}/configs`);
       const cfgJson = await cfgRes.json();
       const items: ConfigItem[] = cfgJson.data || [];
       setCompareConfigs(items);
@@ -1077,12 +1322,13 @@ export default function App() {
         return;
       }
 
-      const detailRes = await fetch(`/api/configs/${targetConfig.id}`);
+      const detailRes = await api(`/api/configs/${targetConfig.id}`);
       const detailJson = await detailRes.json();
       if (detailJson.data && detailJson.data.value) {
         const pretty = JSON.stringify(detailJson.data.value, null, 2);
         setSplitJsonContent(pretty);
         setCompareTenantOriginalContent(pretty);
+        setCompareConfigVersion(detailJson.data.version_token || null);
         setLocalFilePath(null);
         setCompareTenant(targetTenant);
         setCompareConfigId(targetConfig.id);
@@ -1105,19 +1351,20 @@ export default function App() {
     if (!targetTenant) return;
 
     try {
-      const cfgRes = await fetch(`/api/tenants/${targetTenantId}/configs`);
+      const cfgRes = await api(`/api/tenants/${targetTenantId}/configs`);
       const cfgJson = await cfgRes.json();
       const items: ConfigItem[] = cfgJson.data || [];
       setCompareConfigs(items);
 
       const targetConfig = items.find(c => c.config_type === activeConfigType) || items[0];
       if (targetConfig) {
-        const detailRes = await fetch(`/api/configs/${targetConfig.id}`);
+        const detailRes = await api(`/api/configs/${targetConfig.id}`);
         const detailJson = await detailRes.json();
         if (detailJson.data && detailJson.data.value) {
           const pretty = JSON.stringify(detailJson.data.value, null, 2);
           setSplitJsonContent(pretty);
           setCompareTenantOriginalContent(pretty);
+          setCompareConfigVersion(detailJson.data.version_token || null);
           setCompareTenant(targetTenant);
           setCompareConfigId(targetConfig.id);
           setCompareConfigType(targetConfig.config_type);
@@ -1126,6 +1373,7 @@ export default function App() {
       } else {
         setSplitJsonContent("{}");
         setCompareTenantOriginalContent("{}");
+        setCompareConfigVersion(null);
         setCompareTenant(targetTenant);
         setCompareConfigId(null);
         setCompareConfigType(null);
@@ -1141,12 +1389,13 @@ export default function App() {
     if (!targetConfig || !compareTenant) return;
 
     try {
-      const detailRes = await fetch(`/api/configs/${targetConfig.id}`);
+      const detailRes = await api(`/api/configs/${targetConfig.id}`);
       const detailJson = await detailRes.json();
       if (detailJson.data && detailJson.data.value) {
         const pretty = JSON.stringify(detailJson.data.value, null, 2);
         setSplitJsonContent(pretty);
         setCompareTenantOriginalContent(pretty);
+        setCompareConfigVersion(detailJson.data.version_token || null);
         setCompareConfigId(targetConfig.id);
         setCompareConfigType(targetConfig.config_type);
         setSplitTitle(`${compareTenant.name} (${compareTenant.code}) - ${targetConfig.config_type}`);
@@ -1164,12 +1413,14 @@ export default function App() {
     const prevLeftConfigType = activeConfigType;
     const prevLeftJson = jsonContent;
     const prevLeftOriginal = originalContent;
+    const prevLeftVersion = configVersion;
 
     const prevRightTenant = compareTenant;
     const prevRightConfigId = compareConfigId;
     const prevRightConfigType = compareConfigType;
     const prevRightJson = splitJsonContent;
     const prevRightOriginal = compareTenantOriginalContent;
+    const prevRightVersion = compareConfigVersion;
 
     // Swap Left to Right
     setSelectedTenant(prevRightTenant);
@@ -1177,6 +1428,7 @@ export default function App() {
     setActiveConfigType(prevRightConfigType || "");
     setJsonContent(prevRightJson);
     setOriginalContent(prevRightOriginal);
+    setConfigVersion(prevRightVersion);
     setCurrentGroupId(prevRightTenant.groupId || "");
 
     // Swap Right to Left
@@ -1185,14 +1437,15 @@ export default function App() {
     setCompareConfigType(prevLeftConfigType);
     setSplitJsonContent(prevLeftJson);
     setCompareTenantOriginalContent(prevLeftOriginal);
+    setCompareConfigVersion(prevLeftVersion);
     setSplitTitle(`${prevLeftTenant.name} (${prevLeftTenant.code}) - ${prevLeftConfigType}`);
 
     try {
-      const cfgRes = await fetch(`/api/tenants/${prevRightTenant.tenantId}/configs`);
+      const cfgRes = await api(`/api/tenants/${prevRightTenant.tenantId}/configs`);
       const cfgJson = await cfgRes.json();
       if (cfgJson.data) setConfigs(cfgJson.data);
 
-      const rRes = await fetch(`/api/tenants/${prevLeftTenant.tenantId}/configs`);
+      const rRes = await api(`/api/tenants/${prevLeftTenant.tenantId}/configs`);
       const rJson = await rRes.json();
       if (rJson.data) setCompareConfigs(rJson.data);
     } catch (err) {
@@ -1208,28 +1461,35 @@ export default function App() {
     try {
       const parsed = JSON.parse(splitJsonContent);
       setIsSavingCompareTenant(true);
-      const summary = prompt(
-        `Keterangan perubahan untuk ${compareTenant.name} (${compareConfigType}):`,
-        "Update via Cross-Tenant Split Studio"
+      const summary = await askSummary(
+        `Simpan ke ${compareTenant.name}`,
+        "Update via Cross-Tenant Split Studio",
+        `${compareConfigType} · tenant pembanding (window kanan).`
       );
       if (summary === null) {
         setIsSavingCompareTenant(false);
         return;
       }
 
-      const res = await fetch(`/api/configs/${compareConfigId}`, {
+      const res = await api(`/api/configs/${compareConfigId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           value: parsed,
           groupId: compareTenant.groupId || null,
           changeSummary: summary,
-          authorName: "Studio Developer"
+          authorName: "Studio Developer",
+          expectedVersion: compareConfigVersion
         })
       });
 
       const data = await res.json();
+      if (res.status === 409) {
+        alert(`Gagal menyimpan ke ${compareTenant.name}: ${data.error}\n\nPilih ulang config tenant pembanding di dropdown untuk memuat versi terbaru.`);
+        return;
+      }
       if (data.success) {
+        setCompareConfigVersion(data.versionToken || null);
         setStatusMessage(`✅ Berhasil disimpan ke ${compareTenant.name}! Versi ${data.version} tercatat.`);
         setCompareTenantOriginalContent(splitJsonContent);
         setTimeout(() => setStatusMessage(null), 4000);
@@ -1316,7 +1576,7 @@ export default function App() {
 
       const rightLabel = splitSourceType === "tenant"
         ? `${compareTenant?.name || "Tenant Pembanding"} (${compareConfigType || "Config"})`
-        : splitSourceType === "history"
+        : splitSourceType === "history" || splitSourceType === "db"
         ? splitTitle
         : `Preset (${splitTitle})`;
 
@@ -1383,217 +1643,272 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-950 text-slate-100 font-sans">
-      {/* Top Header - Compact 40px Height */}
-      <header className="h-10 border-b border-slate-800 px-3 flex items-center justify-between bg-slate-900/90 backdrop-blur shrink-0 gap-3 text-xs">
+      {/* Top Header: brand · breadcrumb (domain › tenant › config) · aksi */}
+      <header className="relative z-30 h-11 border-b border-slate-800 px-3 flex items-center gap-4 bg-slate-900/95 shrink-0 text-xs shadow-[0_4px_12px_-6px_rgba(0,0,0,0.6)]">
         <div className="flex items-center gap-2 shrink-0">
-          <div className="p-1 rounded bg-indigo-600/20 text-indigo-400 border border-indigo-500/30">
+          <div className="p-1 rounded bg-indigo-600/20 text-indigo-400 ring-1 ring-inset ring-indigo-500/30">
             <Layers className="w-3.5 h-3.5" />
           </div>
-          <span className="font-semibold text-slate-200 text-xs tracking-wide">
-            Tenant Studio
-          </span>
-          <span className="text-[10px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono border border-amber-500/30">
-            DEV
-          </span>
+          <span className="font-semibold text-slate-200 text-xs tracking-wide">Tenant Studio</span>
+          <span className="text-[9px] px-1 rounded bg-amber-500/15 text-amber-300 font-mono ring-1 ring-inset ring-amber-500/30">DEV</span>
         </div>
 
-        {/* Center: Selected Tenant Info (Clean 1-line) */}
-        {selectedTenant && (() => {
-          const isSameGroup = !currentGroupId || currentGroupId === selectedTenant.tenantId;
-          return (
-            <div className="flex items-center gap-2 bg-slate-950/70 border border-slate-800 px-2.5 py-1 rounded-md text-[11px] max-w-[550px] truncate">
-              <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="font-medium text-slate-200 truncate">{selectedTenant.name}</span>
-              <button 
-                onClick={(e) => openEditTenantModal(selectedTenant, e)}
-                className="p-0.5 hover:bg-slate-800 rounded text-slate-400 hover:text-indigo-300 transition shrink-0"
-                title="Edit Nama / Label Tenant"
-              >
-                <Edit2 className="w-3 h-3" />
-              </button>
-              <span className="text-slate-600">|</span>
-
-              {/* Jika tenant_id dan group_id sama, tampilkan satu badge gabungan (T / G) */}
-              {isSameGroup ? (
-                <div 
+        {/* Breadcrumb: selalu menunjukkan apa yang sedang diedit */}
+        <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] whitespace-nowrap overflow-hidden">
+          <span className={`shrink-0 font-medium ${configDomain === "workflow_pipeline" ? "text-teal-300" : "text-indigo-300"}`}>
+            {DOMAIN_LABEL[configDomain]}
+          </span>
+          <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
+          {selectedTenant ? (() => {
+            const isSameGroup = !currentGroupId || currentGroupId === selectedTenant.tenantId;
+            const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 8)}…` : id);
+            return (
+              <span className="group flex items-center gap-1.5 min-w-0">
+                <span className="font-medium text-slate-200 truncate">{selectedTenant.name}</span>
+                <button
                   onClick={(e) => copyToClipboard(selectedTenant.tenantId, e)}
-                  className="flex items-center gap-1 font-mono text-[10px] text-indigo-300 hover:text-indigo-200 cursor-pointer bg-slate-900 px-1.5 py-0.2 rounded border border-slate-800 shrink-0"
-                  title="Klik untuk copy tenant_id (sama dengan group_id)"
+                  className="shrink-0 flex items-center gap-1 font-mono text-[10px] text-slate-500 hover:text-slate-200 transition"
+                  title={`Copy tenant_id: ${selectedTenant.tenantId}${isSameGroup ? " (sama dengan group_id)" : ""}`}
                 >
-                  <span className="text-slate-500 font-semibold">id:</span>
-                  <span className="max-w-[120px] truncate">{selectedTenant.tenantId}</span>
+                  {shortId(selectedTenant.tenantId)}
                   {copiedTenantId === selectedTenant.tenantId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5" />}
-                </div>
-              ) : (
-                /* Jika group_id berbeda, tampilkan keduanya */
-                <>
-                  <div 
-                    onClick={(e) => copyToClipboard(selectedTenant.tenantId, e)}
-                    className="flex items-center gap-1 font-mono text-[10px] text-indigo-300 hover:text-indigo-200 cursor-pointer bg-slate-900 px-1 py-0.2 rounded border border-slate-800 shrink-0"
-                    title="Klik untuk copy tenant_id"
-                  >
-                    <span className="text-slate-500 font-semibold">T:</span>
-                    <span className="max-w-[90px] truncate">{selectedTenant.tenantId}</span>
-                    {copiedTenantId === selectedTenant.tenantId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5" />}
-                  </div>
-                  <div 
+                </button>
+                {!isSameGroup && (
+                  <button
                     onClick={(e) => copyToClipboard(currentGroupId, e)}
-                    className="flex items-center gap-1 font-mono text-[10px] text-amber-300 hover:text-amber-200 cursor-pointer bg-slate-900 px-1 py-0.2 rounded border border-amber-500/30 shrink-0"
-                    title="Klik untuk copy group_id yang berbeda"
+                    className="shrink-0 flex items-center gap-1 font-mono text-[10px] text-amber-400/80 hover:text-amber-200 transition"
+                    title={`group_id berbeda, klik untuk copy: ${currentGroupId}`}
                   >
-                    <Users className="w-2.5 h-2.5 text-amber-400" />
-                    <span className="text-slate-500 font-semibold">G:</span>
-                    <span className="max-w-[90px] truncate">{currentGroupId}</span>
+                    G:{shortId(currentGroupId)}
                     {copiedTenantId === currentGroupId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5" />}
-                  </div>
-                </>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* Status Alert */}
-        {statusMessage && (
-          <div className="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-2.5 py-0.5 rounded text-[11px] font-medium animate-pulse shrink-0">
-            {statusMessage}
-          </div>
-        )}
-
-        {/* Right Action Controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button 
-            onClick={openCompareTenantModal}
-            disabled={!selectedTenant}
-            className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded border transition disabled:opacity-40 font-medium ${
-              isSplitScreen && splitSourceType === "tenant"
-                ? "bg-purple-600/30 border-purple-500/50 text-purple-300 shadow-sm"
-                : "bg-purple-600/20 hover:bg-purple-600/30 border-purple-500/40 text-purple-300"
-            }`}
-            title="Bandingkan konfigurasi dengan tenant lain (Split Screen / Diff)"
-          >
-            <ArrowLeftRight className="w-3 h-3 text-purple-400" />
-            Bandingkan Tenant
-          </button>
-
-          <button 
-            onClick={() => {
-              if (!isSplitScreen && splitJsonContent === "{}") {
-                setSplitJsonContent(originalContent);
-                setSplitTitle("Original Version");
-              }
-              setIsSplitScreen(!isSplitScreen);
-            }}
-            className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded border transition ${
-              isSplitScreen 
-                ? "bg-indigo-600/30 border-indigo-500/50 text-indigo-300 font-medium" 
-                : "bg-slate-800/80 hover:bg-slate-700/80 border-slate-700 text-slate-300"
-            }`}
-          >
-            <Columns className="w-3 h-3" />
-            {isSplitScreen ? "Close Split" : "Split Screen"}
-          </button>
-
-          <button 
-            onClick={() => setShowRefDrawer(!showRefDrawer)}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 transition"
-          >
-            <FolderOpen className="w-3 h-3 text-amber-400" />
-            Presets ({references.length})
-          </button>
-
-          <button 
-            onClick={openSavePresetModal}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 transition"
-            title="Ekspor preset lokal & skill tenant_config (1 konfigurasi, tenant ini, atau seluruh database)"
-          >
-            <Download className="w-3 h-3 text-cyan-400" />
-            Ekspor Preset
-          </button>
-
-          <button 
-            onClick={openSyncCenter}
-            disabled={!selectedTenant}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 transition disabled:opacity-40"
-            title="Buka Sync Center untuk membandingkan dan menyinkronkan konfigurasi dengan file preset lokal"
-          >
-            <Upload className="w-3 h-3 text-emerald-400" />
-            Sync Center Presets
-          </button>
-
-          <button 
-            onClick={() => setShowDocsModal(true)}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 transition font-medium"
-            title="Buka Buku Panduan & Dokumentasi Lengkap Tenant Configuration"
-          >
-            <BookOpen className="w-3 h-3 text-purple-400" />
-            Panduan
-          </button>
-
-          <button 
-            onClick={handleFormatMainJson}
-            disabled={!selectedConfigId}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 transition disabled:opacity-40"
-            title="Rapikan format JSON (indent 2 spasi)"
-          >
-            <Braces className="w-3 h-3 text-cyan-400" />
-            Format JSON
-          </button>
-
-          <button 
-            onClick={handleValidate}
-            disabled={!selectedConfigId}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40 transition font-medium disabled:opacity-40"
-            title="Validasi sintaks JSON & aturan guardrail ATS"
-          >
-            <CheckCircle2 className="w-3 h-3 text-blue-400" />
-            Validate
-          </button>
-
-          {validationIssues.length > 0 && (
-            <button
-              onClick={() => setShowValidationPanel(!showValidationPanel)}
-              className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded border font-medium transition ${
-                validationIssues.some(i => i.severity === "error")
-                  ? "bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30"
-                  : validationIssues.some(i => i.severity === "warning")
-                  ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30"
-                  : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
-              }`}
-              title={showValidationPanel ? "Sembunyikan panel validasi" : "Buka detail hasil validasi"}
-            >
-              {validationIssues.some(i => i.severity === "error") ? (
-                <AlertTriangle className="w-3 h-3 text-rose-400" />
-              ) : (
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-              )}
-              Linter ({validationIssues.length})
-              {showValidationPanel ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />}
-            </button>
+                  </button>
+                )}
+                <button
+                  onClick={(e) => openEditTenantModal(selectedTenant, e)}
+                  className="shrink-0 p-0.5 rounded text-slate-500 hover:text-indigo-300 opacity-0 group-hover:opacity-100 focus:opacity-100 transition"
+                  title="Edit Nama / Label Tenant"
+                >
+                  <Edit2 className="w-3 h-3" />
+                </button>
+              </span>
+            );
+          })() : (
+            <span className="text-slate-500">Pilih tenant</span>
           )}
+          <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
+          <span className={`font-mono truncate ${activeConfigType ? "text-slate-100" : "text-slate-500"}`}>
+            {activeConfigType || "Pilih config"}
+          </span>
+        </nav>
 
-          <button 
+        {/* Aksi: 2 dropdown sekunder, 2 ikon, 1 aksi utama */}
+        <div className="flex items-center gap-1 shrink-0">
+          <MenuButton
+            label="Bandingkan"
+            icon={<GitCompare className="w-3.5 h-3.5 text-purple-400" />}
+            active={isSplitScreen}
+            title="Bandingkan editor dengan sumber lain (Side-by-Side / Visual Diff / JSON Delta)"
+            items={[
+              {
+                key: "tenant",
+                label: "Dengan tenant lain…",
+                hint: "Config yang sama di tenant berbeda",
+                icon: <ArrowLeftRight className="w-3.5 h-3.5" />,
+                disabled: !selectedTenant,
+                onSelect: openCompareTenantModal
+              },
+              {
+                key: "db",
+                label: "Dengan database terbaru",
+                hint: "Lihat perubahan orang/proses lain",
+                icon: <Database className="w-3.5 h-3.5" />,
+                disabled: !selectedConfigId,
+                onSelect: handleCompareWithDb
+              },
+              {
+                key: "original",
+                label: "Dengan versi awal",
+                hint: "Isi sebelum Anda mengedit",
+                icon: <RotateCcw className="w-3.5 h-3.5" />,
+                disabled: !selectedConfigId,
+                onSelect: handleCompareWithOriginal
+              },
+              {
+                key: "preset",
+                label: "Dengan preset lokal…",
+                hint: "Pilih file dari katalog presets",
+                icon: <FolderOpen className="w-3.5 h-3.5" />,
+                onSelect: () => setShowRefDrawer(true)
+              },
+              {
+                key: "history",
+                label: "Dengan versi History…",
+                hint: `${histories.length} versi tersimpan`,
+                icon: <History className="w-3.5 h-3.5" />,
+                disabled: !selectedConfigId,
+                onSelect: () => setShowHistoryModal(true)
+              },
+              ...(isSplitScreen
+                ? (["divider", {
+                    key: "close",
+                    label: "Tutup perbandingan",
+                    icon: <X className="w-3.5 h-3.5" />,
+                    onSelect: () => setIsSplitScreen(false)
+                  }] as const)
+                : [])
+            ]}
+          />
+
+          <MenuButton
+            label="Presets"
+            icon={<FolderOpen className="w-3.5 h-3.5 text-amber-400" />}
+            title="Katalog, ekspor, dan sinkronisasi preset lokal"
+            items={[
+              {
+                key: "catalog",
+                label: "Katalog presets",
+                hint: `${references.length} file di folder preset`,
+                icon: <FolderSearch className="w-3.5 h-3.5" />,
+                onSelect: () => setShowRefDrawer(true)
+              },
+              {
+                key: "export",
+                label: "Ekspor preset…",
+                hint: "1 config, tenant ini, atau seluruh DB",
+                icon: <Download className="w-3.5 h-3.5" />,
+                onSelect: openSavePresetModal
+              },
+              {
+                key: "sync",
+                label: "Sync Center…",
+                hint: "Push / pull file lokal ↔ database",
+                icon: <Upload className="w-3.5 h-3.5" />,
+                disabled: !selectedTenant,
+                onSelect: openSyncCenter
+              }
+            ]}
+          />
+
+          <span className="w-px h-5 bg-slate-800 mx-1" />
+
+          <button
             onClick={() => setShowHistoryModal(!showHistoryModal)}
-            className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 transition"
+            disabled={!selectedConfigId}
+            className="relative h-7 w-7 rounded-md flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800/70 transition disabled:opacity-40"
+            title={`History (${histories.length} versi)`}
           >
-            <History className="w-3 h-3 text-amber-400" />
-            History ({histories.length})
+            <History className="w-3.5 h-3.5" />
+            {histories.length > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-slate-700 text-[8px] font-semibold text-slate-200 flex items-center justify-center">
+                {histories.length > 99 ? "99+" : histories.length}
+              </span>
+            )}
           </button>
 
-          <button 
-            onClick={handleSave}
-            disabled={isSaving || !selectedConfigId}
-            className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium shadow-sm transition disabled:opacity-40"
+          <button
+            onClick={() => setShowDocsModal(true)}
+            className="h-7 w-7 rounded-md flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800/70 transition"
+            title={configDomain === "workflow_pipeline" ? "Panduan Workflow Pipeline (executor, DTO, ctx)" : "Panduan & dokumentasi Tenant Configuration"}
           >
-            <Save className="w-3 h-3" />
-            {isSaving ? "Saving..." : "Save"}
+            <CircleHelp className="w-3.5 h-3.5" />
           </button>
+
+          <span className="w-1" />
+
+          <SplitButton
+            label={isSaving ? "Saving..." : "Save"}
+            icon={<Save className="w-3.5 h-3.5" />}
+            onClick={() => handleSave()}
+            disabled={isSaving || !selectedConfigId}
+            items={[
+              {
+                key: "validate",
+                label: "Validasi saja",
+                hint: "Cek sintaks JSON & guardrail",
+                icon: <CheckCircle2 className="w-3.5 h-3.5" />,
+                onSelect: () => { handleValidate(); }
+              },
+              {
+                key: "validate-save",
+                label: "Validasi lalu simpan",
+                hint: "Simpan hanya jika tidak ada error",
+                icon: <Sparkles className="w-3.5 h-3.5" />,
+                onSelect: handleValidateAndSave
+              },
+              "divider",
+              {
+                key: "quick",
+                label: "Simpan cepat",
+                hint: "Tanpa catatan perubahan",
+                icon: <Zap className="w-3.5 h-3.5" />,
+                onSelect: () => handleSave(true)
+              }
+            ]}
+          />
         </div>
       </header>
+
+      {/* Notifikasi status: toast di pojok kanan bawah, tidak memakan ruang header */}
+      {statusMessage && (
+        <div className="fixed bottom-4 right-4 z-[70] max-w-sm px-3 py-2 rounded-lg bg-slate-900 ring-1 ring-slate-700 shadow-xl shadow-black/50 text-[11px] text-slate-200">
+          {statusMessage}
+        </div>
+      )}
+
+      {ctxMenu && <ContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} />}
+
+      {promptDialog && (
+        <PromptDialog
+          title={promptDialog.title}
+          description={promptDialog.description}
+          label="Catatan perubahan (commit summary)"
+          defaultValue={promptDialog.defaultValue}
+          onConfirm={(v) => {
+            promptDialog.resolve(v);
+            setPromptDialog(null);
+          }}
+          onCancel={() => {
+            promptDialog.resolve(null);
+            setPromptDialog(null);
+          }}
+        />
+      )}
 
       {/* Main Studio Workspace */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Sidebar: Tenant Directory */}
         <aside className="w-72 border-r border-slate-800 flex flex-col bg-slate-900/40 shrink-0">
+          {/* Domain switch: menentukan isi daftar tenant & config di bawahnya */}
+          <div className="p-2 border-b border-slate-800">
+            <div role="tablist" aria-label="Domain konfigurasi" className="grid grid-cols-2 gap-0.5 p-0.5 rounded-lg bg-slate-950/80 ring-1 ring-inset ring-slate-800">
+              {([
+                { key: "tenant_config", icon: <Layers className="w-3.5 h-3.5" />, title: "public.tenant_configurations (ats_db)" },
+                { key: "workflow_pipeline", icon: <Workflow className="w-3.5 h-3.5" />, title: "public.pipeline_workflow_configurations (ats_db)" }
+              ] as const).map(d => {
+                const active = configDomain === d.key;
+                return (
+                  <button
+                    key={d.key}
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => handleSwitchDomain(d.key)}
+                    title={d.title}
+                    className={`h-7 rounded-md flex items-center justify-center gap-1.5 text-[11px] font-medium transition ${
+                      active
+                        ? d.key === "workflow_pipeline"
+                          ? "bg-teal-600/90 text-white shadow-sm"
+                          : "bg-indigo-600/90 text-white shadow-sm"
+                        : "text-slate-400 hover:text-slate-200"
+                    }`}
+                  >
+                    {d.icon}
+                    {DOMAIN_LABEL[d.key]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Tenant Search & Header */}
           <div className="p-2 border-b border-slate-800 space-y-1.5">
             <div className="flex items-center justify-between">
@@ -1626,71 +1941,89 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
             {filteredTenants.map((t) => {
               const isSelected = selectedTenant?.tenantId === t.tenantId;
+              const shortId = t.tenantId.length > 12 ? `${t.tenantId.slice(0, 8)}…${t.tenantId.slice(-4)}` : t.tenantId;
+              const tenantMenu = (e: React.MouseEvent) => {
+                e.preventDefault();
+                setCtxMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  title: t.name,
+                  items: [
+                    { key: "open", label: "Buka tenant", icon: <Building2 className="w-3.5 h-3.5" />, disabled: isSelected, onSelect: () => selectTenant(t) },
+                    {
+                      key: "compare",
+                      label: "Bandingkan dengan tenant aktif",
+                      hint: activeConfigType || undefined,
+                      icon: <ArrowLeftRight className="w-3.5 h-3.5" />,
+                      disabled: isSelected || !selectedConfigId,
+                      onSelect: () => handleStartTenantComparison(t.tenantId, activeConfigType || "CANDIDATE_STABLE")
+                    },
+                    { key: "edit", label: "Edit nama / label…", icon: <Edit2 className="w-3.5 h-3.5" />, onSelect: () => openEditTenantModal(t) },
+                    "divider",
+                    { key: "copy-id", label: "Copy tenant_id", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(t.tenantId) },
+                    ...(t.groupId
+                      ? [{ key: "copy-group", label: "Copy group_id", icon: <Users className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(t.groupId!) }]
+                      : [])
+                  ]
+                });
+              };
               return (
                 <div 
                   key={t.tenantId}
                   onClick={() => selectTenant(t)}
-                  className={`w-full text-left p-2 rounded-md border transition flex flex-col gap-1 cursor-pointer ${
+                  onContextMenu={tenantMenu}
+                  className={`group relative w-full text-left px-2.5 py-2 rounded-md transition cursor-pointer ${
                     isSelected 
-                      ? "bg-indigo-600/10 border-indigo-500/40 text-indigo-300" 
-                      : "hover:bg-slate-800/40 border-transparent text-slate-400 hover:text-slate-200"
+                      ? "bg-indigo-600/10 ring-1 ring-inset ring-indigo-500/40" 
+                      : "hover:bg-slate-800/40"
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-medium truncate flex-1 mr-1">{t.name}</span>
-                    <div className="flex items-center gap-1">
-                      <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 py-0.2 rounded font-mono">
-                        {t.code}
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className={`text-[11px] font-medium truncate ${isSelected ? "text-indigo-200" : "text-slate-300 group-hover:text-slate-100"}`}>
+                      {t.name}
+                    </span>
+                    <span className="shrink-0 text-[9px] px-1 rounded bg-slate-800 text-slate-400 font-mono">{t.code}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-mono text-slate-500 min-w-0">
+                    <span className="truncate" title={t.tenantId}>{shortId}</span>
+                    <span className="text-slate-700">·</span>
+                    <span className="shrink-0">{t.totalConfigs} {configDomain === "workflow_pipeline" ? "workflow" : "config"}</span>
+                    {t.groupId && t.groupId !== t.tenantId && (
+                      <span className="shrink-0 flex items-center gap-0.5 text-amber-400/70" title={`group_id: ${t.groupId}`}>
+                        <Users className="w-2.5 h-2.5" /> group
                       </span>
+                    )}
+                  </div>
+
+                  {/* Aksi kartu: hanya muncul saat hover / fokus agar sidebar tetap tenang */}
+                  <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md bg-slate-900/95 ring-1 ring-slate-700/70 shadow-lg px-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+                    {!isSelected && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           handleStartTenantComparison(t.tenantId, activeConfigType || "CANDIDATE_STABLE");
                         }}
-                        className="p-0.5 hover:bg-purple-500/20 rounded text-slate-400 hover:text-purple-300 transition"
-                        title={`Bandingkan konfigurasi dengan ${t.name}`}
+                        disabled={!selectedConfigId}
+                        className="p-1 rounded text-slate-400 hover:text-purple-300 hover:bg-slate-800 transition disabled:opacity-30"
+                        title={`Bandingkan ${activeConfigType || "config"} dengan ${t.name}`}
                       >
-                        <ArrowLeftRight className="w-2.5 h-2.5" />
+                        <ArrowLeftRight className="w-3 h-3" />
                       </button>
-                      <button
-                        onClick={(e) => openEditTenantModal(t, e)}
-                        className="p-0.5 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition"
-                        title="Edit nama/label tenant"
-                      >
-                        <Edit2 className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono bg-slate-950/60 px-1 py-0.5 rounded border border-slate-800/80">
-                    <span className="truncate mr-1 select-all" title={t.tenantId}>
-                      {t.tenantId}
-                    </span>
-                    <button 
-                      type="button"
+                    )}
+                    <button
                       onClick={(e) => copyToClipboard(t.tenantId, e)}
-                      className="p-0.5 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition shrink-0"
-                      title="Copy tenant_id"
+                      className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+                      title={`Copy tenant_id: ${t.tenantId}`}
                     >
-                      {copiedTenantId === t.tenantId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5" />}
+                      {copiedTenantId === t.tenantId ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
                     </button>
-                  </div>
-                  {t.groupId && (
-                    <div className="flex items-center justify-between text-[9px] text-amber-300 font-mono bg-amber-500/5 px-1 py-0.2 rounded border border-amber-500/10">
-                      <span className="truncate mr-1 flex items-center gap-1 select-all" title={t.groupId}>
-                        <Users className="w-2.5 h-2.5 shrink-0" /> {t.groupId}
-                      </span>
-                      <button 
-                        type="button"
-                        onClick={(e) => copyToClipboard(t.groupId!, e)}
-                        className="p-0.5 hover:bg-amber-500/20 rounded text-amber-400 hover:text-amber-200 transition shrink-0"
-                        title="Copy group_id"
-                      >
-                        {copiedTenantId === t.groupId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5" />}
-                      </button>
-                    </div>
-                  )}
-                  <div className="text-[9px] text-slate-500 font-mono flex items-center justify-between pt-0.5">
-                    <span>{t.totalConfigs} configs</span>
+                    <button
+                      onClick={(e) => openEditTenantModal(t, e)}
+                      className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+                      title="Edit nama/label tenant"
+                    >
+                      <Edit2 className="w-3 h-3" />
+                    </button>
                   </div>
                 </div>
               );
@@ -1701,7 +2034,7 @@ export default function App() {
           <div className="border-t border-slate-800 p-2 max-h-56 overflow-y-auto bg-slate-950/70">
             <div className="flex items-center justify-between pb-1">
               <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                Konfigurasi ({configs.length})
+                {configDomain === "workflow_pipeline" ? "Workflow" : "Konfigurasi"} ({configs.length})
               </span>
               <button 
                 onClick={() => {
@@ -1724,6 +2057,25 @@ export default function App() {
                   <div
                     key={c.id}
                     onClick={() => loadConfig(c.id, c.config_type, c.group_id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        title: c.config_type,
+                        items: [
+                          { key: "open", label: "Buka", icon: <FileCode className="w-3.5 h-3.5" />, disabled: isConfigActive, onSelect: () => loadConfig(c.id, c.config_type, c.group_id) },
+                          { key: "db", label: "Bandingkan dengan DB terbaru", icon: <Database className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: handleCompareWithDb },
+                          { key: "tenant", label: "Bandingkan dengan tenant lain…", icon: <ArrowLeftRight className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openCompareTenantModal },
+                          { key: "export", label: "Ekspor sebagai preset…", icon: <Download className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openSavePresetModal },
+                          "divider",
+                          { key: "copy-type", label: "Copy nama config", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.config_type) },
+                          { key: "copy-id", label: "Copy ID", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.id) },
+                          "divider",
+                          { key: "delete", label: "Hapus…", icon: <Trash2 className="w-3.5 h-3.5" />, danger: true, onSelect: () => openDeleteConfigModal(c) }
+                        ]
+                      });
+                    }}
                     className={`w-full group text-left px-2 py-1 rounded text-[11px] flex items-center justify-between transition cursor-pointer ${
                       isConfigActive
                         ? "bg-slate-800 text-white font-medium border border-slate-700"
@@ -1731,8 +2083,10 @@ export default function App() {
                     }`}
                   >
                     <span className="flex items-center gap-1.5 truncate">
-                      <FileCode className="w-3 h-3 text-indigo-400 shrink-0" />
-                      {c.config_type || "UNNAMED_CONFIG"}
+                      {configDomain === "workflow_pipeline"
+                        ? <Workflow className="w-3 h-3 text-teal-400 shrink-0" />
+                        : <FileCode className="w-3 h-3 text-indigo-400 shrink-0" />}
+                      <span className="truncate">{c.config_type || "UNNAMED_CONFIG"}</span>
                     </span>
                     <div className="flex items-center gap-1">
                       {c.is_default && (
@@ -1759,113 +2113,105 @@ export default function App() {
 
         {/* Center Workspace (Primary Editor + Optional Split Pane) */}
         <main className="flex-1 flex flex-col bg-slate-950 min-w-0 min-h-0 overflow-hidden">
-          {/* Top Bar Editor - Compact 34px Height */}
-          <div className="h-8.5 border-b border-slate-800 px-3 flex items-center justify-between bg-slate-900/40 text-xs shrink-0">
-            <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-mono text-[11px] border border-slate-700/60">
-                {activeConfigType || "No Config Selected"}
+          {/* Toolbar editor: identitas config + status (chips) di kiri, aksi ikon di kanan */}
+          <div className="h-9 border-b border-slate-800 px-3 flex items-center justify-between gap-3 bg-slate-900/40 text-xs shrink-0 whitespace-nowrap">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono text-[11px] font-medium text-slate-100 truncate">
+                {activeConfigType || "Belum ada config dipilih"}
               </span>
 
-              {selectedConfigId && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const currentCfg = configs.find(c => c.id === selectedConfigId);
-                    if (currentCfg) openDeleteConfigModal(currentCfg);
-                  }}
-                  className="p-1 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 rounded transition"
-                  title={`Hapus konfigurasi aktif (${activeConfigType})`}
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              )}
-
               {/* Group ID Input (Optional) */}
-              <div className="flex items-center gap-1 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-800 text-[10px]">
-                <span className="text-slate-500">group_id:</span>
+              <label className="flex items-center gap-1 h-6 px-2 rounded-md bg-slate-950/60 ring-1 ring-inset ring-slate-800 focus-within:ring-indigo-500/60 text-[10px] shrink-0">
+                <span className="text-slate-500">group_id</span>
                 <input 
                   type="text" 
                   value={currentGroupId}
                   onChange={(e) => setCurrentGroupId(e.target.value)}
-                  placeholder="Opsional"
-                  className="bg-transparent text-amber-300 font-mono text-[10px] focus:outline-none w-36"
+                  placeholder="opsional"
+                  className="bg-transparent text-amber-300 font-mono text-[10px] focus:outline-none w-32"
                 />
-              </div>
+              </label>
 
-              {jsonContent !== originalContent && (
-                <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono">
-                  Modified
-                </span>
+              {jsonContent !== originalContent && <Chip tone="amber">Modified</Chip>}
+              {isDbNewer && (
+                <Chip
+                  tone="rose"
+                  onClick={handleCompareWithDb}
+                  title="Database sudah diubah (oleh orang/proses lain) sejak config ini dimuat. Klik untuk melihat perbedaannya."
+                >
+                  <AlertTriangle className="w-2.5 h-2.5" /> DB lebih baru
+                </Chip>
               )}
+              {validationIssues.length > 0 && (() => {
+                const errors = validationIssues.filter(i => i.severity === "error").length;
+                const warnings = validationIssues.filter(i => i.severity === "warning").length;
+                return (
+                  <Chip
+                    tone={errors ? "rose" : warnings ? "amber" : "emerald"}
+                    onClick={() => setShowValidationPanel(!showValidationPanel)}
+                    title={showValidationPanel ? "Sembunyikan panel validasi" : "Buka hasil validasi"}
+                  >
+                    {errors ? <AlertTriangle className="w-2.5 h-2.5" /> : <CheckCircle2 className="w-2.5 h-2.5" />}
+                    {errors || warnings ? `${errors} error · ${warnings} warning` : "Valid"}
+                    {showValidationPanel ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />}
+                  </Chip>
+                );
+              })()}
             </div>
 
-            <div className="flex items-center gap-2 text-slate-400">
-              {validationIssues.length > 0 && (
-                <button
-                  onClick={() => setShowValidationPanel(!showValidationPanel)}
-                  className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded border transition font-medium ${
-                    validationIssues.some(i => i.severity === "error")
-                      ? "bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30"
-                      : validationIssues.some(i => i.severity === "warning")
-                      ? "bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30"
-                      : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30"
-                  }`}
-                  title={showValidationPanel ? "Sembunyikan panel validasi" : "Buka hasil validasi"}
-                >
-                  {validationIssues.some(i => i.severity === "error") ? (
-                    <AlertTriangle className="w-2.5 h-2.5 text-rose-400" />
-                  ) : (
-                    <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
-                  )}
-                  Linter ({validationIssues.length})
-                  {showValidationPanel ? <ChevronDown className="w-2.5 h-2.5" /> : <ChevronUp className="w-2.5 h-2.5" />}
-                </button>
+            <div className="flex items-center gap-0.5 shrink-0">
+              {isSplitScreen && (
+                <div className="flex items-center gap-0.5 p-0.5 mr-2 rounded-md bg-slate-950/60 ring-1 ring-inset ring-slate-800">
+                  {([
+                    { key: "side-by-side", label: "Side-by-Side" },
+                    { key: "diff", label: "Visual Diff" },
+                    { key: "json-delta", label: "JSON Delta" }
+                  ] as const).map(m => (
+                    <button
+                      key={m.key}
+                      onClick={() => setSplitMode(m.key)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-medium transition ${
+                        splitMode === m.key ? "bg-slate-700 text-white shadow-sm" : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
               )}
 
-              <button 
-                onClick={handleFormatMainJson}
-                className="hover:text-cyan-300 text-slate-400 flex items-center gap-1 text-[10px] transition"
-                title="Rapikan format JSON (indent 2 spasi)"
-              >
-                <Braces className="w-2.5 h-2.5 text-cyan-400" /> Format
-              </button>
+              {([
+                { key: "format", icon: <Braces className="w-3.5 h-3.5" />, title: "Format JSON (indent 2 spasi)", onClick: handleFormatMainJson },
+                { key: "validate", icon: <CheckCircle2 className="w-3.5 h-3.5" />, title: "Validasi sintaks & guardrail", onClick: () => { handleValidate(); } },
+                { key: "reset", icon: <RotateCcw className="w-3.5 h-3.5" />, title: "Reset ke isi awal (buang edit)", onClick: () => setJsonContent(originalContent) },
+                { key: "reload", icon: <RefreshCw className="w-3.5 h-3.5" />, title: "Muat ulang dari database", onClick: handleReloadFromDb }
+              ]).map(b => (
+                <button
+                  key={b.key}
+                  onClick={b.onClick}
+                  disabled={!selectedConfigId}
+                  className="h-7 w-7 rounded-md flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800/70 transition disabled:opacity-30"
+                  title={b.title}
+                >
+                  {b.icon}
+                </button>
+              ))}
 
-              <button 
-                onClick={() => setJsonContent(originalContent)}
-                className="hover:text-slate-200 flex items-center gap-1 text-[10px]"
-                title="Kembalikan ke isi awal"
-              >
-                <RotateCcw className="w-2.5 h-2.5" /> Reset
-              </button>
-
-              {isSplitScreen && (
-                <div className="flex items-center gap-0.5 bg-slate-900 p-0.5 rounded border border-slate-800">
+              {selectedConfigId && (
+                <>
+                  <span className="w-px h-4 bg-slate-800 mx-1" />
                   <button
-                    onClick={() => setSplitMode("side-by-side")}
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-medium transition ${
-                      splitMode === "side-by-side" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-slate-200"
-                    }`}
+                    type="button"
+                    onClick={() => {
+                      const currentCfg = configs.find(c => c.id === selectedConfigId);
+                      if (currentCfg) openDeleteConfigModal(currentCfg);
+                    }}
+                    className="h-7 w-7 rounded-md flex items-center justify-center text-slate-500 hover:text-rose-300 hover:bg-rose-500/10 transition"
+                    title={`Hapus konfigurasi aktif (${activeConfigType})`}
                   >
-                    Side-by-Side
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
-                  <button
-                    onClick={() => setSplitMode("diff")}
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-medium transition ${
-                      splitMode === "diff" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    Visual Diff
-                  </button>
-                  <button
-                    onClick={() => setSplitMode("json-delta")}
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-medium transition flex items-center gap-1 ${
-                      splitMode === "json-delta" ? "bg-cyan-600 text-white shadow-sm" : "text-slate-400 hover:text-cyan-300"
-                    }`}
-                    title="Tampilkan perbedaan kedua konfigurasi sebagai dokumen JSON terstruktur"
-                  >
-                    <FileCode className="w-2.5 h-2.5" /> JSON Delta
-                  </button>
-                </div>
+                </>
               )}
             </div>
           </div>
@@ -1895,10 +2241,14 @@ export default function App() {
                       ) : (
                         <span
                           className="flex items-center gap-1.5 min-w-0"
-                          title={`Preset Lokal (Kiri): ${splitTitle}`}
+                          title={`${splitSourceType === "preset" ? "Preset Lokal" : "Snapshot"} (Kiri): ${splitTitle}`}
                         >
-                          <FolderOpen className="w-3 h-3 text-amber-400 shrink-0" />
-                          <span className="font-medium text-amber-200 truncate">{splitTitle}</span>
+                          {splitSourceType === "preset" ? (
+                            <FolderOpen className="w-3 h-3 text-amber-400 shrink-0" />
+                          ) : (
+                            <History className="w-3 h-3 text-emerald-400 shrink-0" />
+                          )}
+                          <span className={`font-medium truncate ${splitSourceType === "preset" ? "text-amber-200" : "text-emerald-200"}`}>{splitTitle}</span>
                         </span>
                       )}
                       <span className="text-slate-600 text-[10px] shrink-0">vs</span>
@@ -1906,11 +2256,11 @@ export default function App() {
                         className="flex items-center gap-1.5 min-w-0"
                         title={splitSourceType === "tenant"
                           ? `Tenant Aktif (Kanan): ${selectedTenant?.name} — ${activeConfigType}`
-                          : `Database Live (Kanan): ${activeConfigType}`}
+                          : `${splitSourceType === "preset" ? "Database Live" : "Editor Anda"} (Kanan): ${activeConfigType}`}
                       >
                         <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
                         <span className="font-medium text-indigo-200 truncate">
-                          {splitSourceType === "tenant" ? selectedTenant?.name : "Database Live"}
+                          {splitSourceType === "tenant" ? selectedTenant?.name : splitSourceType === "preset" ? "Database Live" : "Editor Anda"}
                         </span>
                         <span className="font-mono text-[10px] text-slate-500 truncate">{activeConfigType}</span>
                       </span>
@@ -1919,13 +2269,19 @@ export default function App() {
                     {/* Aksi: satu tombol utama, sisanya ghost / icon-only */}
                     <div className="flex items-center gap-1 shrink-0">
                       <button
-                        onClick={splitSourceType === "tenant" ? handleApplyCompareToLive : handleApplyPresetToLive}
+                        onClick={
+                          splitSourceType === "tenant" ? handleApplyCompareToLive
+                          : splitSourceType === "db" ? handleApplyDbSnapshot
+                          : handleApplyPresetToLive
+                        }
                         className="h-6 px-2.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium flex items-center gap-1.5 shadow-sm shadow-cyan-950/50 transition"
                         title={splitSourceType === "tenant"
                           ? "Terapkan isi tenant pembanding ke tenant aktif (sebelah kanan)"
+                          : splitSourceType === "db"
+                          ? "Ganti isi editor dengan versi database terbaru (sebelah kiri)"
                           : "Terapkan isi file preset ini ke konfigurasi database live (sebelah kanan)"}
                       >
-                        <ArrowLeft className="w-3 h-3" /> Terapkan ke Live
+                        <ArrowLeft className="w-3 h-3" /> {splitSourceType === "db" ? "Pakai Versi DB" : "Terapkan ke Live"}
                       </button>
                       {splitSourceType === "tenant" ? (
                         <>
@@ -1944,7 +2300,7 @@ export default function App() {
                             <ArrowLeftRight className="w-3.5 h-3.5" />
                           </button>
                         </>
-                      ) : (
+                      ) : splitSourceType === "preset" && (
                         <button
                           onClick={handleSyncPresetSingleToDb}
                           className="h-6 px-2 rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-slate-800 text-[11px] flex items-center gap-1.5 transition"
@@ -2143,7 +2499,7 @@ export default function App() {
                           <Braces className="w-2.5 h-2.5 text-cyan-400" /> Format
                         </button>
                         <button
-                          onClick={handleSave}
+                          onClick={() => handleSave()}
                           disabled={isSaving || !selectedConfigId}
                           className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium flex items-center gap-1 shadow-sm transition disabled:opacity-40"
                           title="Simpan perubahan langsung ke database"
@@ -2264,6 +2620,40 @@ export default function App() {
                             }}
                             className="text-slate-400 hover:text-slate-200 p-0.5"
                             title="Tutup split perbandingan"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : splitSourceType === "db" || splitSourceType === "history" ? (
+                      /* Header for read-only snapshot (DB terbaru / History) */
+                      <div className="relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-emerald-950/30 border-b border-emerald-500/30 px-3 flex items-center justify-between gap-2 text-[10px]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <History className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span className="font-semibold text-emerald-200 truncate">{splitTitle}</span>
+                          <span className="text-slate-500 shrink-0">snapshot, tidak disimpan</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={splitSourceType === "db" ? handleApplyDbSnapshot : handleApplyPresetToLive}
+                            className="px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 border border-cyan-500/40 text-[10px] flex items-center gap-1 transition"
+                            title="Ganti isi editor dengan snapshot ini"
+                          >
+                            <ArrowLeft className="w-2.5 h-2.5" /> {splitSourceType === "db" ? "Pakai Versi DB" : "Terapkan ke Live"}
+                          </button>
+                          {splitSourceType === "db" && (
+                            <button
+                              onClick={handleCompareWithDb}
+                              className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center"
+                              title="Ambil ulang versi terbaru dari database"
+                            >
+                              <RefreshCw className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => setIsSplitScreen(false)}
+                            className="text-slate-400 hover:text-slate-200 p-0.5"
+                            title="Tutup split"
                           >
                             <X className="w-3 h-3" />
                           </button>
@@ -2746,7 +3136,7 @@ export default function App() {
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
                 <FilePlus className="w-4 h-4 text-indigo-400" /> 
-                Tambah Konfigurasi untuk {selectedTenant?.name}
+                Tambah {configDomain === "workflow_pipeline" ? "Workflow Pipeline" : "Konfigurasi"} untuk {selectedTenant?.name}
               </h3>
               <button onClick={() => setShowAddConfigModal(false)} className="text-slate-400 hover:text-slate-200">
                 <X className="w-4 h-4" />
@@ -2759,23 +3149,27 @@ export default function App() {
                 <input 
                   type="text" 
                   required
-                  placeholder="Contoh: CANDIDATE_STABLE, VACANCY_STABLE, APPLICANT_STABLE"
+                  placeholder={configDomain === "workflow_pipeline"
+                    ? "Contoh: CREATE_SCHEDULE_INTERVIEW, ADD_FINAL_DECISION"
+                    : "Contoh: CANDIDATE_STABLE, VACANCY_STABLE, APPLICANT_STABLE"}
                   value={newConfigForm.configType}
                   onChange={(e) => setNewConfigForm({ ...newConfigForm, configType: e.target.value })}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 uppercase font-mono focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
-              <div>
-                <label className="block text-slate-400 mb-1">Path (Opsional)</label>
-                <input 
-                  type="text" 
-                  placeholder="Contoh: candidate-stable atau rules.validation"
-                  value={newConfigForm.path}
-                  onChange={(e) => setNewConfigForm({ ...newConfigForm, path: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
-                />
-              </div>
+              {configDomain === "tenant_config" && (
+                <div>
+                  <label className="block text-slate-400 mb-1">Path (Opsional)</label>
+                  <input 
+                    type="text" 
+                    placeholder="Contoh: candidate-stable atau rules.validation"
+                    value={newConfigForm.path}
+                    onChange={(e) => setNewConfigForm({ ...newConfigForm, path: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-slate-400 mb-1">Group ID (Opsional)</label>
@@ -3164,6 +3558,12 @@ export default function App() {
               </button>
             </div>
 
+            <div className="px-4 py-2.5 border-b border-slate-800 shrink-0">
+              <Stepper steps={["Pilih config", "Pratinjau perubahan", "Hasil"]} current={syncStep} />
+            </div>
+
+            {syncStep === 1 && (
+              <>
             <div className="px-4 py-2 border-b border-slate-800 flex items-center justify-between gap-3 text-[11px] shrink-0">
               <div className="flex items-center gap-1.5 min-w-0 text-slate-400">
                 <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
@@ -3254,6 +3654,22 @@ export default function App() {
                           </td>
                           <td className="p-2">
                             <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] ${badge.cls}`}>{badge.label}</span>
+                            {row.duplicateType && (
+                              <span
+                                className="block mt-0.5 text-[9px] text-amber-300"
+                                title="Ada lebih dari 1 config aktif dengan tipe ini; push/pull per-tipe akan ditolak."
+                              >
+                                Tipe kembar
+                              </span>
+                            )}
+                            {row.pullRequired && (
+                              <span
+                                className="block mt-0.5 text-[9px] text-rose-300"
+                                title="File belum di-pull dari versi database saat ini. Push akan ditolak sampai Anda melakukan Pull."
+                              >
+                                Perlu Pull dulu
+                              </span>
+                            )}
                           </td>
                           <td className="p-2 text-slate-400 font-mono text-[10px]">
                             {row.dbUpdatedAt ? new Date(row.dbUpdatedAt).toLocaleString("id-ID") : "-"}
@@ -3282,42 +3698,146 @@ export default function App() {
               )}
             </div>
 
-            {syncResult && (
-              <div className={`mx-4 mt-3 p-2.5 rounded-lg text-[11px] border space-y-1.5 shrink-0 ${
-                syncResult.failed > 0 ? "bg-amber-500/10 text-amber-200 border-amber-500/30" : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-              }`}>
-                <p className="font-semibold">
-                  {syncResult.direction === "push" ? "Push file → DB" : "Pull DB → file"}: {syncResult.updated} diperbarui
-                  {syncResult.created > 0 ? `, ${syncResult.created} dibuat` : ""}, {syncResult.skipped} sudah sama, {syncResult.failed} gagal
+              </>
+            )}
+
+            {syncStep === 2 && (
+              <div className="flex-1 overflow-y-auto min-h-[200px] p-4 space-y-2">
+                <p className="text-[11px] text-slate-400">
+                  {syncDirection === "push"
+                    ? "Pratinjau PUSH: isi file lokal akan menggantikan config di database. Angka menunjukkan perubahan yang akan terjadi di DB."
+                    : "Pratinjau PULL: isi database akan menimpa file lokal (file lama dicadangkan sebagai .bak). Angka menunjukkan perubahan pada file."}
                 </p>
-                {syncResult.results.filter(r => r.action === "failed").map((r, i) => (
-                  <p key={i} className="font-mono text-[10px] text-red-300">✗ {r.configType}: {r.error}</p>
+                {syncPreviewLoading && <p className="text-xs text-slate-500 py-6 text-center">Menghitung perbedaan…</p>}
+                {!syncPreviewLoading && syncPreview.map((item) => (
+                  <div key={item.configType} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-slate-950/50 ring-1 ring-inset ring-slate-800">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[11px] text-slate-100 truncate">{item.configType}</div>
+                      <div className="font-mono text-[10px] text-slate-500 truncate" title={item.filePath}>{item.filePath}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {item.error ? (
+                        <Chip tone="rose">{item.error}</Chip>
+                      ) : item.blocked ? (
+                        <Chip tone="rose" title="Server akan menolak item ini">Akan ditolak: {item.blocked}</Chip>
+                      ) : item.total === 0 ? (
+                        <Chip tone="slate">Tidak ada perubahan · dilewati</Chip>
+                      ) : (
+                        <>
+                          <Chip tone="emerald">+{item.added}</Chip>
+                          <Chip tone="rose">−{item.removed}</Chip>
+                          <Chip tone="amber">~{item.modified}</Chip>
+                        </>
+                      )}
+                      {!item.error && (
+                        <button
+                          onClick={() => {
+                            const row = syncRows.find(r => r.configType === item.configType);
+                            if (row) handleSyncCompare(row);
+                          }}
+                          className="ml-1 px-2 py-0.5 rounded-md text-[10px] text-slate-300 hover:text-white hover:bg-slate-800 transition"
+                          title="Buka Visual Diff untuk item ini (menutup Sync Center)"
+                        >
+                          Lihat diff
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 ))}
               </div>
             )}
 
-            <div className="flex items-center justify-between gap-3 p-4 border-t border-slate-800 shrink-0 mt-3">
-              <span className="text-[11px] text-slate-400">
-                {syncSelected.size} dipilih · hanya item yang dipilih yang diproses
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => runSyncApply("pull")}
-                  disabled={syncBusy || syncSelected.size === 0}
-                  className="px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-200 border border-amber-500/40 transition flex items-center gap-1.5 disabled:opacity-40"
-                  title="Timpa file lokal dengan isi database (file lama dicadangkan sebagai .bak)"
-                >
-                  <Download className="w-3.5 h-3.5" /> Pull terpilih ke Lokal
-                </button>
-                <button
-                  onClick={() => runSyncApply("push")}
-                  disabled={syncBusy || syncSelected.size === 0}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-lg shadow-emerald-500/20 transition flex items-center gap-1.5 disabled:opacity-40"
-                  title="Timpa config di database dengan isi file lokal (versi lama diarsipkan ke history)"
-                >
-                  <Zap className="w-3.5 h-3.5" /> {syncBusy ? "Memproses..." : "Push terpilih ke DB"}
-                </button>
+            {syncStep === 3 && (
+              <div className="flex-1 overflow-y-auto min-h-[200px] p-4">
+                {syncBusy && <p className="text-xs text-slate-500 py-6 text-center">Memproses sinkronisasi…</p>}
+                {syncResult && (
+                  <div className={`p-3 rounded-lg text-[11px] ring-1 ring-inset space-y-1.5 ${
+                    syncResult.failed > 0 ? "bg-amber-500/10 text-amber-200 ring-amber-500/30" : "bg-emerald-500/10 text-emerald-300 ring-emerald-500/30"
+                  }`}>
+                    <p className="font-semibold">
+                      {syncResult.direction === "push" ? "Push file → DB" : "Pull DB → file"}: {syncResult.updated} diperbarui
+                      {syncResult.created > 0 ? `, ${syncResult.created} dibuat` : ""}, {syncResult.skipped} sudah sama, {syncResult.failed} gagal
+                    </p>
+                    {syncResult.results.map((r, i) => (
+                      <p key={i} className={`font-mono text-[10px] ${r.action === "failed" ? "text-red-300" : "text-slate-300"}`}>
+                        {r.action === "failed" ? "✗" : r.action === "skipped" ? "–" : "✓"} {r.configType}: {r.error || r.action}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
+            )}
+
+            <div className="flex items-center justify-between gap-3 p-4 border-t border-slate-800 shrink-0">
+              {syncStep === 1 && (
+                <>
+                  <span className="text-[11px] text-slate-400">
+                    {syncSelected.size} dipilih · hanya item yang dipilih yang diproses
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => goSyncPreview("pull")}
+                      disabled={syncSelected.size === 0}
+                      className="px-3 py-1.5 rounded-lg text-amber-200 hover:bg-amber-500/10 ring-1 ring-inset ring-amber-500/40 transition flex items-center gap-1.5 disabled:opacity-40"
+                      title="Pratinjau: timpa file lokal dengan isi database"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Pratinjau Pull ke Lokal
+                    </button>
+                    <button
+                      onClick={() => goSyncPreview("push")}
+                      disabled={syncSelected.size === 0}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm transition flex items-center gap-1.5 disabled:opacity-40"
+                      title="Pratinjau: timpa config di database dengan isi file lokal"
+                    >
+                      <Zap className="w-3.5 h-3.5" /> Pratinjau Push ke DB
+                    </button>
+                  </div>
+                </>
+              )}
+              {syncStep === 2 && syncDirection && (() => {
+                const runnable = syncPreview.filter(p => !p.error && !p.blocked && p.total > 0).length;
+                return (
+                  <>
+                    <button onClick={() => setSyncStep(1)} className="px-3 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center gap-1.5">
+                      <ArrowLeft className="w-3.5 h-3.5" /> Kembali
+                    </button>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11px] text-slate-400">{runnable} dari {syncPreview.length} item akan diubah</span>
+                      <button
+                        onClick={() => {
+                          setSyncStep(3);
+                          runSyncApply(syncDirection);
+                        }}
+                        disabled={syncPreviewLoading || syncBusy}
+                        className={`px-3 py-1.5 rounded-lg text-white font-medium shadow-sm transition flex items-center gap-1.5 disabled:opacity-40 ${
+                          syncDirection === "push" ? "bg-emerald-600 hover:bg-emerald-500" : "bg-amber-600 hover:bg-amber-500"
+                        }`}
+                      >
+                        {syncDirection === "push" ? <Zap className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                        {syncDirection === "push" ? "Jalankan Push ke DB" : "Jalankan Pull ke Lokal"}
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
+              {syncStep === 3 && (
+                <>
+                  <button
+                    onClick={() => setSyncStep(1)}
+                    disabled={syncBusy}
+                    className="px-3 py-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center gap-1.5 disabled:opacity-40"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" /> Kembali ke daftar
+                  </button>
+                  <button
+                    onClick={() => setShowSyncTenantModal(false)}
+                    disabled={syncBusy}
+                    className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-medium transition disabled:opacity-40"
+                  >
+                    Selesai
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -3483,7 +4003,9 @@ export default function App() {
       )}
 
       {/* Modal: Buku Panduan & Dokumentasi Tenant Configuration */}
-      <DocsModal isOpen={showDocsModal} onClose={() => setShowDocsModal(false)} />
+      {/* Panduan mengikuti domain aktif: tenant_configurations vs pipeline_workflow_configurations */}
+      <DocsModal isOpen={showDocsModal && configDomain === "tenant_config"} onClose={() => setShowDocsModal(false)} />
+      <WorkflowDocsModal isOpen={showDocsModal && configDomain === "workflow_pipeline"} onClose={() => setShowDocsModal(false)} />
     </div>
   );
 }

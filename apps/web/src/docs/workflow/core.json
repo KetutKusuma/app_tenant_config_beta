@@ -1,0 +1,1174 @@
+{
+ "sections": [
+  {
+   "id": "konsep",
+   "title": "Konsep Workflow Pipeline",
+   "summary": "Workflow pipeline adalah daftar langkah (executor) berurutan yang disimpan sebagai JSON di tabel public.pipeline_workflow_configurations dan dijalankan oleh satu endpoint generik.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Workflow pipeline adalah mekanisme config-driven di ATS untuk menjalankan aksi 'satelit' pada satu applicant bucket (jadwal interview, kirim form, offering letter, hire, dsb.). Alih-alih satu usecase per aksi, semua aksi lewat ExecuteSatelliteWorkflowStableUseCase (apps/ats/src/process/workflow/use-cases/execute-satellite-workflow-stable.usecase.ts). Usecase ini membaca satu baris config berdasarkan workflowName, lalu menjalankan value.pipelines[] satu per satu lewat PipelineWorkflowExecutorService (apps/ats/src/process/workflow/services/pipeline-workflow-executor.service.ts)."
+    },
+    {
+     "type": "p",
+     "text": "Setiap entry pipelines[] menunjuk sebuah executor lewat field name. Executor terdaftar di PipelineExecutorRegistry (apps/ats/src/process/workflow/pipeline-executor.registry.ts) yang diisi saat module start oleh PipelineExecutorRegistryBootstrapService (apps/ats/src/process/workflow/pipeline-executor-registry-bootstrap.service.ts). Selain domain executor, lifecycle service Transformer, FormatDate, dan ConvertTimezone juga didaftarkan sehingga bisa dipakai di dalam pipelines[]."
+    },
+    {
+     "type": "p",
+     "text": "Entity: PipelineWorkflowConfigurationEntity (apps/ats/src/configurations/pipeline-workflow-configuration/entities/pipeline-workflow-configuration.entity.ts), extends IBaseEntity (apps/ats/src/common/entities/base.entity.ts)."
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Kolom",
+      "Tipe",
+      "Keterangan"
+     ],
+     "rows": [
+      [
+       "id",
+       "uuid (PK)",
+       "Di-generate uuidv7 di @BeforeInsert bila kosong."
+      ],
+      [
+       "tenant_id",
+       "uuid, nullable",
+       "Tenant pemilik override. NULL untuk baris default (seeder config-sync menulis NULL untuk default)."
+      ],
+      [
+       "group_id",
+       "uuid, nullable",
+       "Ada di entity, tetapi TIDAK dipakai saat lookup runtime maupun oleh config-sync (insert tidak mengisinya)."
+      ],
+      [
+       "workflow_config_type",
+       "varchar, nullable",
+       "Kunci workflow = nilai workflowName yang dikirim caller (mis. SEND_FORM)."
+      ],
+      [
+       "is_default",
+       "boolean, default false",
+       "true = baris default global; false = override tenant."
+      ],
+      [
+       "value",
+       "jsonb, default {}",
+       "Isi config: { tenantConfigType?, pipelines: [...] }."
+      ],
+      [
+       "created_at",
+       "timestamp",
+       "CreateDateColumn."
+      ],
+      [
+       "updated_at",
+       "timestamp, nullable",
+       "UpdateDateColumn."
+      ],
+      [
+       "deleted_at",
+       "timestamp, nullable",
+       "DeleteDateColumn (soft delete; repository TypeORM otomatis mengecualikan baris ber-deleted_at)."
+      ]
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Perbedaan dengan tenant_configurations: tenant_configurations (key: config_type, mis. INTERVIEW_STABLE, APPLICANT_STABLE) menyimpan konfigurasi per-domain/per-stage: list view, filterable, validation, emailTemplates, maxBatchProcess, serta lifecycle beforeExecute/afterExecute. pipeline_workflow_configurations (key: workflow_config_type) hanya menyimpan urutan langkah eksekusi workflow. Keduanya dibaca bersamaan dalam satu run: pipeline config menentukan apa yang dijalankan, tenant config menyuplai data pendukung ($tenantConfig.emailTemplates...) dan hook lifecycle."
+    },
+    {
+     "type": "p",
+     "text": "Hubungan lewat tenantConfigType: value.tenantConfigType (opsional) menentukan baris tenant_configurations mana yang dimuat sebagai ctx.tenantConfig. Bila tidak diisi, usecase memakai getStageStableConfigType(ctx.vacancyStage.stageType) = `${stageType.toUpperCase()}_STABLE` (apps/ats/src/configurations/tenant-configuration/utils/stage-stable-config-type.util.ts), mis. stage INTERVIEW -> INTERVIEW_STABLE. Jika baris dengan configType itu tidak ada sama sekali (tenant maupun default), GetTenantConfigurationValueService fallback ke APPLICANT_STABLE (apps/ats/src/configurations/tenant-configuration/services/get-tenant-configuration-value.service.ts)."
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "Di default config saat ini, hanya UPDATE_CANDIDATE_META_SNAPSHOT yang mengisi tenantConfigType (APPLICANT_CANDIDATE_META_STABLE). Workflow lain mengikuti stage aktif applicant."
+    }
+   ]
+  },
+  {
+   "id": "alur-eksekusi",
+   "title": "Alur Eksekusi",
+   "summary": "POST /workflow/execute-satellite-workflow-stable membangun ctx, menghidrasi data bucket, memuat dua config, menjalankan beforeExecute, pipelines, lalu afterExecute.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Controller: ExecuteSatelliteWorkflowStableController (apps/ats/src/process/workflow/controller/execute-satellite-workflow-stable.controller.ts), route POST /workflow/execute-satellite-workflow-stable, HTTP 200, ValidationPipe({ transform: true }). Body DTO: ExecuteSatelliteWorkflowStableBodyDto (apps/ats/src/process/workflow/dto/execute-satellite-workflow-stable.dto.ts)."
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Field",
+      "Validasi",
+      "Keterangan"
+     ],
+     "rows": [
+      [
+       "workflowName",
+       "@IsString @IsNotEmpty",
+       "= workflow_config_type yang dicari."
+      ],
+      [
+       "applicantBucketId",
+       "@IsUUID @IsNotEmpty",
+       "Bucket target (wajib)."
+      ],
+      [
+       "satellitePayload",
+       "@IsObject",
+       "Bebas bentuk; hanya divalidasi sebagai object. Tipe referensi: SatellitePayload."
+      ]
+     ]
+    },
+    {
+     "type": "code",
+     "lang": "http",
+     "code": "POST /workflow/execute-satellite-workflow-stable\nContent-Type: application/json\n\n{\n  \"workflowName\": \"HIRE_CANDIDATE\",\n  \"applicantBucketId\": \"01a05d6f-b748-7ed4-98b4-bcca74a6c4c6\",\n  \"satellitePayload\": { \"hire\": { \"joinDate\": \"2026-10-01\" } }\n}"
+    },
+    {
+     "type": "p",
+     "text": "Langkah di ExecuteSatelliteWorkflowStableUseCase.execute(body, bulkPosition?):"
+    },
+    {
+     "type": "list",
+     "items": [
+      "1. Context build: ctx = contextBuilder.build({...body}) -> { requestBody: body, authContext: cls.getStore(), entity: {} } (apps/ats/src/common/utils/context-builder.util.ts). Jika bulkPosition diberikan (hanya dari bulk handler), ditambahkan sebagai ctx.bulkPosition.",
+      "2. Resolve bucket: ResolveApplicantBucketContextService mencari ApplicantBucketEntity {id: requestBody.applicantBucketId, tenantId: authContext.tenantId, deletedAt NULL} + relasi candidate/vacancy/customFields; memuat VacancyStage dari bucket.currentProcess.stageId; menjalankan MergeApplicantSatelliteDataStableService.byStage() dan TenantPoolDatabaseRepository.findCandidateAndTenant(); lalu mengisi ctx (bucket, vacancy, candidate, candidateTenantPool, customFields, vacancyStage, applicant* satelit). 404 bila bucket atau stage tidak ditemukan.",
+      "3. Load pipeline config: GetPipelineWorkflowConfigurationService.execute({ workflowConfigType: body.workflowName, tenantId }).",
+      "4. Load tenant config: GetTenantConfigurationValueService.execute({ configType: value.tenantConfigType ?? getStageStableConfigType(vacancyStage.stageType) ?? APPLICANT_STABLE, tenantId }). Hasil + entity pipeline config disimpan ke ctx.tenantConfig dan ctx.pipelineConfig.",
+      "5. beforeExecute: lifecycleRunner.execute(ctx, tenantConfig.beforeExecute, event=workflowName).",
+      "6. Identifier: ctx.identifier = `${vacancyStage.stageType}-${bucket.id}-${randomUUID()}`.",
+      "7. Pipelines loop: PipelineWorkflowExecutorService.execute(value.pipelines ?? [], ctx) — per entry: cek andCondition/orCondition, ambil executor dari registry berdasarkan name, jalankan executor.execute(ctx, entry.config); ctx hasil dipakai entry berikutnya (bila executor mengembalikan falsy, ctx lama dipertahankan).",
+      "8. Result: result = { success: true, pipelineResult: ctx.pipelineResult }, disimpan ke ctx.result.",
+      "9. afterExecute: lifecycleRunner.execute(ctx, tenantConfig.afterExecute, event). Return value tetap result dari langkah 8 (ctx afterExecute tidak mengubah response)."
+     ]
+    },
+    {
+     "type": "code",
+     "lang": "text",
+     "code": "HTTP body / bulk handler\n        |\n        v\nContextBuilder.build  -> { requestBody, authContext, entity:{}, [bulkPosition] }\n        |\n        v\nResolveApplicantBucketContextService -> + bucket, vacancy, candidate, vacancyStage,\n        |                                  candidateTenantPool, customFields, applicant*\n        v\nGetPipelineWorkflowConfigurationService (workflowName)  -> pipelineConfig\nGetTenantConfigurationValueService (tenantConfigType | <STAGE>_STABLE) -> tenantConfig\n        |\n        v\nLifecycleRunner(beforeExecute, event = workflowName)\n        |\n        v\nctx.identifier = <stageType>-<bucketId>-<uuid>\n        |\n        v\nfor entry in pipelines[]:\n   kondisi lolos? --tidak--> skip (tanpa entry pipelineResult)\n        | ya\n   registry.get(entry.name).execute(ctx, entry.config) -> ctx baru\n        |\n        v\nresult = { success: true, pipelineResult }\n        |\n        v\nLifecycleRunner(afterExecute, event = workflowName)  -> return result"
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Error di tengah pipeline tidak ditangkap oleh usecase — langsung propagate sebagai HTTP error lewat global exception filter. Tidak ada rollback otomatis atas langkah yang sudah berjalan (usecase tidak membungkus pipelines dalam satu transaksi)."
+    }
+   ]
+  },
+  {
+   "id": "resolusi-config",
+   "title": "Resolusi Config: Tenant vs Default",
+   "summary": "Baris tenant (is_default=false, tenant_id=tenant) diutamakan; jika tidak ada, dipakai baris is_default=true dengan workflow_config_type yang sama.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "GetPipelineWorkflowConfigurationService (apps/ats/src/configurations/pipeline-workflow-configuration/services/get-pipeline-workflow-configuration.service.ts) melakukan dua query findOne:"
+    },
+    {
+     "type": "list",
+     "items": [
+      "1. Jika tenantId ada: WHERE is_default = false AND tenant_id = :tenantId AND workflow_config_type = :workflowName.",
+      "2. Jika langkah 1 tidak menemukan: WHERE is_default = true AND workflow_config_type = :workflowName (tenant_id tidak dicek).",
+      "3. Jika keduanya kosong: NotFoundException('Pipeline workflow configuration not found')."
+     ]
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Aspek",
+      "Perilaku"
+     ],
+     "rows": [
+      [
+       "workflowName",
+       "Dipakai apa adanya sebagai workflow_config_type (case-sensitive, tanpa normalisasi)."
+      ],
+      [
+       "tenant_id",
+       "Diambil dari authContext.tenantId (CLS)."
+      ],
+      [
+       "group_id",
+       "Tidak ikut filter. Override per-group tidak didukung; baris dibedakan hanya oleh tenant_id."
+      ],
+      [
+       "Duplikat",
+       "findOne tanpa order — jika ada >1 baris aktif untuk kombinasi yang sama, baris yang terpilih tidak deterministik. config-sync menandai kondisi ini sebagai CONFLICT."
+      ],
+      [
+       "Merge",
+       "Tidak ada merge: baris tenant menggantikan seluruh value default, bukan menimpa sebagian."
+      ]
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Tenant configuration (ctx.tenantConfig) memakai pola yang sama di GetTenantConfigurationValueService: tenant row (is_default=false, tenant_id) -> default row (is_default=true) -> fallback configType APPLICANT_STABLE -> NotFoundException('Tenant configuration not found')."
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "Karena override menggantikan seluruh value, saat membuat override tenant salin dulu value default lengkap (mis. dari apps/ats/src/process/workflow/config/...), lalu ubah bagian yang perlu."
+    }
+   ]
+  },
+  {
+   "id": "struktur-value",
+   "title": "Struktur JSON value",
+   "summary": "value berisi tenantConfigType opsional dan array pipelines berisi { name, config, andCondition?, orCondition? }.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Tipe: WorkflowPipelineConfigValue dan WorkflowPipelineEntry (apps/ats/src/configurations/tenant-configuration/data/tenant-config-definition.data.ts), PipelineEntry (apps/ats/src/process/workflow/services/pipeline-workflow-executor.service.ts)."
+    },
+    {
+     "type": "code",
+     "lang": "ts",
+     "code": "interface WorkflowPipelineConfigValue {\n  tenantConfigType?: ConfigType;      // opsional; default: <STAGE>_STABLE\n  pipelines: WorkflowPipelineEntry[];\n}\n\ninterface PipelineEntry {\n  name: string;                       // serviceName executor di registry\n  config: unknown;                    // bentuk tergantung executor\n  andCondition?: TenantValidationConditionEntry[]; // semua harus lolos\n  orCondition?: TenantValidationConditionEntry[];  // minimal satu lolos (jika ada)\n}\n\ninterface WorkflowPipelineEntry extends PipelineEntry {\n  service?: string;                   // duplikat name; TIDAK dibaca apa pun\n}"
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Field",
+      "Wajib",
+      "Keterangan"
+     ],
+     "rows": [
+      [
+       "tenantConfigType",
+       "tidak",
+       "configType tenant_configurations yang dimuat sebagai ctx.tenantConfig."
+      ],
+      [
+       "pipelines[].name",
+       "ya",
+       "Harus sama persis dengan serviceName executor terdaftar (mis. CreateForm, SendEmail, Transformer)."
+      ],
+      [
+       "pipelines[].config",
+       "ya (boleh {})",
+       "Bentuk per executor ada di apps/ats/src/process/workflow/interfaces/pipeline-config.types.ts. Umumnya { payload: <template> } plus opsi tambahan (moduleReferences, formExpirationDays, qualitativeScore, dll.)."
+      ],
+      [
+       "pipelines[].andCondition / orCondition",
+       "tidak",
+       "Gate per langkah; lihat bagian Kondisi."
+      ],
+      [
+       "pipelines[].service",
+       "tidak",
+       "Banyak config lama menyertakannya; diabaikan engine."
+      ]
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Contoh nyata (apps/ats/src/process/workflow/config/pre-onboarding/hire-candidate.config.ts):"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"pipelines\": [\n    {\n      \"name\": \"UpdatePreOnboarding\",\n      \"config\": {\n        \"payload\": {\n          \"id\": \"$applicantPreOnboarding[0].id\",\n          \"status\": \"HIRED\",\n          \"joinDate\": \"$satellitePayload.hire.joinDate\"\n        }\n      }\n    },\n    { \"name\": \"SetStatusApplicantProcess\", \"config\": { \"value\": \"HIRED\" } },\n    { \"name\": \"UpdateVacancyCompletionStatus\", \"config\": {} }\n  ]\n}"
+    },
+    {
+     "type": "p",
+     "text": "Contoh dengan tenantConfigType (apps/ats/src/process/workflow/config/candidate-meta-snapshot/update-candidate-meta-snapshot.config.ts):"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"tenantConfigType\": \"APPLICANT_CANDIDATE_META_STABLE\",\n  \"pipelines\": [ { \"name\": \"UpdateCandidateMetaSnapshot\", \"config\": {} } ]\n}"
+    },
+    {
+     "type": "p",
+     "text": "Contoh langkah ber-kondisi dan Transformer (potongan apps/ats/src/process/workflow/config/interview/create-schedule-interview.config.ts):"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"name\": \"GenerateCandidateToken\",\n  \"config\": { \"payload\": \"$satellitePayload.candidateToken\" },\n  \"andCondition\": [\n    { \"left\": \"$vacancyStage.formTemplateId\", \"operator\": \"!=\", \"right\": null }\n  ]\n}"
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "Pola penting: banyak executor (SendEmail, CreateForm, UpdateForm, GenerateCandidateToken, CreateInterviewSchedule, CreateApplicantAttachment, CreateApplicantScore, dll.) me-loop array ctx.satellitePayload.<key> dan menjalankan service sekali per item, dengan satellitePayload.<key> dipersempit ke item tersebut. Jika array kosong/tidak ada, executor berjalan 0 kali tanpa error. Karena itu config default sering didahului Transformer { outputKey: '$satellitePayload.email', transform: [{}] } untuk memaksa tepat 1 iterasi."
+    },
+    {
+     "type": "p",
+     "text": "Setiap domain executor menambahkan { name: serviceName, results } ke ctx.pipelineResult, sehingga langkah berikutnya bisa membaca hasilnya, mis. \"$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].token\". Transformer/FormatDate/ConvertTimezone (lifecycle service) tidak menambah entry pipelineResult; mereka menulis ke ctx lewat outputKey."
+    }
+   ]
+  },
+  {
+   "id": "context-ctx",
+   "title": "Bentuk ctx",
+   "summary": "ctx adalah object yang dibawa dari langkah ke langkah; key-nya diisi oleh ContextBuilder, ResolveApplicantBucketContextService, usecase, lifecycle, dan executor.",
+   "blocks": [
+    {
+     "type": "table",
+     "headers": [
+      "Key ctx",
+      "Diisi oleh",
+      "Isi"
+     ],
+     "rows": [
+      [
+       "requestBody",
+       "ContextBuilder.build",
+       "Body asli: { workflowName, applicantBucketId, satellitePayload }. Data caller ada di $requestBody.satellitePayload.*"
+      ],
+      [
+       "authContext",
+       "ContextBuilder.build (ClsService.getStore())",
+       "ClsStore: tenantId, groupId, actorId, personalKey, dataPermission, timezone (apps/ats/src/common/cls/cls-store.interface.ts)."
+      ],
+      [
+       "entity",
+       "ContextBuilder.build ({}), lalu moduleReferences/executor",
+       "Mis. $entity.documentTemplate (via moduleReferences targetPath di SEND_OFFERING_LETTER), $entity.generatedOfferingDocument."
+      ],
+      [
+       "bulkPosition",
+       "usecase, hanya bila dipanggil bulk handler",
+       "{ index, total, isLast, requestId? }."
+      ],
+      [
+       "bucket",
+       "ResolveApplicantBucketContextService",
+       "ApplicantBucketEntity + relasi; mis. $bucket.id, $bucket.candidateId, $bucket.groupId, $bucket.currentProcess.processId, $bucket.currentProcess.stageId."
+      ],
+      [
+       "vacancy",
+       "ResolveApplicantBucketContextService",
+       "bucket.vacancy ($vacancy.name)."
+      ],
+      [
+       "candidate",
+       "ResolveApplicantBucketContextService",
+       "bucket.candidate ($candidate.id, $candidate.name, $candidate.email, $candidate.emailEncrypted)."
+      ],
+      [
+       "candidateTenantPool",
+       "ResolveApplicantBucketContextService",
+       "Hasil TenantPoolDatabaseRepository.findCandidateAndTenant ($candidateTenantPool.id dipakai UPSERT_CANDIDATE_CUSTOM_FIELDS)."
+      ],
+      [
+       "customFields",
+       "ResolveApplicantBucketContextService",
+       "bucket.customFields ?? []."
+      ],
+      [
+       "vacancyStage",
+       "ResolveApplicantBucketContextService",
+       "VacancyStageEntity stage aktif ($vacancyStage.id, stageType, stageName, formTemplateId, interviewerFormId)."
+      ],
+      [
+       "applicantInterview, applicantFormSubmission, applicantScore, applicantAttachment, applicantPreOnboarding, applicantOffering, applicantProcess",
+       "ResolveApplicantBucketContextService (MergeApplicantSatelliteDataStableService.byStage)",
+       "Array data satelit bucket untuk stage aktif; default []. Mis. $applicantFormSubmission[0].id, $applicantPreOnboarding[0].id."
+      ],
+      [
+       "pipelineConfig",
+       "usecase",
+       "Entity PipelineWorkflowConfigurationEntity utuh (id, tenantId, value, ...)."
+      ],
+      [
+       "tenantConfig",
+       "usecase",
+       "value tenant_configurations (mis. $tenantConfig.emailTemplates.candidateFormEmailTemplateId, beforeExecute, afterExecute)."
+      ],
+      [
+       "satellitePayload",
+       "beforeExecute Transformer di tenant config dan/atau Transformer di pipelines",
+       "TIDAK diisi otomatis dari requestBody. Executor membaca ctx.satellitePayload.<key>."
+      ],
+      [
+       "identifier",
+       "usecase (sebelum pipelines)",
+       "`${stageType}-${bucketId}-${uuid}`."
+      ],
+      [
+       "pipelineResult",
+       "domain executor",
+       "Array { name, results } berurutan sesuai langkah yang benar-benar dijalankan."
+      ],
+      [
+       "cache (atau nama target lain)",
+       "GetCache",
+       "Nilai Redis; null saat miss."
+      ],
+      [
+       "result",
+       "usecase setelah pipelines",
+       "{ success: true, pipelineResult } — tersedia untuk afterExecute."
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "danger",
+     "text": "Perbedaan $requestBody.satellitePayload vs $satellitePayload: body HTTP masuk ke ctx.requestBody, bukan ke ctx.satellitePayload. Default tenant config stage (mis. apps/ats/src/applicant/applicant-hub/data/default/list-interview-stable.config.ts) punya beforeExecute Transformer seperti { outputKey: '$satellitePayload.interview', transform: '$requestBody.satellitePayload.interview' } per event. Tanpa jembatan ini, executor melihat satellitePayload kosong dan diam-diam memproses 0 item (dicatat juga di apps/ats/src/applicant/applicant-hub/BULK_ACTION_STABLE.md). Alternatif: rujuk langsung $requestBody.satellitePayload.x di config (dipakai UPSERT_CANDIDATE_CUSTOM_FIELDS)."
+    }
+   ]
+  },
+  {
+   "id": "template-referensi",
+   "title": "Sintaks Template $... (JMESPath)",
+   "summary": "String berawalan $ dievaluasi sebagai ekspresi JMESPath terhadap ctx; nilai lain dianggap literal, dan object/array di-resolve rekursif.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Resolver: resolveConfigValue (apps/ats/src/common/lifecycle/utils/resolve-config-value.util.ts) + JmesPathSolver (apps/ats/src/common/utils/jmespath-solver.util.ts, membungkus search() dari @aws-lambda-powertools/jmespath) + toJmesPathExpression (apps/ats/src/common/utils/jmespath-key.util.ts, hanya membuang '$' di depan). Executor memanggil resolveConfigValue(config.payload, ctx, jmesPathSolver)."
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Bentuk nilai",
+      "Perilaku"
+     ],
+     "rows": [
+      [
+       "String diawali $",
+       "Seluruh string (tanpa $) dievaluasi sebagai JMESPath terhadap ctx. Hasil bisa tipe apa saja (object, array, number, null)."
+      ],
+      [
+       "String mengandung $ di tengah",
+       "Hanya token sederhana $ident(.ident|[n])* yang disubstitusi (regex EMBEDDED_EXPR) dan di-String(); null/undefined -> ''. Tidak mendukung fungsi/filter. Contoh: 'vacancy $vacancy.name ...'."
+      ],
+      [
+       "String tanpa $",
+       "Literal."
+      ],
+      [
+       "number / boolean / null",
+       "Literal."
+      ],
+      [
+       "Array",
+       "Setiap elemen di-resolve rekursif."
+      ],
+      [
+       "Object",
+       "Setiap value di-resolve rekursif; key tetap literal."
+      ]
+     ]
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"payload\": {\n    \"tenantId\": \"$authContext.tenantId\",\n    \"actorId\": \"$candidate.id\",\n    \"tokenType\": \"RESPONDENT_FORM\",\n    \"ttlSeconds\": 604800,\n    \"respondents\": [\n      {\n        \"respondentId\": \"$candidate.id\",\n        \"candidateToken\": \"$pipelineResult[?name=='GenerateCandidateToken']|[0].results[0].token\",\n        \"respondentType\": \"CANDIDATE\"\n      }\n    ]\n  }\n}"
+    },
+    {
+     "type": "p",
+     "text": "Fitur JMESPath yang terpakai di config nyata:"
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Pola",
+      "Contoh (file)"
+     ],
+     "rows": [
+      [
+       "Path + index",
+       "$applicantFormSubmission[0].id (form-submission/resend-form.config.ts)"
+      ],
+      [
+       "Filter + pipe",
+       "$pipelineResult[?name=='CreateForm'].results[] | [?respondentType=='CANDIDATE'] | [0].formLink (interview/create-schedule-interview.config.ts)"
+      ],
+      [
+       "join()",
+       "$join('', [satellitePayload.interview.interviewDate, 'T', satellitePayload.interview.startTime, ':00']) (interview/create-schedule-interview.config.ts)"
+      ],
+      [
+       "Operator || (fallback)",
+       "$pipelineResult[?name=='CreateInterviewSchedule']|[0].results[0].location || [0].results[0].meetingLink"
+      ],
+      [
+       "&& / || sebagai if-else",
+       "$vacancyStage.stageType == 'ASSESSMENT' && 'Assessment Form' || ... || 'Submission Form' (beforeExecute di list-interview-stable.config.ts)"
+      ],
+      [
+       "length(), to_string(), sort_by(), reverse(), merge()",
+       "Dipakai di tenant config applicant-hub (list-assessment-stable, list-pre-onboarding-stable, list-interview-stable, list-administrative-stable)."
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "Hanya fungsi bawaan JMESPath dari @aws-lambda-powertools/jmespath yang tersedia; JmesPathSolver tidak mendaftarkan fungsi kustom. Error parse/eval dilempar sebagai BadRequest type JMESPATH_RESOLVE_ERROR."
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Di dalam ekspresi $..., referensi berikutnya ditulis TANPA $ (mis. join('', [satellitePayload.x, ...])); yang dibuang hanya karakter $ pertama. Literal string JMESPath memakai kutip tunggal; literal JSON memakai backtick (`[]`)."
+    },
+    {
+     "type": "p",
+     "text": "Penulisan ke ctx (outputKey Transformer, targetPath moduleReferences) memakai setContextValue (apps/ats/src/common/utils/set-path.util.ts): path $a.b.c bertitik, objek antara dibuat otomatis, marker [] maksimal sekali untuk fan-out."
+    },
+    {
+     "type": "p",
+     "text": "Transformer (apps/ats/src/common/lifecycle/services/transformer.lifecycle-service.ts) config: outputKey (wajib), transform (bentuk JSON apa pun), atau forEach { source, itemKey='item', template, append?, pairSource?, pairKey='pairItem' }. forEach.source harus array (LIFECYCLE_TRANSFORMER_FOREACH_SOURCE_NOT_ARRAY), pairSource harus array sama panjang (LIFECYCLE_TRANSFORMER_FOREACH_PAIR_SOURCE_MISMATCH). append: true menggabungkan dengan array yang sudah ada di outputKey."
+    }
+   ]
+  },
+  {
+   "id": "kondisi",
+   "title": "Kondisi andCondition / orCondition",
+   "summary": "Langkah pipeline dijalankan hanya jika semua andCondition lolos dan, bila orCondition diisi, minimal satu lolos.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "PipelineWorkflowExecutorService.shouldRun memanggil TenantRuleConditionEvaluatorService.shouldApplyRule (apps/ats/src/configurations/tenant-configuration/services/custom/tenant-rule-condition-evaluator.service.ts). Jika kedua array kosong/tidak ada, langkah selalu jalan. Langkah yang gagal kondisi dilewati tanpa menambah pipelineResult."
+    },
+    {
+     "type": "code",
+     "lang": "ts",
+     "code": "// configurations/tenant-configuration/data/tenant-configuration.data.ts\ntype ValidationOperator = 'EQUALS' | 'NOT_EQUALS' | '=' | '!=' | '<' | '<=' | '>' | '>=';\ninterface TenantValidationCondition { left: unknown; operator: ValidationOperator; right: unknown; }\ninterface TenantValidationWhen { when: TenantValidationCondition; }\ntype TenantValidationConditionEntry = TenantValidationWhen | TenantValidationCondition;"
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Operator",
+      "Semantik"
+     ],
+     "rows": [
+      [
+       "EQUALS, =",
+       "left === right (strict)."
+      ],
+      [
+       "NOT_EQUALS, !=",
+       "left !== right (strict)."
+      ],
+      [
+       "<, <=, >, >=",
+       "TenantRuleComparatorService.compare: numerik bila keduanya bisa jadi number; lalu tanggal (Date.parse); terakhir String.localeCompare."
+      ],
+      [
+       "lainnya",
+       "false (langkah di-skip)."
+      ]
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Resolusi operand (TenantRuleValueResolverService.resolveOperand): string berawalan $ dibaca sebagai path ber-titik sederhana dari ctx (split('.')); nilai lain literal. Ini BUKAN JMESPath."
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Operand kondisi tidak mendukung index/filter/fungsi: '$applicantFormSubmission[0].id' atau '$length(x)' tidak akan ter-resolve (hasil undefined). Siapkan nilai dulu lewat Transformer ke key sederhana bila perlu. Perhatikan juga strict equality: field yang tidak ada bernilai undefined, sehingga { left: '$x', operator: '!=', right: null } bernilai TRUE bila x tidak ada."
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"name\": \"CreateForm\",\n  \"config\": { \"payload\": { \"...\": \"...\" }, \"formExpirationDays\": 7 },\n  \"orCondition\": [\n    { \"left\": \"$vacancyStage.formTemplateId\",   \"operator\": \"!=\", \"right\": null },\n    { \"left\": \"$vacancyStage.interviewerFormId\", \"operator\": \"!=\", \"right\": null }\n  ]\n}"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"andCondition\": [\n    { \"when\": { \"left\": \"$bulkPosition.isLast\", \"operator\": \"=\", \"right\": true } }\n  ]\n}"
+    },
+    {
+     "type": "p",
+     "text": "Contoh kedua (format { when }) valid untuk pipelines; isinya ilustrasi, bukan dari config default."
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Untuk lifecycle beforeExecute/afterExecute, kondisi dievaluasi oleh ConditionResolver (apps/ats/src/common/utils/condition.resolver.ts) yang hanya menerima format { when: {...} } — destructuring ({ when }) pada entry flat akan membuat when undefined dan error. Operator dan resolusi operand sama."
+    }
+   ]
+  },
+  {
+   "id": "satellite-payload",
+   "title": "satellitePayload per Workflow",
+   "summary": "Bentuk satellitePayload hanya divalidasi sebagai object; referensi bentuknya ada di interface SatellitePayload dan dokumen API.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Sumber: apps/ats/src/process/workflow/dto/execute-satellite-workflow-payload.types.ts (interface SatellitePayload) dan apps/ats/src/docs/WORKFLOW_EXECUTE_SATELLITE_API.md. Tidak ada validasi per-field saat runtime."
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Key SatellitePayload",
+      "Tipe",
+      "Dibaca oleh"
+     ],
+     "rows": [
+      [
+       "interview",
+       "WorkflowInterviewItem[] (create: interviewDate, startTime, endTime, interviewType, meetingLinkType?, meetingLink?, location?, interviewers[], identifier?, attachment?, interviewMeta?, isSendCandidate?; update: + interviewId, rescheduleReason?)",
+       "CreateInterviewSchedule, UpdateInterviewSchedule, FilterArrayByMatch"
+      ],
+      [
+       "formSubmission",
+       "Record<string, unknown>[]",
+       "CreateForm, UpdateForm, SetInactiveForm (loop)"
+      ],
+      [
+       "score",
+       "{ score?, qualitativeScore?, remarks?, id? }[]",
+       "CreateApplicantScore, UpdateApplicantScore"
+      ],
+      [
+       "attachment",
+       "{ mediaId, documentName } | { id, mediaId?, documentName? } []",
+       "CreateApplicantAttachment, UpdateApplicantAttachment"
+      ],
+      [
+       "offeringLetter",
+       "{ documentTemplateId?, expiredAt?, variableComponents?, payrollComponents?, signedDocumentId? } (objek tunggal)",
+       "Config offering letter via $satellitePayload.offeringLetter.*"
+      ],
+      [
+       "email",
+       "{ email?, emailTemplateId?, subject?, payload?, content?, templateStructureId? }[]",
+       "SendEmail (loop), CreateApplicantEmail"
+      ],
+      [
+       "applicantEmail",
+       "WorkflowApplicantEmailItem[]",
+       "CreateApplicantEmail"
+      ],
+      [
+       "candidateToken / employeeToken",
+       "{ actorId, tenantId, tokenType, ttlSeconds }[]",
+       "GenerateCandidateToken / GenerateEmployeeToken (loop)"
+      ],
+      [
+       "moveVacancy",
+       "{ vacancyStageId }[]",
+       "CreateMoveVacancy, ApproveMoveVacancy, RejectMoveVacancy"
+      ],
+      [
+       "submitPreOnboarding",
+       "{ preOnboardingId, documents?[], forms?[] }",
+       "Config SUBMIT_PRE_ONBOARDING (lihat catatan)"
+      ],
+      [
+       "verifyPreOnboarding",
+       "{ preOnboardingId, documentDecisions?[], formDecisions?[], finalizeReview }",
+       "VerifyPreOnboardingItems"
+      ],
+      [
+       "transfer",
+       "{ joinDate }",
+       "CreateApplicantTransfer"
+      ],
+      [
+       "hire",
+       "{ joinDate }",
+       "HIRE_CANDIDATE ($satellitePayload.hire.joinDate)"
+      ],
+      [
+       "meeting",
+       "{ name, description?, interviewDate, startTime, endTime, timezone, guests[] }",
+       "GenerateMeetLink"
+      ],
+      [
+       "candidateMeta",
+       "WorkflowCandidateMetaPayload",
+       "UPDATE_CANDIDATE_META_SNAPSHOT"
+      ],
+      [
+       "customFields",
+       "Record<string, unknown>",
+       "UPSERT_CANDIDATE_CUSTOM_FIELDS ($requestBody.satellitePayload.customFields)"
+      ],
+      [
+       "applicantProcessStatus",
+       "string",
+       "UpdateApplicantProcessStatus"
+      ]
+     ]
+    },
+    {
+     "type": "table",
+     "headers": [
+      "workflowName",
+      "satellitePayload yang dikirim caller"
+     ],
+     "rows": [
+      [
+       "CREATE_SCHEDULE_INTERVIEW / CREATE_SCHEDULE_INTERVIEW_SINGLE",
+       "{ interview: [ {1 item create} ], attachment?: [ {mediaId, documentName} ] }"
+      ],
+      [
+       "RESCHEDULE_INTERVIEW / RESCHEDULE_INTERVIEW_SINGLE",
+       "{ interview: [ {interviewId, ...field update} ] }"
+      ],
+      [
+       "SEND_FORM / RESEND_FORM",
+       "{} (semua dari ctx; RESEND memakai $applicantFormSubmission[0].id)"
+      ],
+      [
+       "SEND_OFFERING_LETTER / RESEND_OFFERING_LETTER",
+       "{ offeringLetter: { documentTemplateId, variableComponents, payrollComponents?, expiredAt? } }"
+      ],
+      [
+       "SAVE_OFFERING_LETTER_DRAFT",
+       "{ offeringLetter: { ...field draft } }"
+      ],
+      [
+       "SUBMIT_SIGNED_OFFERING_LETTER",
+       "{ offeringLetter: { signedDocumentId } }"
+      ],
+      [
+       "COMPLETE_OFFERING_LETTER / SEND_OFFERING_LETTER_REMINDER",
+       "{} (pakai $bucket.currentProcess.processId)"
+      ],
+      [
+       "HIRE_CANDIDATE",
+       "{ hire: { joinDate } }"
+      ],
+      [
+       "UPSERT_CANDIDATE_CUSTOM_FIELDS",
+       "{ customFields: {...} }"
+      ],
+      [
+       "UPDATE_CANDIDATE_META_SNAPSHOT",
+       "{ candidateMeta: {...} }"
+      ],
+      [
+       "GET_APPLICANT_DATA",
+       "{} (filter di config)"
+      ],
+      [
+       "ADD_FINAL_DECISION (doc API, tanpa default config)",
+       "{ score: [ {qualitativeScore, remarks} ], attachment: [ {...} ] }"
+      ],
+      [
+       "TRANSFER_CANDIDATE (doc API, tanpa default config)",
+       "{ transfer: { joinDate } }"
+      ],
+      [
+       "MOVE_TO_VACANCY (bulk, tanpa default config)",
+       "{ moveVacancy: [ { vacancyStageId } ] }"
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Ketidakcocokan yang perlu diverifikasi: interface memakai submitPreOnboarding dengan documents[]/forms[] dan verifyPreOnboarding dengan documentDecisions[]/formDecisions[], sedangkan contoh di WORKFLOW_EXECUTE_SATELLITE_API.md masih memakai items[]/decisions[]; komentar executor SubmitPreOnboardingItems menyebut ctx.satellitePayload.preOnboarding. Anggap interface types sebagai acuan bentuk, dan cek config pipeline tenant yang sebenarnya."
+    }
+   ]
+  },
+  {
+   "id": "bulk",
+   "title": "Bulk Action dan $bulkPosition",
+   "summary": "Bulk handler memanggil ExecuteSatelliteWorkflowStableUseCase sekali per applicant dan menyisipkan posisi batch ke ctx.bulkPosition.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "Endpoint bulk: applicants/bulk-action-stable (apps/ats/src/applicant/applicant-hub/BULK_ACTION_STABLE.md), dispatcher BulkActionStableUseCase (apps/ats/src/applicant/applicant-hub/use-cases/bulk-action-stable.usecase.ts). Pemetaan action -> workflowName di apps/ats/src/applicant/applicant-hub/data/bulk-action-workflow-name.map.ts:"
+    },
+    {
+     "type": "table",
+     "headers": [
+      "BulkActionType",
+      "workflowName"
+     ],
+     "rows": [
+      [
+       "BULK_SCHEDULE_INTERVIEW",
+       "CREATE_SCHEDULE_INTERVIEW"
+      ],
+      [
+       "BULK_SEND_FORM",
+       "SEND_FORM"
+      ],
+      [
+       "BULK_RESEND_FORM",
+       "RESEND_FORM"
+      ],
+      [
+       "BULK_MOVE_TO_VACANCY",
+       "MOVE_TO_VACANCY"
+      ],
+      [
+       "BULK_SEND_PRE_ONBOARDING",
+       "SEND_PRE_ONBOARDING"
+      ],
+      [
+       "BULK_HIRE",
+       "HIRE_CANDIDATE"
+      ],
+      [
+       "WORKFLOW (generik)",
+       "payload.workflowName"
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "BULK_ACTION_STABLE.md menyebut workflowName 'SCHEDULE_INTERVIEW' untuk BULK_SCHEDULE_INTERVIEW, tetapi map di kode memakai 'CREATE_SCHEDULE_INTERVIEW'. Kode yang berlaku."
+    },
+    {
+     "type": "p",
+     "text": "WorkflowBulkActionHandler (apps/ats/src/applicant/applicant-hub/handlers/workflow-bulk-action.handler.ts): mewajibkan payload.workflowName, meneruskan payload.satellitePayload ?? {} apa adanya ke setiap applicant, lalu loop withBulkPosition(applicantIds, ctx.outerPosition) dan memanggil execute({ workflowName, applicantBucketId, satellitePayload }, { index, total, isLast, requestId: ctx.requestId })."
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"applicantIds\": [\"<uuid7>\", \"<uuid7>\"],\n  \"action\": \"WORKFLOW\",\n  \"payload\": {\n    \"workflowName\": \"SEND_FORM\",\n    \"satellitePayload\": {}\n  }\n}"
+    },
+    {
+     "type": "table",
+     "headers": [
+      "Field $bulkPosition",
+      "Sumber"
+     ],
+     "rows": [
+      [
+       "index",
+       "0-based dalam seluruh batch: outerPosition.offset + i (apps/ats/src/applicant/applicant-hub/utils/bulk-loop-position.util.ts)."
+      ],
+      [
+       "total",
+       "outerPosition.total (async) atau jumlah item (sync)."
+      ],
+      [
+       "isLast",
+       "index === total - 1."
+      ],
+      [
+       "requestId",
+       "Async: AsynchronousProcessEntity.requestId dari consumer. Sync: uuidv7 baru per pemanggilan executeSync, stabil untuk seluruh loop."
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Handler khusus (mis. ScheduleInterviewBulkActionHandler) hanya mengirim { index, total, isLast } tanpa requestId — $bulkPosition.requestId hanya tersedia lewat action WORKFLOW (generik). bulkPosition tidak pernah diambil dari body HTTP endpoint workflow."
+    },
+    {
+     "type": "p",
+     "text": "Mode sync vs async: jika jumlah item > tenantConfig.maxBatchProcess (dari ConfigType.APPLICANT_STABLE), batch dipersist ke asynchronous_process dan diproses BulkActionStableV2Consumer (apps/ats/src/applicant/applicant-hub/consumer/bulk-action-stable-v2.consumer.ts) satu item per executeSync dengan outerPosition dan requestId batch. Di async, exception per item ditangkap dan detail ditandai FAILED (ERR_BULK_ACTION_FAILED)."
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Di mode sync, usecase workflow selalu mengembalikan success: true atau melempar exception; handler tidak membungkus try/catch, sehingga exception pada satu item akan menghentikan loop dan menjadi HTTP error (bukan masuk failedIds seperti yang dijelaskan di BULK_ACTION_STABLE.md). Ini hasil pembacaan kode; verifikasi bila ada filter/interceptor lain."
+    },
+    {
+     "type": "p",
+     "text": "Pola GetCache/SetCache untuk akumulasi lintas item (config: GetCacheConfig { key, target='cache' }, SetCacheConfig { key, value, ttlSeconds=300 } di apps/ats/src/process/workflow/interfaces/pipeline-config.types.ts). Key dipakai apa adanya di Redis global (tanpa prefix/tenant scoping), jadi sertakan requestId agar ter-scope ke satu batch. Contoh ilustrasi (bukan dari config default):"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "[\n  { \"name\": \"GetCache\", \"config\": { \"key\": \"bulk-acc-$bulkPosition.requestId\", \"target\": \"acc\" } },\n  { \"name\": \"Transformer\", \"config\": {\n      \"outputKey\": \"$accNext\",\n      \"transform\": \"$[acc || `[]`, [bucket.id]] | []\"\n  } },\n  { \"name\": \"SetCache\", \"config\": { \"key\": \"bulk-acc-$bulkPosition.requestId\", \"value\": \"$accNext\", \"ttlSeconds\": 600 } },\n  { \"name\": \"SendEmail\", \"config\": { \"payload\": { \"...\": \"ringkasan dari $accNext\" } },\n    \"andCondition\": [ { \"left\": \"$bulkPosition.isLast\", \"operator\": \"=\", \"right\": true } ] }\n]"
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "Key 'bulk-acc-$bulkPosition.requestId' bekerja lewat substitusi embedded token (string tidak diawali $). GetCache error ERR_CACHE_KEY_REQUIRED bila key tidak resolve ke string/number non-kosong; SetCache juga punya ERR_CACHE_VALUE_REQUIRED dan ERR_CACHE_TTL_INVALID (ttlSeconds harus integer positif). Pada miss, ctx[target] = null."
+    }
+   ]
+  },
+  {
+   "id": "lifecycle",
+   "title": "Lifecycle beforeExecute / afterExecute",
+   "summary": "Hook lifecycle diambil dari tenant config (ctx.tenantConfig), difilter berdasarkan event = workflowName, dan dijalankan berurutan sebelum dan sesudah pipelines.",
+   "blocks": [
+    {
+     "type": "p",
+     "text": "LifecycleRunnerService (apps/ats/src/common/lifecycle/lifecycle-runner.service.ts) menerima array LifecycleStepConfig (apps/ats/src/common/lifecycle/types/lifecycle-config.type.ts):"
+    },
+    {
+     "type": "code",
+     "lang": "ts",
+     "code": "interface LifecycleStepConfig<TConfig = unknown> {\n  service: string;          // nama di LifecycleServiceRegistry (Transformer, Decrypt, ...)\n  event: string[];          // langkah hanya jalan bila event (workflowName) ada di sini\n  config: TConfig;\n  andCondition?: ValidationWhen[];   // format { when: {...} }\n  orCondition?: ValidationWhen[];\n}"
+    },
+    {
+     "type": "list",
+     "items": [
+      "Per langkah: skip bila !config.event.includes(workflowName); skip bila kondisi ConditionResolver gagal; selain itu registry.get(service).execute(ctx, config). Hasil truthy menjadi ctx baru.",
+      "beforeExecute berjalan setelah ctx.tenantConfig/pipelineConfig terisi tetapi SEBELUM ctx.identifier dibuat — jangan rujuk $identifier di beforeExecute.",
+      "afterExecute berjalan setelah ctx.result terisi; perubahan ctx di afterExecute tidak memengaruhi response.",
+      "Service tidak terdaftar -> BadRequest LIFECYCLE_SERVICE_NOT_REGISTERED (apps/ats/src/common/lifecycle/lifecycle-service.registry.ts)."
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Contoh nyata (beforeExecute di apps/ats/src/applicant/applicant-hub/data/default/list-interview-stable.config.ts, configType INTERVIEW_STABLE):"
+    },
+    {
+     "type": "code",
+     "lang": "json",
+     "code": "{\n  \"beforeExecute\": [\n    {\n      \"event\": [\"CREATE_SCHEDULE_INTERVIEW\", \"RESCHEDULE_INTERVIEW\", \"ADD_FINAL_DECISION\",\n                \"MOVE_TO_VACANCY\", \"SEND_FORM\", \"RESEND_FORM\"],\n      \"service\": \"Decrypt\",\n      \"config\": { \"paths\": [\"$candidate.emailEncrypted\"] }\n    },\n    {\n      \"event\": [\"CREATE_SCHEDULE_INTERVIEW\", \"RESCHEDULE_INTERVIEW\"],\n      \"service\": \"Transformer\",\n      \"config\": {\n        \"outputKey\": \"$satellitePayload.interview\",\n        \"transform\": \"$requestBody.satellitePayload.interview\"\n      }\n    },\n    {\n      \"event\": [\"CREATE_SCHEDULE_INTERVIEW\", \"SEND_FORM\", \"RESEND_FORM\"],\n      \"service\": \"Transformer\",\n      \"config\": {\n        \"outputKey\": \"$satellitePayload.formName\",\n        \"transform\": \"$vacancyStage.stageType == 'ASSESSMENT' && 'Assessment Form' || vacancyStage.stageType == 'INTERVIEW' && 'Interview Form' || vacancyStage.stageType == 'ADMINISTRATIVE' && 'Administrative Form' || 'Submission Form'\"\n      }\n    }\n  ]\n}"
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "Tenant config yang dimuat ditentukan stage aktif applicant (atau tenantConfigType). Workflow baru yang butuh data dari requestBody.satellitePayload harus ditambahkan ke event[] Transformer jembatan di tenant config stage yang relevan (mis. INTERVIEW_STABLE, PRE_ONBOARDING_STABLE, REJECT_STABLE) — atau config pipeline merujuk langsung $requestBody.satellitePayload.*."
+    }
+   ]
+  },
+  {
+   "id": "error-umum",
+   "title": "Error Umum dan Perbaikannya",
+   "summary": "Daftar error yang dilempar engine workflow beserta penyebab dan cara memperbaikinya.",
+   "blocks": [
+    {
+     "type": "table",
+     "headers": [
+      "Error",
+      "Sumber",
+      "Penyebab",
+      "Perbaikan"
+     ],
+     "rows": [
+      [
+       "400 PIPELINE_EXECUTOR_NOT_REGISTERED: Pipeline executor \"X\" is not registered",
+       "pipeline-executor.registry.ts",
+       "pipelines[].name salah ketik / bukan serviceName terdaftar.",
+       "Pakai nama persis dari tabel executor (case-sensitive). Executor baru harus didaftarkan di PipelineExecutorRegistryBootstrapService."
+      ],
+      [
+       "404 Pipeline workflow configuration not found",
+       "get-pipeline-workflow-configuration.service.ts",
+       "Tidak ada baris tenant maupun default untuk workflow_config_type tsb (mis. MOVE_TO_VACANCY, SEND_PRE_ONBOARDING, ADD_FINAL_DECISION tidak punya default di process/workflow/config).",
+       "Buat baris tenant (is_default=false, tenant_id) atau tambahkan default lewat config-sync. Cek ejaan workflowName dan deleted_at."
+      ],
+      [
+       "404 Tenant configuration not found",
+       "get-tenant-configuration-value.service.ts",
+       "Tidak ada configType hasil resolusi maupun APPLICANT_STABLE.",
+       "Pastikan tenantConfigType benar atau ada baris <STAGE>_STABLE / APPLICANT_STABLE."
+      ],
+      [
+       "404 Applicant bucket '<id>' not found",
+       "resolve-applicant-bucket-context.service.ts",
+       "Bucket tidak ada, beda tenant, atau soft-deleted.",
+       "Cek applicantBucketId dan tenant di token."
+      ],
+      [
+       "404 Vacancy stage '<id>' not found",
+       "resolve-applicant-bucket-context.service.ts",
+       "bucket.currentProcess.stageId kosong / stage tidak ada.",
+       "Perbaiki data currentProcess bucket."
+      ],
+      [
+       "400 JMESPATH_RESOLVE_ERROR",
+       "jmespath-solver.util.ts",
+       "Ekspresi $... tidak valid (kutip, kurung, fungsi tidak dikenal).",
+       "Uji ekspresi JMESPath; ingat referensi lanjutan tanpa $, literal string pakai kutip tunggal."
+      ],
+      [
+       "400 LIFECYCLE_SERVICE_NOT_REGISTERED",
+       "lifecycle-service.registry.ts",
+       "service di beforeExecute/afterExecute tidak dikenal.",
+       "Perbaiki nama service lifecycle."
+      ],
+      [
+       "400 LIFECYCLE_TRANSFORMER_OUTPUT_KEY_REQUIRED",
+       "transformer.lifecycle-service.ts",
+       "Transformer tanpa outputKey.",
+       "Tambahkan outputKey ($path)."
+      ],
+      [
+       "400 LIFECYCLE_TRANSFORMER_FOREACH_SOURCE_NOT_ARRAY / _PAIR_SOURCE_MISMATCH",
+       "transformer.lifecycle-service.ts",
+       "forEach.source bukan array / pairSource beda panjang.",
+       "Pastikan langkah sebelumnya menghasilkan array; beri kondisi agar Transformer di-skip saat sumber kosong."
+      ],
+      [
+       "400 ERR_CACHE_KEY_REQUIRED / ERR_CACHE_VALUE_REQUIRED / ERR_CACHE_TTL_INVALID",
+       "get-cache-stable.service.ts / set-cache-stable.service.ts",
+       "Key tidak resolve, value kosong, atau ttlSeconds bukan integer positif.",
+       "Perbaiki template key/value; ttlSeconds integer > 0."
+      ],
+      [
+       "TypeError saat lifecycle (mis. reading 'includes' / 'left')",
+       "lifecycle-runner.service.ts / condition.resolver.ts",
+       "Entry lifecycle tanpa event[] atau kondisi flat tanpa { when }.",
+       "Selalu isi event sebagai array; bungkus kondisi lifecycle dalam { when: {...} }."
+      ],
+      [
+       "Sukses tapi tidak ada yang terjadi (pipelineResult berisi results: [])",
+       "executor yang me-loop satellitePayload.<key>",
+       "ctx.satellitePayload.<key> kosong: belum dijembatani dari requestBody, atau tidak ada Transformer [{}].",
+       "Tambahkan Transformer jembatan di beforeExecute tenant config (event yang tepat) atau di pipelines; cek pipelineResult tiap langkah."
+      ],
+      [
+       "Langkah ber-kondisi tidak pernah / selalu jalan",
+       "tenant-rule-value-resolver.service.ts",
+       "Operand memakai index/fungsi (tidak didukung) atau undefined vs null pada strict compare.",
+       "Gunakan path bertitik sederhana; siapkan nilai via Transformer."
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "id": "checklist",
+   "title": "Checklist Sebelum Menyimpan Workflow Config",
+   "summary": "Periksa kunci, executor, template, kondisi, jembatan satellitePayload, dan sinkronisasi sebelum menyimpan config baru.",
+   "blocks": [
+    {
+     "type": "list",
+     "items": [
+      "workflow_config_type sama persis dengan workflowName yang dikirim BFF/bulk handler (bulk: lihat bulk-action-workflow-name.map.ts).",
+      "Override tenant: is_default=false, tenant_id terisi, hanya satu baris aktif per (tenant_id, workflow_config_type). Default: is_default=true, tenant_id NULL, satu baris aktif. group_id tidak berpengaruh.",
+      "value berupa object dengan pipelines (array). Override memuat value LENGKAP (tidak di-merge dengan default).",
+      "Setiap pipelines[].name ada di PipelineExecutorRegistryBootstrapService (lihat tabel executor di bagian workflows). Field service opsional dan diabaikan.",
+      "config tiap langkah sesuai interface di process/workflow/interfaces/pipeline-config.types.ts (payload, moduleReferences, formExpirationDays, value, dll.).",
+      "Executor yang me-loop satellitePayload.<key> punya array berisi minimal 1 item (dari beforeExecute atau Transformer transform: [{}]).",
+      "Data dari body: dijembatani dari $requestBody.satellitePayload.* ke $satellitePayload.* (tenant config beforeExecute untuk event workflow ini) atau dirujuk langsung via $requestBody.",
+      "tenantConfigType diisi bila workflow tidak boleh bergantung pada stage aktif; pastikan tenant config tsb punya emailTemplates/beforeExecute yang dirujuk.",
+      "Semua ekspresi $... valid JMESPath; referensi pipelineResult memakai name executor yang benar dan langkahnya memang berjalan sebelumnya (dan tidak ter-skip kondisi).",
+      "Kondisi: operand path bertitik sederhana, operator dari daftar (EQUALS, NOT_EQUALS, =, !=, <, <=, >, >=); ingat strict equality null vs undefined.",
+      "Kondisi di lifecycle memakai format { when: {...} } dan event[] terisi.",
+      "Tidak merujuk $identifier di beforeExecute (belum dibuat).",
+      "Untuk bulk: bila memakai $bulkPosition.requestId gunakan action WORKFLOW; key cache di-scope dengan requestId; uji perilaku saat satu item gagal.",
+      "Default di repo: tulis sebagai .config.ts dengan defineWorkflowConfig, ekspor di process/workflow/config/index.ts (WORKFLOW_PIPELINE_CONFIGS), lalu pnpm config-sync:diff --target workflow dan pnpm config-sync:push. Override tenant: config-sync push --tenant <uuid> (defineWorkflowConfig tidak mendukung field tenants).",
+      "Uji end-to-end lewat POST /workflow/execute-satellite-workflow-stable dan periksa pipelineResult tiap langkah."
+     ]
+    },
+    {
+     "type": "p",
+     "text": "Detail config-sync (apps/ats/src/seeders/config-sync/README.md, registry.ts, config-sync.repository.ts): target 'workflow' = tabel pipeline_workflow_configurations, keyColumn workflow_config_type, definitions WORKFLOW_PIPELINE_CONFIGS. push mendiff baris aktif (CREATE/UPDATE/UNCHANGED/CONFLICT), backup ke .tenant-config-backups/, menulis di bawah advisory lock, dan menolak jalan bila ada CONFLICT. pull hanya untuk baris default. Insert mengisi id, tenant_id, is_default, workflow_config_type, value, created_at, updated_at (group_id tidak diisi)."
+    }
+   ]
+  },
+  {
+   "id": "workflows",
+   "title": "Daftar Default Workflow",
+   "summary": "16 baris default (is_default=true) yang dideklarasikan di process/workflow/config/index.ts (WORKFLOW_PIPELINE_CONFIGS) beserta urutan executor-nya.",
+   "blocks": [
+    {
+     "type": "table",
+     "headers": [
+      "workflow_config_type",
+      "tenantConfigType",
+      "Urutan executor (pipelines[].name)",
+      "File"
+     ],
+     "rows": [
+      [
+       "GET_APPLICANT_DATA",
+       "-",
+       "GetApplicantData",
+       "apps/ats/src/process/workflow/config/applicant/get-applicant-data.config.ts"
+      ],
+      [
+       "RESEND_FORM",
+       "-",
+       "GetTenantData -> Transformer -> GenerateCandidateToken -> Transformer -> UpdateForm -> Transformer -> SendEmail",
+       "apps/ats/src/process/workflow/config/form-submission/resend-form.config.ts"
+      ],
+      [
+       "SEND_FORM",
+       "-",
+       "GetTenantData -> Transformer -> GenerateCandidateToken -> Transformer -> CreateForm -> Transformer -> SendEmail -> SetStatusApplicantProcess(IN_PROGRESS)",
+       "apps/ats/src/process/workflow/config/form-submission/send-form.config.ts"
+      ],
+      [
+       "CREATE_SCHEDULE_INTERVIEW_SINGLE",
+       "-",
+       "CreateInterviewSchedule -> CreateApplicantAttachment -> SetStatusApplicantProcess -> Transformer -> Transformer -> SendEmail",
+       "apps/ats/src/process/workflow/config/interview/create-schedule-interview-single.config.ts"
+      ],
+      [
+       "CREATE_SCHEDULE_INTERVIEW",
+       "-",
+       "GetTenantData -> CreateInterviewSchedule -> ConvertTimezone -> CreateApplicantAttachment -> SetStatusApplicantProcess(SCHEDULED) -> Transformer* -> GenerateCandidateToken* -> Transformer* -> GenerateEmployeeToken* -> Transformer* -> Transformer* -> Transformer* -> CreateForm* -> Transformer -> Transformer -> SendEmail -> Transformer* -> SendEmail* -> Transformer* -> SendEmail* (* = ber-andCondition/orCondition formTemplateId/interviewerFormId)",
+       "apps/ats/src/process/workflow/config/interview/create-schedule-interview.config.ts"
+      ],
+      [
+       "RESCHEDULE_INTERVIEW_SINGLE",
+       "-",
+       "GetTenantData -> UpdateInterviewSchedule -> Transformer -> Transformer -> SendEmail",
+       "apps/ats/src/process/workflow/config/interview/reschedule-interview-single.config.ts"
+      ],
+      [
+       "RESCHEDULE_INTERVIEW",
+       "-",
+       "GetTenantData -> UpdateInterviewSchedule -> ConvertTimezone -> Transformer -> Transformer -> SendEmail",
+       "apps/ats/src/process/workflow/config/interview/reschedule-interview.config.ts"
+      ],
+      [
+       "COMPLETE_OFFERING_LETTER",
+       "-",
+       "CompleteOfferingLetter -> SetStatusApplicantProcess(COMPLETED)",
+       "apps/ats/src/process/workflow/config/offering-letter/complete-offering-letter.config.ts"
+      ],
+      [
+       "RESEND_OFFERING_LETTER",
+       "-",
+       "GenerateOfferingLetterDocument -> Transformer -> GenerateCandidateToken -> GetTenantData -> SetStatusApplicantProcess -> UpdateOfferingLetter -> FormatDate -> SendEmail",
+       "apps/ats/src/process/workflow/config/offering-letter/resend-offering-letter.config.ts"
+      ],
+      [
+       "SAVE_OFFERING_LETTER_DRAFT",
+       "-",
+       "SaveOfferingLetterDraft -> SetStatusApplicantProcess",
+       "apps/ats/src/process/workflow/config/offering-letter/save-offering-letter-draft.config.ts"
+      ],
+      [
+       "SEND_OFFERING_LETTER_REMINDER",
+       "-",
+       "GetTenantData -> CreateOfferingLetterReminder -> FormatDate -> SendEmail",
+       "apps/ats/src/process/workflow/config/offering-letter/send-offering-letter-reminder.config.ts"
+      ],
+      [
+       "SEND_OFFERING_LETTER",
+       "-",
+       "GenerateOfferingLetterDocument -> SetStatusApplicantProcess(OFFERED) -> Transformer -> GenerateCandidateToken -> GetTenantData -> UpdateOfferingLetter -> FormatDate -> SendEmail",
+       "apps/ats/src/process/workflow/config/offering-letter/send-offering-letter.config.ts"
+      ],
+      [
+       "SUBMIT_SIGNED_OFFERING_LETTER",
+       "-",
+       "SubmitSignedOfferingLetter -> SetStatusApplicantProcess",
+       "apps/ats/src/process/workflow/config/offering-letter/submit-signed-offering-letter.config.ts"
+      ],
+      [
+       "HIRE_CANDIDATE",
+       "-",
+       "UpdatePreOnboarding -> SetStatusApplicantProcess(HIRED) -> UpdateVacancyCompletionStatus",
+       "apps/ats/src/process/workflow/config/pre-onboarding/hire-candidate.config.ts"
+      ],
+      [
+       "UPSERT_CANDIDATE_CUSTOM_FIELDS",
+       "-",
+       "UpsertCustomFields (configType CANDIDATE_STABLE, parentId $candidateTenantPool.id)",
+       "apps/ats/src/process/workflow/config/custom-field/upsert-candidate-custom-fields.config.ts"
+      ],
+      [
+       "UPDATE_CANDIDATE_META_SNAPSHOT",
+       "APPLICANT_CANDIDATE_META_STABLE",
+       "UpdateCandidateMetaSnapshot",
+       "apps/ats/src/process/workflow/config/candidate-meta-snapshot/update-candidate-meta-snapshot.config.ts"
+      ]
+     ]
+    },
+    {
+     "type": "callout",
+     "tone": "info",
+     "text": "tenantConfigType '-' berarti tenant config diambil dari stage aktif (<STAGE>_STABLE, fallback APPLICANT_STABLE)."
+    },
+    {
+     "type": "callout",
+     "tone": "warning",
+     "text": "workflowName yang dirujuk bulk/dokumen API tetapi TIDAK punya default di repo: MOVE_TO_VACANCY, APPROVE_MOVE_TO_VACANCY, REJECT_MOVE_TO_VACANCY, SEND_PRE_ONBOARDING, SUBMIT_PRE_ONBOARDING, VERIFY_PRE_ONBOARDING, TRANSFER_CANDIDATE, ADD_FINAL_DECISION. Tanpa baris tenant di DB, workflow ini menghasilkan 404 'Pipeline workflow configuration not found'."
+    },
+    {
+     "type": "p",
+     "text": "Seluruh nama executor yang terdaftar (PipelineExecutorRegistryBootstrapService.onModuleInit, urutan registrasi): CreateInterviewSchedule, UpdateInterviewSchedule, FilterArrayByMatch, GenerateMeetLink, CreateForm, UpdateForm, SetInactiveForm, CreateApplicantScore, UpdateApplicantScore, CreateApplicantAttachment, UpdateApplicantAttachment, SaveOfferingLetterDraft, SubmitSignedOfferingLetter, CompleteOfferingLetter, SubmitPreOnboardingItems, VerifyPreOnboardingItems, UpdatePreOnboarding, CreatePreOnboarding, SetStatusApplicantProcess, UpdateApplicantProcessStatus, UpsertCustomFields, SendEmail, CreateApplicantEmail, GenerateCandidateToken, GenerateEmployeeToken, GetTenantData, GetApplicantData, GetCache, SetCache, CreateApplicantTransfer, GenerateOfferingLetterDocument, PrepareOfferingLetterToken, UpdateOfferingLetter, CreateOfferingLetterReminder, CreateCandidateMetaSnapshot, CreateMoveVacancy, ApproveMoveVacancy, RejectMoveVacancy, CreateApplicantActivity, UpdateVacancyCompletionStatus, UpdateCandidateMetaSnapshot, CloneApplicantSatellite, UpsertApplicantFilterableAttribute, UpsertApplicantKeywords, Transformer, FormatDate, ConvertTimezone."
+    }
+   ]
+  }
+ ]
+}

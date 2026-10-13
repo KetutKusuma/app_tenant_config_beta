@@ -22,6 +22,43 @@ function esc(val: any): string {
   return "'" + String(val).replace(/'/g, "''") + "'";
 }
 
+// Domain konfigurasi: tenant_config (public.tenant_configurations) atau
+// workflow_pipeline (public.pipeline_workflow_configurations). Keduanya ada di DB target (ats_db)
+// dengan struktur hampir sama; bedanya kolom tipe (`workflow_config_type`) dan tidak ada kolom `path`.
+type ConfigDomain = "tenant_config" | "workflow_pipeline";
+interface DomainSpec {
+  key: ConfigDomain;
+  table: string;
+  typeCol: string;
+  hasPath: boolean;
+  /** kolom path untuk SELECT (NULL bila tabel tidak punya kolom path) */
+  pathSel: string;
+  /** key config_type di tenant_studio.preset_links, diberi prefix agar tidak bentrok antar domain */
+  linkKey: (configType: string) => string;
+}
+const DOMAINS: Record<ConfigDomain, DomainSpec> = {
+  tenant_config: {
+    key: "tenant_config",
+    table: "public.tenant_configurations",
+    typeCol: "config_type",
+    hasPath: true,
+    pathSel: "path",
+    linkKey: (t) => t
+  },
+  workflow_pipeline: {
+    key: "workflow_pipeline",
+    table: "public.pipeline_workflow_configurations",
+    typeCol: "workflow_config_type",
+    hasPath: false,
+    pathSel: "NULL::text AS path",
+    linkKey: (t) => `WORKFLOW_PIPELINE:${t}`
+  }
+};
+function domainOf(req: express.Request): DomainSpec {
+  const raw = req.header("x-config-domain") || (req.query.domain as string) || req.body?.domain;
+  return raw === "workflow_pipeline" ? DOMAINS.workflow_pipeline : DOMAINS.tenant_config;
+}
+
 // 1. Target Database (tempat tabel public.tenant_configurations berada)
 function getTargetDbConfig() {
   if (process.env.DB_HOST) {
@@ -75,6 +112,7 @@ app.get("/health", async (req, res) => {
 // 1. Tenant Directory & Discovery
 app.get("/api/tenants", async (req, res) => {
   try {
+    const D = domainOf(req);
     const metaRes = await auditDb.query(`
       SELECT tenant_id, group_id, client_name, client_code, environment, tags, notes, updated_at
       FROM tenant_studio.tenant_metadata
@@ -83,7 +121,7 @@ app.get("/api/tenants", async (req, res) => {
 
     const configsRes = await targetDb.query(`
       SELECT tenant_id, count(*) as total_configs
-      FROM public.tenant_configurations
+      FROM ${D.table}
       WHERE deleted_at IS NULL
       GROUP BY tenant_id;
     `);
@@ -164,15 +202,16 @@ app.post("/api/tenants", async (req, res) => {
 app.get("/api/tenants/:tenantId/configs", async (req, res) => {
   try {
     const { tenantId } = req.params;
+    const D = domainOf(req);
     const whereClause = tenantId === "GLOBAL_DEFAULT"
       ? "tenant_id IS NULL AND deleted_at IS NULL"
       : `tenant_id = ${esc(tenantId)} AND deleted_at IS NULL`;
 
     const configsRes = await targetDb.query(`
-      SELECT id, tenant_id, group_id, config_type, path, is_default, created_at, updated_at 
-      FROM public.tenant_configurations 
+      SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, is_default, created_at, updated_at 
+      FROM ${D.table} 
       WHERE ${whereClause}
-      ORDER BY config_type ASC;
+      ORDER BY ${D.typeCol} ASC;
     `);
 
     res.json({ data: configsRes.rows });
@@ -185,9 +224,11 @@ app.get("/api/tenants/:tenantId/configs", async (req, res) => {
 app.get("/api/configs/:configId", async (req, res) => {
   try {
     const { configId } = req.params;
+    const D = domainOf(req);
     const rowRes = await targetDb.query(`
-      SELECT id, tenant_id, group_id, config_type, is_default, path, value, updated_at 
-      FROM public.tenant_configurations 
+      SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, is_default, ${D.pathSel}, value, updated_at,
+        updated_at::text AS version_token
+      FROM ${D.table}
       WHERE id = ${esc(configId)};
     `);
 
@@ -215,16 +256,17 @@ app.post("/api/configs", async (req, res) => {
     const cleanPath = configPath || configType.toLowerCase().replace(/_/g, "-");
     const jsonValue = value && typeof value === "object" ? value : {};
     const configId = (req.body.id && typeof req.body.id === "string" && req.body.id.trim()) ? req.body.id.trim() : randomUUID();
+    const D = domainOf(req);
 
     const insertRes = await targetDb.query(`
-      INSERT INTO public.tenant_configurations 
-      (id, tenant_id, group_id, config_type, path, value, is_default, created_at, updated_at)
+      INSERT INTO ${D.table} 
+      (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at)
       VALUES (
         ${esc(configId)},
         ${targetTenantId ? esc(targetTenantId) : "NULL"}, 
         ${cleanGroupId ? esc(cleanGroupId) : "NULL"}, 
         ${esc(configType)}, 
-        ${esc(cleanPath)}, 
+        ${D.hasPath ? esc(cleanPath) + "," : ""} 
         ${esc(JSON.stringify(jsonValue))}::jsonb, 
         ${targetTenantId === null ? "true" : "false"}, 
         NOW(), 
@@ -332,6 +374,37 @@ app.post("/api/validator/check", (req, res) => {
     });
   }
 
+  // Guard workflow pipeline: struktur { pipelines: [{ name, config }] }
+  if (domainOf(req).key === "workflow_pipeline") {
+    if (!Array.isArray(config.pipelines)) {
+      issues.push({
+        severity: "error",
+        path: "pipelines",
+        message: "Workflow pipeline wajib memiliki array 'pipelines'."
+      });
+    } else {
+      config.pipelines.forEach((step: any, idx: number) => {
+        if (!step || typeof step !== "object" || !step.name || typeof step.name !== "string") {
+          issues.push({
+            severity: "error",
+            path: `pipelines[${idx}]`,
+            message: `Step pipeline pada indeks ${idx} tidak memiliki 'name'.`
+          });
+        }
+        if (step && step.config !== undefined && (typeof step.config !== "object" || step.config === null)) {
+          issues.push({
+            severity: "warning",
+            path: `pipelines[${idx}] (${step.name || "unnamed"})`,
+            message: `'config' pada step '${step.name || idx}' sebaiknya berupa objek.`
+          });
+        }
+      });
+      if (config.pipelines.length === 0) {
+        issues.push({ severity: "warning", path: "pipelines", message: "Array 'pipelines' kosong." });
+      }
+    }
+  }
+
   // Guard 3: Validasi rules/filters jika ada
   if (config.rules && typeof config.rules === "object") {
     Object.entries(config.rules).forEach(([ruleKey, ruleVal]: [string, any]) => {
@@ -351,10 +424,29 @@ app.post("/api/validator/check", (req, res) => {
   });
 });
 
+// Optimistic locking: editor wajib mengirim versi (updated_at) yang ia muat terakhir.
+// Jika DB sudah berubah sejak itu, simpan ditolak agar perubahan orang lain tidak tertimpa.
+function staleVersionError(expected: any, current: string): { error: string; code: string } | null {
+  if (!expected) {
+    return {
+      code: "VERSION_REQUIRED",
+      error: "Versi konfigurasi tidak diketahui. Muat ulang (pull) konfigurasi dari database sebelum menyimpan."
+    };
+  }
+  if (expected !== current) {
+    return {
+      code: "STALE_VERSION",
+      error: "Konfigurasi di database sudah berubah sejak terakhir Anda memuatnya. Pull/muat ulang dari database dulu, lalu terapkan ulang perubahan Anda."
+    };
+  }
+  return null;
+}
+
 // 5. Update Configuration & Record Audit Snapshot
 app.put("/api/configs/:configId", async (req, res) => {
   const { configId } = req.params;
-  const { value, groupId, changeSummary, authorName } = req.body;
+  const { value, groupId, changeSummary, authorName, expectedVersion } = req.body;
+  const D = domainOf(req);
 
   if (!value || typeof value !== "object") {
     return res.status(400).json({ error: "Value must be a valid JSON object" });
@@ -362,8 +454,8 @@ app.put("/api/configs/:configId", async (req, res) => {
 
   try {
     const curRes = await targetDb.query(`
-      SELECT id, tenant_id, group_id, config_type, value 
-      FROM public.tenant_configurations 
+      SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, value, updated_at::text AS version_token
+      FROM ${D.table} 
       WHERE id = ${esc(configId)};
     `);
 
@@ -372,6 +464,8 @@ app.put("/api/configs/:configId", async (req, res) => {
     }
 
     const currentConfig = curRes.rows[0];
+    const stale = staleVersionError(expectedVersion, currentConfig.version_token);
+    if (stale) return res.status(409).json(stale);
     const finalGroupId = groupId !== undefined ? (groupId ? groupId.trim() : null) : currentConfig.group_id;
 
     const verRes = await auditDb.query(`
@@ -381,7 +475,21 @@ app.put("/api/configs/:configId", async (req, res) => {
     `);
     const nextVersion = parseInt(verRes.rows[0].last_version, 10) + 1;
 
-    // 1. Simpan snapshot data SEBELUM perubahan ke audit history (Previous Version Backup)
+    // 1. Update konfigurasi aktif dengan data BARU, hanya jika versi DB belum berubah sejak dicek
+    const updRes = await targetDb.query(`
+      UPDATE ${D.table} 
+      SET 
+        value = ${esc(JSON.stringify(value))}::jsonb, 
+        group_id = ${finalGroupId ? esc(finalGroupId) : "NULL"},
+        updated_at = NOW() 
+      WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
+      RETURNING updated_at::text AS version_token;
+    `);
+    if (updRes.rows.length === 0) {
+      return res.status(409).json(staleVersionError("", "changed")!);
+    }
+
+    // 2. Simpan snapshot data SEBELUM perubahan ke audit history (Previous Version Backup)
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
       (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name)
@@ -397,20 +505,11 @@ app.put("/api/configs/:configId", async (req, res) => {
       );
     `);
 
-    // 2. Update konfigurasi aktif dengan data BARU
-    await targetDb.query(`
-      UPDATE public.tenant_configurations 
-      SET 
-        value = ${esc(JSON.stringify(value))}::jsonb, 
-        group_id = ${finalGroupId ? esc(finalGroupId) : "NULL"},
-        updated_at = NOW() 
-      WHERE id = ${esc(configId)};
-    `);
-
     res.json({
       success: true,
       message: `Configuration ${configId} successfully updated to version ${nextVersion}`,
-      version: nextVersion
+      version: nextVersion,
+      versionToken: updRes.rows[0].version_token
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -422,10 +521,11 @@ app.delete("/api/configs/:configId", async (req, res) => {
   try {
     const { configId } = req.params;
     const { confirmationConfigType, authorName = "Studio User" } = req.body;
+    const D = domainOf(req);
 
     const curRes = await targetDb.query(`
-      SELECT id, tenant_id, group_id, config_type, value 
-      FROM public.tenant_configurations 
+      SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, value 
+      FROM ${D.table} 
       WHERE id = ${esc(configId)} AND deleted_at IS NULL;
     `);
 
@@ -465,9 +565,9 @@ app.delete("/api/configs/:configId", async (req, res) => {
       );
     `);
 
-    // 2. Soft-delete di public.tenant_configurations
+    // 2. Soft-delete di tabel domain aktif
     await targetDb.query(`
-      UPDATE public.tenant_configurations 
+      UPDATE ${D.table} 
       SET deleted_at = NOW(), updated_at = NOW() 
       WHERE id = ${esc(configId)};
     `);
@@ -476,7 +576,7 @@ app.delete("/api/configs/:configId", async (req, res) => {
     if (currentConfig.tenant_id && currentConfig.config_type) {
       await auditDb.query(`
         DELETE FROM tenant_studio.preset_links 
-        WHERE tenant_id = ${esc(currentConfig.tenant_id)} AND config_type = ${esc(currentConfig.config_type)};
+        WHERE tenant_id = ${esc(currentConfig.tenant_id)} AND config_type = ${esc(D.linkKey(currentConfig.config_type))};
       `).catch(() => {});
     }
 
@@ -694,15 +794,16 @@ app.post("/api/references/export-bulk", async (req, res) => {
       fs.mkdirSync(targetDir, { recursive: true });
     }
 
-    let query = "SELECT id, tenant_id, group_id, config_type, path, value FROM public.tenant_configurations";
+    const D = domainOf(req);
+    let query = `SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, value FROM ${D.table} WHERE deleted_at IS NULL`;
     if (scope === "current_tenant") {
       if (tenantId === "GLOBAL_DEFAULT" || !tenantId) {
-        query += " WHERE tenant_id IS NULL";
+        query += " AND tenant_id IS NULL";
       } else {
-        query += ` WHERE tenant_id = ${esc(tenantId)}`;
+        query += ` AND tenant_id = ${esc(tenantId)}`;
       }
     }
-    query += " ORDER BY tenant_id, config_type";
+    query += ` ORDER BY tenant_id, ${D.typeCol}`;
 
     const { rows } = await targetDb.query(query);
 
@@ -816,7 +917,8 @@ app.post("/api/references/export-skill", (req, res) => {
 // 10. Sync Single Preset File to Active DB Configuration
 app.post("/api/references/sync-single", async (req, res) => {
   try {
-    const { configId, content, authorName = "Preset Sync", sourceFilename } = req.body;
+    const { configId, content, authorName = "Preset Sync", sourceFilename, expectedVersion } = req.body;
+    const D = domainOf(req);
     if (!configId) {
       return res.status(400).json({ error: "configId wajib disertakan!" });
     }
@@ -825,8 +927,8 @@ app.post("/api/references/sync-single", async (req, res) => {
     }
 
     const currRes = await targetDb.query(`
-      SELECT id, tenant_id, group_id, config_type, value 
-      FROM public.tenant_configurations 
+      SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, value, updated_at::text AS version_token
+      FROM ${D.table} 
       WHERE id = ${esc(configId)};
     `);
 
@@ -835,6 +937,8 @@ app.post("/api/references/sync-single", async (req, res) => {
     }
 
     const currentConfig = currRes.rows[0];
+    const stale = staleVersionError(expectedVersion, currentConfig.version_token);
+    if (stale) return res.status(409).json(stale);
     const jsonParsed = typeof content === "string" ? JSON.parse(content) : content;
 
     // Ambil versi terakhir dari history
@@ -845,7 +949,20 @@ app.post("/api/references/sync-single", async (req, res) => {
     `);
     const nextVersion = (vRes.rows[0]?.max_v || 0) + 1;
 
-    // 1. Simpan snapshot kondisi SEBELUM perubahan ke history
+    // 1. Update nilai baru di database, hanya jika versi DB belum berubah sejak dicek
+    const updRes = await targetDb.query(`
+      UPDATE ${D.table} 
+      SET 
+        value = ${esc(JSON.stringify(jsonParsed))}::jsonb,
+        updated_at = NOW()
+      WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
+      RETURNING updated_at::text AS version_token;
+    `);
+    if (updRes.rows.length === 0) {
+      return res.status(409).json(staleVersionError("", "changed")!);
+    }
+
+    // 2. Simpan snapshot kondisi SEBELUM perubahan ke history
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
       (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name)
@@ -861,19 +978,11 @@ app.post("/api/references/sync-single", async (req, res) => {
       );
     `);
 
-    // 2. Update nilai baru di database
-    await targetDb.query(`
-      UPDATE public.tenant_configurations 
-      SET 
-        value = ${esc(JSON.stringify(jsonParsed))}::jsonb,
-        updated_at = NOW()
-      WHERE id = ${esc(configId)};
-    `);
-
     res.json({
       success: true,
       message: `Konfigurasi ${currentConfig.config_type} berhasil disinkronkan dari file preset ke database!`,
       version: nextVersion,
+      versionToken: updRes.rows[0].version_token,
       data: jsonParsed
     });
   } catch (err: any) {
@@ -897,6 +1006,9 @@ auditDb
       PRIMARY KEY (tenant_id, config_type)
     );
   `)
+  // base_db_version = updated_at DB saat file terakhir di-pull/di-push; dipakai untuk menolak push
+  // dari file yang belum pernah di-pull atau yang DB-nya sudah berubah sejak pull terakhir.
+  .then(() => auditDb.query(`ALTER TABLE tenant_studio.preset_links ADD COLUMN IF NOT EXISTS base_db_version text;`))
   .catch((err) => console.error("Gagal membuat tabel preset_links:", err.message));
 
 // Urutkan key secara rekursif agar urutan key (jsonb vs file) tidak dianggap perbedaan
@@ -971,7 +1083,16 @@ async function upsertPresetLink(tenantId: string, configType: string, filePath: 
     INSERT INTO tenant_studio.preset_links (tenant_id, config_type, file_path, updated_at)
     VALUES (${esc(tenantId)}, ${esc(configType)}, ${esc(filePath)}, NOW())
     ON CONFLICT (tenant_id, config_type) DO UPDATE
-    SET file_path = EXCLUDED.file_path, updated_at = NOW();
+    SET file_path = EXCLUDED.file_path,
+        base_db_version = CASE WHEN preset_links.file_path = EXCLUDED.file_path THEN preset_links.base_db_version END,
+        updated_at = NOW();
+  `);
+}
+async function setPresetBase(tenantId: string, configType: string, filePath: string, versionToken: string) {
+  await upsertPresetLink(tenantId, configType, filePath);
+  await auditDb.query(`
+    UPDATE tenant_studio.preset_links SET base_db_version = ${esc(versionToken)}
+    WHERE tenant_id = ${esc(tenantId)} AND config_type = ${esc(configType)};
   `);
 }
 
@@ -1005,17 +1126,22 @@ app.get("/api/sync/status", async (req, res) => {
     const tenantId = String(req.query.tenantId || "GLOBAL_DEFAULT");
     const dir = (req.query.dir as string) || DEFAULT_PRESET_DIR;
     const isGlobal = tenantId === "GLOBAL_DEFAULT";
+    const D = domainOf(req);
 
     const cfgRes = await targetDb.query(`
-      SELECT id, group_id, config_type, value, updated_at
-      FROM public.tenant_configurations
+      SELECT id, group_id, ${D.typeCol} AS config_type, value, updated_at, updated_at::text AS version_token
+      FROM ${D.table}
       WHERE ${isGlobal ? "tenant_id IS NULL" : `tenant_id = ${esc(tenantId)}`} AND deleted_at IS NULL
-      ORDER BY config_type ASC;
+      ORDER BY ${D.typeCol} ASC;
     `);
     const linkRes = await auditDb.query(`
-      SELECT config_type, file_path FROM tenant_studio.preset_links WHERE tenant_id = ${esc(tenantId)};
+      SELECT config_type, file_path, base_db_version FROM tenant_studio.preset_links WHERE tenant_id = ${esc(tenantId)};
     `);
     const links = new Map<string, string>(linkRes.rows.map((r: any) => [r.config_type, r.file_path]));
+    const bases = new Map<string, string | null>(linkRes.rows.map((r: any) => [r.config_type, r.base_db_version]));
+    // Hitung config_type kembar (mis. 2 baris aktif bertipe sama): sync per-tipe jadi ambigu
+    const typeCount = new Map<string, number>();
+    cfgRes.rows.forEach((r: any) => typeCount.set(r.config_type, (typeCount.get(r.config_type) || 0) + 1));
 
     const files = fs.existsSync(dir) ? scanJsonFiles(dir) : [];
     // Saran otomatis: nama file == config_type (case/pemisah diabaikan). Jika kembar, ambil path terpendek.
@@ -1027,7 +1153,7 @@ app.get("/api/sync/status", async (req, res) => {
     }
 
     const rows = cfgRes.rows.map((row: any) => {
-      let filePath: string | null = links.get(row.config_type) || null;
+      let filePath: string | null = links.get(D.linkKey(row.config_type)) || null;
       let linkSource: "saved" | "auto" | null = filePath ? "saved" : null;
       if (!filePath) {
         const f = byNorm.get(normalizeName(row.config_type));
@@ -1052,6 +1178,10 @@ app.get("/api/sync/status", async (req, res) => {
           }
         }
       }
+      // Push diblokir bila file berbeda dari DB tetapi belum di-pull dari versi DB yang sekarang
+      const pullRequired =
+        status === "different" &&
+        (linkSource !== "saved" || bases.get(D.linkKey(row.config_type)) !== row.version_token);
       return {
         configId: row.id,
         configType: row.config_type,
@@ -1060,6 +1190,8 @@ app.get("/api/sync/status", async (req, res) => {
         filePath,
         linkSource,
         status,
+        pullRequired,
+        duplicateType: (typeCount.get(row.config_type) || 0) > 1,
         fileMtime
       };
     });
@@ -1076,10 +1208,12 @@ app.get("/api/sync/status", async (req, res) => {
 // Simpan / hapus pemetaan config_type -> file lokal
 app.put("/api/sync/link", async (req, res) => {
   try {
-    const { tenantId, configType, filePath } = req.body;
-    if (!tenantId || !configType) {
+    const { tenantId, filePath } = req.body;
+    const D = domainOf(req);
+    if (!tenantId || !req.body.configType) {
       return res.status(400).json({ error: "tenantId dan configType wajib diisi" });
     }
+    const configType = D.linkKey(req.body.configType);
     if (!filePath) {
       await auditDb.query(`
         DELETE FROM tenant_studio.preset_links
@@ -1108,10 +1242,12 @@ app.post("/api/sync/apply", async (req, res) => {
       return res.status(400).json({ error: "tenantId dan items wajib diisi" });
     }
     const isGlobal = tenantId === "GLOBAL_DEFAULT";
+    const D = domainOf(req);
     const results: Array<{ configType: string; filePath: string; action: string; error?: string }> = [];
 
     for (const item of items) {
       const configType: string = item.configType;
+      const linkType = D.linkKey(configType || "");
       const filePath: string = item.filePath;
       const report = (action: string, error?: string) => results.push({ configType, filePath, action, error });
 
@@ -1122,12 +1258,16 @@ app.post("/api/sync/apply", async (req, res) => {
         }
 
         const found = await targetDb.query(`
-          SELECT id, tenant_id, group_id, config_type, value
-          FROM public.tenant_configurations
+          SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, value, updated_at::text AS version_token
+          FROM ${D.table}
           WHERE ${isGlobal ? "tenant_id IS NULL" : `tenant_id = ${esc(tenantId)}`}
-            AND config_type = ${esc(configType)} AND deleted_at IS NULL
-          LIMIT 1;
+            AND ${D.typeCol} = ${esc(configType)} AND deleted_at IS NULL
+          LIMIT 2;
         `);
+        if (found.rows.length > 1) {
+          report("failed", `Ada lebih dari 1 config aktif bertipe ${configType} untuk tenant ini; sync per-tipe ambigu. Edit langsung lewat editor.`);
+          continue;
+        }
         const row = found.rows[0];
 
         if (direction === "pull") {
@@ -1138,6 +1278,7 @@ app.post("/api/sync/apply", async (req, res) => {
           if (fs.existsSync(filePath)) {
             try {
               if (sameJson(row.value || {}, JSON.parse(fs.readFileSync(filePath, "utf8")))) {
+                await setPresetBase(tenantId, linkType, filePath, row.version_token);
                 report("skipped", "Sudah sama");
                 continue;
               }
@@ -1146,7 +1287,7 @@ app.post("/api/sync/apply", async (req, res) => {
             }
           }
           writeJsonFileWithBackup(filePath, row.value || {});
-          await upsertPresetLink(tenantId, configType, filePath);
+          await setPresetBase(tenantId, linkType, filePath, row.version_token);
           report("updated");
           continue;
         }
@@ -1170,31 +1311,50 @@ app.post("/api/sync/apply", async (req, res) => {
 
         if (row) {
           if (sameJson(row.value || {}, parsed)) {
-            await upsertPresetLink(tenantId, configType, filePath);
+            await setPresetBase(tenantId, linkType, filePath, row.version_token);
             report("skipped", "Sudah sama");
             continue;
           }
-          // Snapshot data SEBELUM perubahan, baru update
-          await snapshotBeforeChange(row, `Push dari file: ${path.basename(filePath)}`, authorName);
-          await targetDb.query(`
-            UPDATE public.tenant_configurations
-            SET value = ${esc(JSON.stringify(parsed))}::jsonb, updated_at = NOW()
-            WHERE id = ${esc(row.id)};
+          // Tolak push bila file belum pernah di-pull, atau DB sudah berubah sejak pull terakhir
+          const linkRow = await auditDb.query(`
+            SELECT file_path, base_db_version FROM tenant_studio.preset_links
+            WHERE tenant_id = ${esc(tenantId)} AND config_type = ${esc(linkType)};
           `);
-          await upsertPresetLink(tenantId, configType, filePath);
+          const link = linkRow.rows[0];
+          if (!link || link.file_path !== filePath || !link.base_db_version) {
+            report("failed", "File ini belum pernah di-pull dari database. Pull dulu sebelum push.");
+            continue;
+          }
+          if (link.base_db_version !== row.version_token) {
+            report("failed", "Database sudah berubah sejak pull terakhir. Pull dulu, lalu terapkan ulang perubahan file.");
+            continue;
+          }
+          const upd = await targetDb.query(`
+            UPDATE ${D.table}
+            SET value = ${esc(JSON.stringify(parsed))}::jsonb, updated_at = NOW()
+            WHERE id = ${esc(row.id)} AND updated_at::text = ${esc(row.version_token)}
+            RETURNING updated_at::text AS version_token;
+          `);
+          if (upd.rows.length === 0) {
+            report("failed", "Database berubah saat proses push. Pull dulu, lalu coba lagi.");
+            continue;
+          }
+          // Snapshot data SEBELUM perubahan
+          await snapshotBeforeChange(row, `Push dari file: ${path.basename(filePath)}`, authorName);
+          await setPresetBase(tenantId, linkType, filePath, upd.rows[0].version_token);
           report("updated");
         } else if (createIfMissing) {
           const newId = randomUUID();
           const cleanGroup = groupId ? String(groupId).trim() : null;
           await targetDb.query(`
-            INSERT INTO public.tenant_configurations
-            (id, tenant_id, group_id, config_type, path, value, is_default, created_at, updated_at)
+            INSERT INTO ${D.table}
+            (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at)
             VALUES (
               ${esc(newId)},
               ${isGlobal ? "NULL" : esc(tenantId)},
               ${cleanGroup ? esc(cleanGroup) : "NULL"},
               ${esc(configType)},
-              ${esc(configType.toLowerCase().replace(/_/g, "-"))},
+              ${D.hasPath ? esc(configType.toLowerCase().replace(/_/g, "-")) + "," : ""}
               ${esc(JSON.stringify(parsed))}::jsonb,
               ${isGlobal ? "true" : "false"},
               NOW(), NOW()
@@ -1205,7 +1365,10 @@ app.post("/api/sync/apply", async (req, res) => {
             `Dibuat dari file: ${path.basename(filePath)}`,
             authorName
           );
-          await upsertPresetLink(tenantId, configType, filePath);
+          const createdRow = await targetDb.query(`
+            SELECT updated_at::text AS version_token FROM ${D.table} WHERE id = ${esc(newId)};
+          `);
+          await setPresetBase(tenantId, linkType, filePath, createdRow.rows[0].version_token);
           report("created");
         } else {
           report("failed", "Config belum ada di database (aktifkan 'buat baru' untuk membuatnya)");
