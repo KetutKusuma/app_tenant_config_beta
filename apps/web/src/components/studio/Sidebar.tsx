@@ -1,0 +1,255 @@
+import {
+  ArrowLeftRight, Building2, Check, Copy, Database, Download, Edit2, FileCode, FilePlus, Layers, Plus,
+  RefreshCw, Search, Trash2, Users, Workflow
+} from "lucide-react";
+import { DOMAIN_LABEL } from "../../types";
+import { useStudio } from "../../studio/StudioContext";
+
+export function Sidebar() {
+  const {
+    activeConfigType, configDomain, configs, copiedTenantId, copyToClipboard, fetchTenants, filteredTenants,
+    handleCompareWithDb, handleStartTenantComparison, handleSwitchDomain, openAddTenantModal,
+    openCompareTenantModal, openConfig, openDeleteConfigModal, openEditTenantModal, openSavePresetModal,
+    openTenant, searchInputRef, searchQuery, selectedConfigId, selectedTenant, setCtxMenu, setSearchQuery,
+    setShowAddConfigModal
+  } = useStudio();
+  return (
+    <>
+      {/* Left Sidebar: Tenant Directory */}
+      <aside className="w-72 border-r border-slate-800 flex flex-col bg-slate-900/40 shrink-0">
+        {/* Domain switch: menentukan isi daftar tenant & config di bawahnya */}
+        <div className="p-2 border-b border-slate-800">
+          <div role="tablist" aria-label="Domain konfigurasi" className="grid grid-cols-2 gap-0.5 p-0.5 rounded-lg bg-slate-950/80 ring-1 ring-inset ring-slate-800">
+            {([
+              { key: "tenant_config", icon: <Layers className="w-3.5 h-3.5" />, title: "public.tenant_configurations (ats_db)" },
+              { key: "workflow_pipeline", icon: <Workflow className="w-3.5 h-3.5" />, title: "public.pipeline_workflow_configurations (ats_db)" }
+            ] as const).map(d => {
+              const active = configDomain === d.key;
+              return (
+                <button
+                  key={d.key}
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => handleSwitchDomain(d.key)}
+                  title={d.title}
+                  className={`h-7 rounded-md flex items-center justify-center gap-1.5 text-[11px] font-medium transition ${
+                    active
+                      ? d.key === "workflow_pipeline"
+                        ? "bg-teal-600/90 text-white shadow-sm"
+                        : "bg-indigo-600/90 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  {d.icon}
+                  {DOMAIN_LABEL[d.key]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Tenant Search & Header */}
+        <div className="p-2 border-b border-slate-800 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Tenants ({filteredTenants.length})</span>
+            <button 
+              onClick={openAddTenantModal}
+              className="flex items-center gap-1 text-[10px] bg-indigo-600 hover:bg-indigo-500 px-1.5 py-0.5 rounded text-white font-medium transition"
+            >
+              <Plus className="w-3 h-3" /> Tambah Tenant
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex-1">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-2" />
+              <input 
+                ref={searchInputRef}
+                type="text" 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari tenant / group ID... (Ctrl/⌘+K)" 
+                className="w-full bg-slate-950 border border-slate-800 rounded pl-7 pr-2 py-1 text-[11px] focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <button onClick={() => fetchTenants()} className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-slate-200">
+              <RefreshCw className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+
+        {/* Tenant List */}
+        <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
+          {filteredTenants.map((t) => {
+            const isSelected = selectedTenant?.tenantId === t.tenantId;
+            const shortId = t.tenantId.length > 12 ? `${t.tenantId.slice(0, 8)}…${t.tenantId.slice(-4)}` : t.tenantId;
+            const tenantMenu = (e: React.MouseEvent) => {
+              e.preventDefault();
+              setCtxMenu({
+                x: e.clientX,
+                y: e.clientY,
+                title: t.name,
+                items: [
+                  { key: "open", label: "Buka tenant", icon: <Building2 className="w-3.5 h-3.5" />, disabled: isSelected, onSelect: () => openTenant(t) },
+                  {
+                    key: "compare",
+                    label: "Bandingkan dengan tenant aktif",
+                    hint: activeConfigType || undefined,
+                    icon: <ArrowLeftRight className="w-3.5 h-3.5" />,
+                    disabled: isSelected || !selectedConfigId,
+                    onSelect: () => handleStartTenantComparison(t.tenantId, activeConfigType || "CANDIDATE_STABLE")
+                  },
+                  { key: "edit", label: "Edit nama / label…", icon: <Edit2 className="w-3.5 h-3.5" />, onSelect: () => openEditTenantModal(t) },
+                  "divider",
+                  { key: "copy-id", label: "Copy tenant_id", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(t.tenantId) },
+                  ...(t.groupId
+                    ? [{ key: "copy-group", label: "Copy group_id", icon: <Users className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(t.groupId!) }]
+                    : [])
+                ]
+              });
+            };
+            return (
+              <div 
+                key={t.tenantId}
+                onClick={() => openTenant(t)}
+                onContextMenu={tenantMenu}
+                className={`group relative w-full text-left px-2.5 py-2 rounded-md transition cursor-pointer ${
+                  isSelected 
+                    ? "bg-indigo-600/10 ring-1 ring-inset ring-indigo-500/40" 
+                    : "hover:bg-slate-800/40"
+                }`}
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className={`text-[11px] font-medium truncate ${isSelected ? "text-indigo-200" : "text-slate-300 group-hover:text-slate-100"}`}>
+                    {t.name}
+                  </span>
+                  <span className="shrink-0 text-[9px] px-1 rounded bg-slate-800 text-slate-400 font-mono">{t.code}</span>
+                </div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-mono text-slate-500 min-w-0">
+                  <span className="truncate" title={t.tenantId}>{shortId}</span>
+                  <span className="text-slate-700">·</span>
+                  <span className="shrink-0">{t.totalConfigs} {configDomain === "workflow_pipeline" ? "workflow" : "config"}</span>
+                  {t.groupId && t.groupId !== t.tenantId && (
+                    <span className="shrink-0 flex items-center gap-0.5 text-amber-400/70" title={`group_id: ${t.groupId}`}>
+                      <Users className="w-2.5 h-2.5" /> group
+                    </span>
+                  )}
+                </div>
+
+                {/* Aksi kartu: hanya muncul saat hover / fokus agar sidebar tetap tenang */}
+                <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md bg-slate-900/95 ring-1 ring-slate-700/70 shadow-lg px-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition">
+                  {!isSelected && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleStartTenantComparison(t.tenantId, activeConfigType || "CANDIDATE_STABLE");
+                      }}
+                      disabled={!selectedConfigId}
+                      className="p-1 rounded text-slate-400 hover:text-purple-300 hover:bg-slate-800 transition disabled:opacity-30"
+                      title={`Bandingkan ${activeConfigType || "config"} dengan ${t.name}`}
+                    >
+                      <ArrowLeftRight className="w-3 h-3" />
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => copyToClipboard(t.tenantId, e)}
+                    className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+                    title={`Copy tenant_id: ${t.tenantId}`}
+                  >
+                    {copiedTenantId === t.tenantId ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  </button>
+                  <button
+                    onClick={(e) => openEditTenantModal(t, e)}
+                    className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+                    title="Edit nama/label tenant"
+                  >
+                    <Edit2 className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Config Types List with "+ Tambah Config" Button */}
+        <div className="border-t border-slate-800 p-2 max-h-56 overflow-y-auto bg-slate-950/70">
+          <div className="flex items-center justify-between pb-1">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+              {configDomain === "workflow_pipeline" ? "Workflow" : "Konfigurasi"} ({configs.length})
+            </span>
+            <button 
+              onClick={() => {
+                if (!selectedTenant) {
+                  alert("Pilih tenant terlebih dahulu!");
+                  return;
+                }
+                setShowAddConfigModal(true);
+              }}
+              className="flex items-center gap-0.5 text-[10px] bg-slate-800 hover:bg-slate-700 text-indigo-300 hover:text-indigo-200 px-1.5 py-0.5 rounded border border-slate-700 transition"
+              title="Tambah Konfigurasi Baru untuk Tenant Ini"
+            >
+              <FilePlus className="w-3 h-3" /> Tambah Config
+            </button>
+          </div>
+          <div className="space-y-0.5">
+            {configs.map((c) => {
+              const isConfigActive = selectedConfigId === c.id;
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => openConfig(c)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setCtxMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      title: c.config_type,
+                      items: [
+                        { key: "open", label: "Buka", icon: <FileCode className="w-3.5 h-3.5" />, disabled: isConfigActive, onSelect: () => openConfig(c) },
+                        { key: "db", label: "Bandingkan dengan DB terbaru", icon: <Database className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: handleCompareWithDb },
+                        { key: "tenant", label: "Bandingkan dengan tenant lain…", icon: <ArrowLeftRight className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openCompareTenantModal },
+                        { key: "export", label: "Ekspor sebagai preset…", icon: <Download className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openSavePresetModal },
+                        "divider",
+                        { key: "copy-type", label: "Copy nama config", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.config_type) },
+                        { key: "copy-id", label: "Copy ID", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.id) },
+                        "divider",
+                        { key: "delete", label: "Hapus…", icon: <Trash2 className="w-3.5 h-3.5" />, danger: true, onSelect: () => openDeleteConfigModal(c) }
+                      ]
+                    });
+                  }}
+                  className={`w-full group text-left px-2 py-1 rounded text-[11px] flex items-center justify-between transition cursor-pointer ${
+                    isConfigActive
+                      ? "bg-slate-800 text-white font-medium border border-slate-700"
+                      : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5 truncate">
+                    {configDomain === "workflow_pipeline"
+                      ? <Workflow className="w-3 h-3 text-teal-400 shrink-0" />
+                      : <FileCode className="w-3 h-3 text-indigo-400 shrink-0" />}
+                    <span className="truncate">{c.config_type || "UNNAMED_CONFIG"}</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {c.is_default && (
+                      <span className="text-[8px] bg-slate-700 px-1 py-0.2 rounded text-slate-300">DEF</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openDeleteConfigModal(c);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 rounded transition shrink-0"
+                      title={`Hapus konfigurasi ${c.config_type}`}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}

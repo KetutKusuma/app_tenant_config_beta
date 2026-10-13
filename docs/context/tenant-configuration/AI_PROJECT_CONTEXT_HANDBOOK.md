@@ -146,7 +146,15 @@ Repositori ini dirancang menggunakan arsitektur monorepo modern yang dikelola de
 │   │   ├── tsconfig.json
 │   │   ├── dist/                     # Hasil kompilasi JavaScript
 │   │   └── src/
-│   │       └── main.ts               # Server utama, database pools, REST endpoints
+│   │       ├── main.ts               # Entry point: middleware global & registrasi route
+│   │       ├── loadEnv.ts            # Memuat .env root workspace (diimpor paling awal)
+│   │       ├── db.ts                 # Pool Audit DB (Neon) + helper esc()
+│   │       ├── envs.ts               # Profil target env (envs/<nama>.env) & pool ats_db per request
+│   │       ├── auth.ts               # Login, sesi, preferensi user
+│   │       ├── domain.ts             # Domain config (tenant_config / workflow_pipeline), folder preset, optimistic locking
+│   │       ├── studioSchema.ts       # Persiapan tabel tenant_studio & migrasi
+│   │       ├── presetSync.ts         # Helper Sync Center (JSON kanonik, file preset, snapshot)
+│   │       └── routes/               # tenants, configs, validator, references, sync
 │   └── web/                          # Client Frontend (React 18 + Vite 6 + Tailwind CSS)
 │       ├── package.json
 │       ├── tsconfig.json
@@ -158,8 +166,15 @@ Repositori ini dirancang menggunakan arsitektur monorepo modern yang dikelola de
 │       └── src/
 │           ├── main.tsx              # Entry point React DOM
 │           ├── index.css             # Tailwind base & custom utility styles
-│           ├── App.tsx               # Orchestrator utama state & layout studio
+│           ├── App.tsx               # Kerangka layout studio (merangkai komponen di components/studio)
+│           ├── types.ts              # Tipe & konstanta bersama (Tenant, ConfigItem, SyncRow, ...)
+│           ├── lib/api.ts            # Wrapper fetch ke BFF (header domain/env, konfirmasi env)
+│           ├── studio/               # Hook state & aksi: useStudioState, useCoreActions, useEditorActions,
+│           │                         #   useCrudActions, useSyncCenter, useCompareActions, StudioContext
 │           ├── components/
+│           │   ├── studio/           # Bagian UI: header, sidebar, editor, panel, modal (pakai useStudio())
+│           │   ├── ui.tsx            # Komponen UI generik (MenuButton, SplitButton, dialog)
+│           │   ├── AuthGate.tsx      # Login & ganti password
 │           │   └── DocsModal.tsx     # Modal dokumentasi teknis interaktif
 │           └── utils/
 │               └── jsonDiff.ts       # Engine komparasi kanonikal & RFC 6902 delta
@@ -382,7 +397,7 @@ Pada lingkungan modern (seperti Neon Serverless PostgreSQL), koneksi database da
    AUDIT_DB_SSL=require
    ```
 
-2. **Inisialisasi Pool pada `apps/bff/src/main.ts`:**
+2. **Inisialisasi Pool pada `apps/bff/src/envs.ts` (target) dan `apps/bff/src/db.ts` (audit):**
    ```typescript
    const targetDb = new Pool({
      ...getTargetDbConfig(),
@@ -820,7 +835,7 @@ Secara eksplisit menyalin seluruh file spesifikasi AI Agent:
 # BAB 8: Arsitektur Frontend & Alur Kerja Pengguna (`apps/web`)
 
 ### 8.1 State Management & Navigasi Aplikasi
-Aplikasi dikelola secara reaktif pada `apps/web/src/App.tsx`:
+Aplikasi dikelola secara reaktif lewat hook di `apps/web/src/studio/` (state utama di `useStudioState.ts`):
 - `tenants`: Daftar tenant yang dimuat dari database audit.
 - `selectedTenant`: Tenant yang saat ini aktif dipilih pada dropdown switcher atas.
 - `configs`: Daftar seluruh konfigurasi milik tenant yang sedang dipilih.
@@ -1783,7 +1798,7 @@ Jika Anda adalah asisten kecerdasan buatan (*AI Agent*) yang ditugaskan untuk me
    - Jangan pernah menghapus atau mengubah logika `resolvePaths` pada file views tanpa mitigasi kompatibilitas.
 
 5. **Kepatuhan Penanganan Database Pool:**
-   - Gunakan selalu parameter escaping `esc()` saat membangun dynamic raw query SQL di `apps/bff/src/main.ts`.
+   - Gunakan selalu parameter escaping `esc()` saat membangun dynamic raw query SQL di `apps/bff/src/routes/*.ts`.
 
 ---
 
@@ -1811,7 +1826,7 @@ Jika Anda adalah asisten kecerdasan buatan (*AI Agent*) yang ditugaskan untuk me
 ### 12.3 Penanganan Database Pool Exhaustion
 - **Gejala:** Request API BFF mengalami timeout dengan pesan:  
   `timeout exceeded when trying to connect to database`
-- **Solusi:** Periksa jumlah pool `max: 10` pada `apps/bff/src/main.ts`. Pastikan setiap panggilan query yang menggunakan `targetDb.connect()` selalu menyertakan `client.release()` di dalam blok `finally`.
+- **Solusi:** Periksa konfigurasi pool target di `apps/bff/src/envs.ts` (fungsi `poolFor`). Pastikan setiap panggilan query yang menggunakan `targetDb.connect()` selalu menyertakan `client.release()` di dalam blok `finally`.
 
 ---
 

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Layers, Lock, LogIn, KeyRound } from "lucide-react";
+import { useCallback, useEffect, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
+import { Layers, Lock, LogIn, KeyRound, Eye, EyeOff } from "lucide-react";
 
 // Gerbang login Tenant Studio: cek sesi (/api/auth/me), tampilkan form login atau
 // form ganti password wajib, lalu render aplikasi dengan user yang sedang login.
@@ -44,8 +44,28 @@ function Shell({ title, subtitle, children }: { title: string; subtitle: string;
   );
 }
 
-const inputCls =
-  "mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500";
+const fieldCls =
+  "w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500";
+const inputCls = `mt-1 ${fieldCls}`;
+
+/** Input password dengan tombol mata untuk menampilkan/menyembunyikan isi */
+function PasswordInput(props: Omit<InputHTMLAttributes<HTMLInputElement>, "type" | "className">) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative mt-1">
+      <input {...props} type={visible ? "text" : "password"} className={`${fieldCls} pr-9`} />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        aria-label={visible ? "Sembunyikan password" : "Tampilkan password"}
+        title={visible ? "Sembunyikan password" : "Tampilkan password"}
+        className="absolute inset-y-0 right-0 px-2.5 flex items-center text-slate-500 hover:text-slate-300 transition"
+      >
+        {visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+      </button>
+    </div>
+  );
+}
 
 function ErrorText({ error }: { error: string | null }) {
   return error ? <p className="text-[11px] text-rose-300 bg-rose-500/10 ring-1 ring-inset ring-rose-500/30 rounded-lg px-3 py-2">{error}</p> : null;
@@ -87,7 +107,7 @@ function LoginForm({ onLoggedIn }: { onLoggedIn: (u: StudioUser) => void }) {
         </label>
         <label className="block text-[11px] text-slate-400">
           Password
-          <input type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} className={inputCls} />
+          <PasswordInput autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
         </label>
         <ErrorText error={error} />
         <button
@@ -152,15 +172,15 @@ export function ChangePasswordForm({
       )}
       <label className="block text-[11px] text-slate-400">
         Password saat ini
-        <input type="password" autoComplete="current-password" required autoFocus value={currentPassword} onChange={(e) => setCurrent(e.target.value)} className={inputCls} />
+        <PasswordInput autoComplete="current-password" required autoFocus value={currentPassword} onChange={(e) => setCurrent(e.target.value)} />
       </label>
       <label className="block text-[11px] text-slate-400">
         Password baru (min. 8 karakter)
-        <input type="password" autoComplete="new-password" required minLength={8} value={newPassword} onChange={(e) => setNew(e.target.value)} className={inputCls} />
+        <PasswordInput autoComplete="new-password" required minLength={8} value={newPassword} onChange={(e) => setNew(e.target.value)} />
       </label>
       <label className="block text-[11px] text-slate-400">
         Ulangi password baru
-        <input type="password" autoComplete="new-password" required minLength={8} value={confirm} onChange={(e) => setConfirm(e.target.value)} className={inputCls} />
+        <PasswordInput autoComplete="new-password" required minLength={8} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
       </label>
       <ErrorText error={error} />
       <div className="flex gap-2">
