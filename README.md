@@ -229,3 +229,9 @@ Untuk asisten AI coding (seperti Antigravity, Gemini CLI, Claude Code) atau insi
 - 🤖 [**Master AI Skill (`docs/skills/tenant-configuration/SKILL.md`)**](file:///Users/ketutkusuma/J/app_tenant_config_beta/docs/skills/tenant-configuration/SKILL.md): Spesifikasi resmi Antigravity Skill System.
 - 📋 [**Checklist Kasus Uji (`docs/TEST_CASES_CHECKLIST.md`)**](file:///Users/ketutkusuma/J/app_tenant_config_beta/docs/TEST_CASES_CHECKLIST.md): 15 skenario pengujian fungsional dan regresi.
 
+## 9. MCP Server untuk Agent AI Lokal
+
+`apps/mcp` menyediakan MCP server **hanya-baca** agar agent AI lokal (Claude Code, dll.) bisa membaca,
+membandingkan, memvalidasi, dan menyusun usulan perubahan konfigurasi lewat BFF. Agent tidak bisa
+menyimpan ke database; usulan diterapkan user lewat Studio. Cara pakai: [`apps/mcp/README.md`](apps/mcp/README.md).
+

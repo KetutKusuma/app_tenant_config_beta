@@ -4,6 +4,25 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Monaco: tooltip ringkas tombol (mis. "Close (Escape)" di kotak Find) muncul menimpa tombolnya sendiri,
+   sehingga klik tertangkap tooltip dan tombol X tidak bisa diklik. Tooltip tetap tampil, tapi tembus klik.
+   Context menu Monaco (context-view tanpa hover compact) tidak terpengaruh. */
+.context-view:has(.monaco-hover.workbench-hover.compact),
+.context-view:has(.monaco-hover.workbench-hover.compact) * {
+  pointer-events: none;
+}
+
+/* Header window side-by-side: saat panel sempit, label tombol disembunyikan (ikon + tooltip tetap ada)
+   supaya judul/nama file tidak tertimpa dan tombol tidak terpotong. */
+.pane-header {
+  container-type: inline-size;
+}
+@container (max-width: 560px) {
+  .pane-header .pane-label {
+    display: none;
+  }
+}
+
 html, body, #root {
   height: 100%;
   width: 100%;

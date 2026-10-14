@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tenant-studio": {
+      "command": "pnpm",
+      "args": [
+        "--silent",
+        "--filter",
+        "mcp",
+        "start"
+      ]
+    }
+  }
+}

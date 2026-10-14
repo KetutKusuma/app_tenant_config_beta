@@ -1,4 +1,5 @@
-import { Download, FolderOpen, FolderSearch, Sparkles, Upload, X } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Download, FolderOpen, FolderSearch, Search, Sparkles, Upload, X } from "lucide-react";
 import { useStudio } from "../../studio/StudioContext";
 
 export function ReferenceDrawer() {
@@ -7,6 +8,18 @@ export function ReferenceDrawer() {
     openSavePresetModal, openSyncCenter, presetInputPath, references, selectedTenant, setPresetInputPath,
     setShowRefDrawer, showRefDrawer
   } = useStudio();
+  const [refQuery, setRefQuery] = useState("");
+
+  // Semua kata kunci harus cocok (AND) di nama file, kategori (subfolder), atau path lengkap.
+  const filteredReferences = useMemo(() => {
+    const terms = refQuery.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return references;
+    return references.filter((ref) => {
+      const haystack = `${ref.name} ${ref.category} ${ref.path}`.toLowerCase();
+      return terms.every((t) => haystack.includes(t));
+    });
+  }, [references, refQuery]);
+
   return (
     <>
       {/* Local References Drawer with Customizable Path */}
@@ -75,15 +88,47 @@ export function ReferenceDrawer() {
                 <span>{isExportingSkill ? "Mengekspor Skill..." : "Ekspor Skill tenant_config Saja"}</span>
               </button>
             </div>
+
+            {/* Search file preset (nama / kategori / path) */}
+            <div className="pt-1 space-y-0.5">
+              <div className="relative">
+                <Search className="w-3 h-3 text-slate-500 absolute left-1.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={refQuery}
+                  onChange={(e) => setRefQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Escape") setRefQuery(""); }}
+                  placeholder="Cari file preset (nama, folder, path)..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded pl-5 pr-5 py-0.5 text-[10px] text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+                {refQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setRefQuery("")}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-200"
+                    title="Hapus pencarian"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              {references.length > 0 && (
+                <span className="text-[9px] text-slate-500 block">
+                  {refQuery ? `${filteredReferences.length} dari ${references.length} file` : `${references.length} file`}
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto p-1.5 space-y-1">
             {references.length === 0 ? (
               <p className="text-xs text-slate-500 p-2">Tidak ditemukan file .json.</p>
+            ) : filteredReferences.length === 0 ? (
+              <p className="text-xs text-slate-500 p-2">Tidak ada file yang cocok dengan "{refQuery}".</p>
             ) : (
-              references.map((ref, idx) => (
+              filteredReferences.map((ref) => (
                 <button
-                  key={idx}
+                  key={ref.path}
                   onClick={() => handleLoadReferenceToSplit(ref)}
                   className="w-full text-left p-1.5 rounded hover:bg-slate-800/60 border border-transparent hover:border-slate-700/50 transition flex flex-col gap-0.5"
                 >

@@ -270,47 +270,44 @@ export function EditorArea() {
             <div className="w-full h-full flex min-h-0 overflow-hidden">
               {/* Left: Window Database Live (ats_db) */}
               <div className="flex-1 flex flex-col border-r-2 border-indigo-500/40 min-h-0 overflow-hidden">
-                <div className="relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-indigo-950/40 border-b border-indigo-500/30 px-3 flex items-center justify-between text-[10px]">
-                  <div className="flex items-center gap-2">
-                    <Database className="w-3.5 h-3.5 text-indigo-400" />
-                    <span className="font-semibold text-indigo-200">Window Database (Live)</span>
-                    <span className="bg-indigo-600/30 text-indigo-300 px-1.5 py-0.2 rounded font-mono text-[9px] border border-indigo-500/40">
-                      {activeConfigType || "No Config"}
-                    </span>
+                <div className="pane-header relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-indigo-950/40 border-b border-indigo-500/30 pl-3 pr-1.5 flex items-center justify-between gap-3 text-[11px]">
+                  <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden" title={`Window Database (Live): ${activeConfigType || "No Config"}`}>
+                    <Database className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="font-medium text-indigo-200 truncate min-w-[3rem]">Database (Live)</span>
+                    <span className="font-mono text-[10px] text-slate-500 truncate">{activeConfigType || "No Config"}</span>
                     {jsonContent !== originalContent && (
-                      <span className="bg-amber-500/20 text-amber-300 px-1 py-0.2 rounded font-mono text-[9px]">
-                        Modified
-                      </span>
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" title="Ada perubahan yang belum disimpan ke database" />
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-0.5 shrink-0">
                     {copiedNotification && (
-                      <span className="text-[10px] text-emerald-400 flex items-center gap-1 mr-1">
-                        <Check className="w-2.5 h-2.5" /> Views Disalin!
+                      <span className="text-emerald-400 flex items-center gap-1 mr-1">
+                        <Check className="w-3 h-3" /> <span className="pane-label">Views Disalin!</span>
                       </span>
                     )}
                     <button
                       onClick={() => setSplitMode("json-delta")}
-                      className="px-1.5 py-0.2 rounded bg-cyan-950/40 text-cyan-300 hover:bg-cyan-900/60 border border-cyan-500/30 text-[10px] flex items-center gap-1 transition"
-                      title="Lihat perbedaan kedua window dalam dokumen JSON terstruktur"
+                      className="h-6 w-6 rounded-md text-slate-400 hover:text-cyan-300 hover:bg-slate-800 flex items-center justify-center transition"
+                      title="JSON Delta: lihat perbedaan kedua window dalam dokumen JSON terstruktur"
                     >
-                      <FileCode className="w-2.5 h-2.5 text-cyan-400" /> JSON Delta
+                      <FileCode className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={handleFormatMainJson}
-                      className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1 transition"
+                      className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                       title="Rapikan format JSON database live (indent 2 spasi)"
                     >
-                      <Braces className="w-2.5 h-2.5 text-cyan-400" /> Format
+                      <Braces className="w-3.5 h-3.5" />
                     </button>
+                    <span className="w-px h-4 bg-slate-700/70 mx-1" />
                     <button
                       onClick={() => handleSave()}
                       disabled={isSaving || !selectedConfigId}
-                      className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-medium flex items-center gap-1 shadow-sm transition disabled:opacity-40"
+                      className="h-6 px-2.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white font-medium flex items-center gap-1.5 shadow-sm transition disabled:opacity-40 disabled:hover:bg-indigo-600"
                       title="Simpan perubahan langsung ke database"
                     >
-                      <Save className="w-2.5 h-2.5" />
-                      {isSaving ? "Saving..." : "Save to DB"}
+                      <Save className="w-3 h-3" />
+                      <span className="pane-label">{isSaving ? "Saving..." : "Save to DB"}</span>
                     </button>
                   </div>
                 </div>
@@ -466,82 +463,81 @@ export function EditorArea() {
                   </div>
                 ) : (
                   /* Header for Local Preset */
-                  <div className="relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-amber-950/30 border-b border-amber-500/30 px-3 flex items-center justify-between gap-2 text-[10px]">
-                    <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="pane-header relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-amber-950/30 border-b border-amber-500/30 pl-3 pr-1.5 flex items-center justify-between gap-3 text-[11px]">
+                    {/* Kiri: nama file boleh terpotong, path lengkap di tooltip */}
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden" title={`Preset Lokal: ${localFilePath || splitTitle}`}>
                       <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span className="font-semibold text-amber-200 shrink-0">Window Preset Lokal:</span>
-                      <span className="font-mono text-amber-300 truncate max-w-[170px] bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20 text-[9px]" title={localFilePath || splitTitle}>
-                        {splitTitle}
-                      </span>
+                      <span className="font-medium text-amber-200 truncate min-w-[3rem]">{splitTitle}</span>
                       {isLocalDirty && (
-                        <span className="bg-rose-500/20 text-rose-300 px-1 py-0.2 rounded font-mono text-[9px] shrink-0" title="Ada perubahan yang belum disimpan ke file">
-                          Belum disimpan
-                        </span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" title="Ada perubahan yang belum disimpan ke file" />
                       )}
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto">
-                      <button
-                        onClick={handleSaveLocalFile}
-                        disabled={!localFilePath || !isLocalDirty || isSavingLocal}
-                        className="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-medium flex items-center gap-1 shadow-sm transition disabled:opacity-40"
-                        title={localFilePath ? `Simpan ke ${localFilePath} (versi lama jadi .bak)` : "Buka file dari katalog Presets untuk mengedit file lokal"}
-                      >
-                        <Save className="w-2.5 h-2.5" />
-                        {isSavingLocal ? "Menyimpan..." : "Simpan File"}
-                      </button>
+
+                    {/* Aksi: Simpan File sebagai tombol utama, sisanya ghost / icon-only */}
+                    <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         onClick={handleFormatLocal}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px]"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Rapikan format JSON (indent 2 spasi)"
                       >
-                        {"{ }"}
+                        <Braces className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleRevertLocal}
                         disabled={!isLocalDirty}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center disabled:opacity-30"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition disabled:opacity-30 disabled:hover:bg-transparent"
                         title="Batalkan perubahan, kembali ke isi file terakhir"
                       >
-                        <RotateCcw className="w-2.5 h-2.5" />
+                        <RotateCcw className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleCopyLiveToLocal}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Salin isi window Database ke window lokal (belum menyimpan file)"
                       >
-                        <Download className="w-2.5 h-2.5" />
-                      </button>
-                      <span className="w-px h-4 bg-slate-700" />
-                      <button
-                        onClick={handleApplyPresetToLive}
-                        className="px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 border border-cyan-500/40 text-[10px] flex items-center gap-1 transition"
-                        title="Terapkan isi window lokal ke editor database live (sebelah kiri) untuk di-review"
-                      >
-                        <ArrowLeft className="w-2.5 h-2.5" /> Terapkan ke Live
-                      </button>
-                      <button
-                        onClick={handleSyncPresetSingleToDb}
-                        className="px-2 py-0.5 rounded bg-emerald-600/30 text-emerald-300 hover:bg-emerald-600/50 border border-emerald-500/40 text-[10px] flex items-center gap-1 font-semibold transition"
-                        title="Kirim isi window lokal ke database untuk config aktif (+ catat history)"
-                      >
-                        <Zap className="w-2.5 h-2.5 text-emerald-400" /> Sync ke DB
+                        <Download className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleCopyMissingViews}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1"
-                        title="Salin views yang belum ada dari preset ke editor"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
+                        title="Missing Views: salin views yang belum ada dari preset ke editor"
                       >
-                        <Copy className="w-2.5 h-2.5" /> Missing Views
+                        <Copy className="w-3.5 h-3.5" />
                       </button>
+                      <span className="w-px h-4 bg-slate-700/70 mx-1" />
+                      <button
+                        onClick={handleApplyPresetToLive}
+                        className="h-6 px-2 rounded-md text-cyan-300 hover:text-cyan-200 hover:bg-slate-800 flex items-center gap-1.5 transition"
+                        title="Terapkan isi window lokal ke editor database live (sebelah kiri) untuk di-review"
+                      >
+                        <ArrowLeft className="w-3 h-3" /> <span className="pane-label">Terapkan</span>
+                      </button>
+                      <button
+                        onClick={handleSyncPresetSingleToDb}
+                        className="h-6 px-2 rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-slate-800 flex items-center gap-1.5 transition"
+                        title="Sync ke DB: kirim isi window lokal ke database untuk config aktif (+ catat history)"
+                      >
+                        <Zap className="w-3 h-3" /> <span className="pane-label">Sync</span>
+                      </button>
+                      <button
+                        onClick={handleSaveLocalFile}
+                        disabled={!localFilePath || !isLocalDirty || isSavingLocal}
+                        className="h-6 px-2.5 ml-0.5 rounded-md bg-amber-600 hover:bg-amber-500 text-white font-medium flex items-center gap-1.5 shadow-sm transition disabled:opacity-40 disabled:hover:bg-amber-600"
+                        title={localFilePath ? `Simpan ke ${localFilePath} (versi lama jadi .bak)` : "Buka file dari katalog Presets untuk mengedit file lokal"}
+                      >
+                        <Save className="w-3 h-3" />
+                        <span className="pane-label">{isSavingLocal ? "Menyimpan..." : "Simpan"}</span>
+                      </button>
+                      <span className="w-px h-4 bg-slate-700/70 mx-1" />
                       <button
                         onClick={() => {
                           if (isLocalDirty && !confirm("Window lokal punya perubahan yang belum disimpan ke file. Tutup dan buang perubahan?")) return;
                           setIsSplitScreen(false);
                         }}
-                        className="text-slate-400 hover:text-slate-200 p-0.5"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Tutup window preset"
                       >
-                        <X className="w-3 h-3" />
+                        <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
