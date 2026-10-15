@@ -7,10 +7,21 @@ export interface Tenant {
   groupId: string | null;
   name: string;
   code: string;
+  /** client_code tanpa akhiran env (IDM_PROD -> IDM): penghubung tenant yang sama di env berbeda */
+  baseCode?: string;
   environment: string;
   tags: string[];
   notes: string;
   totalConfigs: number;
+}
+
+/** Klien yang terdaftar di env lain tetapi belum ada di env aktif (saran saat mendaftarkan tenant) */
+export interface TenantSuggestion {
+  baseCode: string;
+  name: string;
+  envs: string[];
+  /** Terisi hanya untuk GLOBAL_DEFAULT (id sama di semua env) */
+  tenantId: string | null;
 }
 
 export interface ConfigItem {
@@ -86,6 +97,8 @@ export interface TargetEnvInfo {
   color: string;
   readonly: boolean;
   protected: boolean;
+  /** Akhiran client_code tenant di env ini, mis. "_PROD" */
+  tenantCodeSuffix?: string;
   hostMasked: string;
   source: string;
   status?: { ok: boolean; error?: string; ms?: number };

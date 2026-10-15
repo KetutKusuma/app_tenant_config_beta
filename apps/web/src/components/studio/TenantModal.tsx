@@ -1,10 +1,16 @@
-import { Building2, X } from "lucide-react";
+import { Building2, Trash2, X } from "lucide-react";
 import { useStudio } from "../../studio/StudioContext";
 
 export function TenantModal() {
   const {
-    handleTenantFormSubmit, isEditingTenant, setShowTenantModal, setTenantForm, showTenantModal, tenantForm
+    handleTenantFormSubmit, isEditingTenant, setShowTenantModal, setTenantForm, setTenantToDelete, showTenantModal,
+    targetEnvName, targetEnvs, tenantForm, tenants
   } = useStudio();
+  // Saat edit: tenant yang sedang diedit (untuk tombol hapus dari daftar env aktif)
+  const editingTenant = isEditingTenant ? tenants.find(t => t.tenantId === tenantForm.tenantId) : undefined;
+  // Tenant disimpan per target env; kode otomatis diberi akhiran env (mis. IDM -> IDM_PROD) oleh BFF
+  const activeEnv = targetEnvs.find(e => e.name === targetEnvName);
+  const codeSuffix = activeEnv?.tenantCodeSuffix || "";
   return (
     <>
       {/* Modal: Tambah / Edit Label Tenant */}
@@ -67,18 +73,22 @@ export function TenantModal() {
                   <label className="block text-slate-400 mb-1">Kode Singkat (Code)</label>
                   <input 
                     type="text" 
-                    placeholder="Contoh: IDM"
+                    placeholder={`Contoh: IDM${codeSuffix}`}
                     value={tenantForm.clientCode}
                     onChange={(e) => setTenantForm({ ...tenantForm, clientCode: e.target.value })}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 uppercase focus:outline-none focus:border-indigo-500"
                   />
+                  {codeSuffix && (
+                    <span className="text-[10px] text-slate-500">Akhiran <span className="font-mono text-amber-300">{codeSuffix}</span> ditambahkan otomatis.</span>
+                  )}
                 </div>
                 <div>
                   <label className="block text-slate-400 mb-1">Environment</label>
                   <input 
                     type="text" 
                     readOnly
-                    value="development"
+                    value={activeEnv ? `${activeEnv.label} (${activeEnv.name})` : targetEnvName}
+                    title="Tenant disimpan untuk target env yang sedang aktif"
                     className="w-full bg-slate-950/60 border border-slate-800 rounded-lg px-3 py-2 text-amber-300 font-mono text-xs cursor-not-allowed"
                   />
                 </div>
@@ -106,7 +116,20 @@ export function TenantModal() {
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex items-center justify-end gap-2 pt-2">
+                {editingTenant && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowTenantModal(false);
+                      setTenantToDelete(editingTenant);
+                    }}
+                    className="mr-auto flex items-center gap-1.5 px-3 py-2 rounded-lg text-rose-300 hover:text-rose-200 hover:bg-rose-500/10 transition"
+                    title={`Hapus dari daftar env ${activeEnv?.label || targetEnvName} (config di database tidak dihapus)`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> Hapus dari daftar
+                  </button>
+                )}
                 <button 
                   type="button"
                   onClick={() => setShowTenantModal(false)}

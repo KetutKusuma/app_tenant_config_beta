@@ -15,7 +15,8 @@ export function useCoreActions(s: StudioState) {
     setIsSplitScreen, setJsonContent, setLocalFileOriginalContent, setLocalFilePath, setOriginalContent,
     setPresetDirPath, setPresetInputPath, setReferences, setSelectedConfigId, setSelectedTenant,
     setShowValidationPanel, setSplitJsonContent, setSplitMode, setSplitSourceType, setSplitTitle,
-    setStatusMessage, setTargetEnvName, setTargetEnvs, setTenants, setUser, setValidationIssues,
+    setStatusMessage, setTargetEnvName, setTargetEnvs, setTenantSuggestions, setTenants, setTenantsWarning,
+    setUser, setValidationIssues,
     splitJsonContent, targetEnvName, targetEnvs, tenants, user
   } = s;
 
@@ -41,23 +42,52 @@ export function useCoreActions(s: StudioState) {
     };
   }, []);
 
+  // Daftar tenant SELALU diganti sesuai env aktif, termasuk saat kosong: jangan biarkan tenant env
+  // sebelumnya (tenant_id dev) tetap tampil dan terpakai untuk membaca DB env lain.
+  // selectCode boleh kode penuh (IDM_PROD) atau kode dasar (IDM): saat pindah env, tenant yang sama
+  // dicari lewat kode dasar karena tenant_id & client_code-nya berbeda di tiap env.
   const fetchTenants = async (selectCode?: string) => {
     try {
       const res = await api("/api/tenants");
       const json = await res.json();
-      if (json.data && json.data.length > 0) {
-        setTenants(json.data);
-        const target = selectCode 
-          ? json.data.find((t: Tenant) => t.code === selectCode) 
-          : (json.data.find((t: Tenant) => t.tenantId === user.preferences.lastTenantId)
-            || json.data.find((t: Tenant) => t.code === "IDM")
-            || json.data[0]);
-        if (target) {
-          selectTenant(target);
-        }
+      if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+      const list: Tenant[] = json.data || [];
+      setTenants(list);
+      setTenantsWarning(json.targetError ? `DB target tidak terjangkau: ${json.targetError}` : null);
+      if (list.length === 0) {
+        clearSelectedTenant();
+        fetchTenantSuggestions();
+        return;
       }
-    } catch (err) {
+      setTenantSuggestions([]);
+      const byCode = (code: string) =>
+        list.find(t => t.code === code) || list.find(t => (t.baseCode || t.code) === code);
+      const target = (selectCode && byCode(selectCode))
+        || list.find(t => t.tenantId === user.preferences.lastTenantId)
+        || byCode("IDM")
+        || list[0];
+      selectTenant(target);
+    } catch (err: any) {
       console.error("Gagal mengambil tenant list:", err);
+      setTenants([]);
+      clearSelectedTenant();
+      setTenantsWarning(`Gagal memuat daftar tenant: ${err.message}`);
+    }
+  };
+
+  const clearSelectedTenant = () => {
+    setSelectedTenant(null);
+    setCurrentGroupId("");
+    resetWorkspace();
+  };
+
+  const fetchTenantSuggestions = async () => {
+    try {
+      const res = await api("/api/tenants/catalog");
+      const json = await res.json();
+      setTenantSuggestions(res.ok ? json.data || [] : []);
+    } catch {
+      setTenantSuggestions([]);
     }
   };
 
@@ -169,7 +199,7 @@ export function useCoreActions(s: StudioState) {
     setTargetEnvName(next);
     resetWorkspace();
     savePreferences({ lastTargetEnv: next });
-    await fetchTenants(selectedTenant?.code);
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
     const env = targetEnvs.find(e => e.name === next);
     setStatusMessage(`🌐 Target env: ${env?.label || next}${env?.readonly ? " (read-only)" : ""}`);
     setTimeout(() => setStatusMessage(null), 3000);
@@ -187,7 +217,7 @@ export function useCoreActions(s: StudioState) {
       : user.preferences.presetDirTenant || "";
     fetchReferences(nextDir);
     // Muat ulang daftar tenant (jumlah config per domain) dan pertahankan tenant yang sedang dipilih
-    await fetchTenants(selectedTenant?.code);
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
     setStatusMessage(`🔀 Domain aktif: ${DOMAIN_LABEL[next]}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };

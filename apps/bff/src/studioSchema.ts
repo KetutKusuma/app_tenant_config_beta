@@ -51,4 +51,34 @@ export async function migrateTargetEnvColumns() {
     `);
     console.log("🌐 preset_links & history dipisah per target env.");
   }
+  await migrateTenantMetadataEnv();
+}
+
+// tenant_metadata dipisah per target env: tenant_id (dan group_id, client_code) berbeda di dev/staging/prod.
+// Baris lama milik env di kolom `environment` (selama ini selalu 'development') DAN env default,
+// karena sebelum fitur ini daftar tenant yang sama dipakai di semua env.
+async function migrateTenantMetadataEnv() {
+  const pk = await auditDb.query(`
+    SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+    WHERE conrelid = 'tenant_studio.tenant_metadata'::regclass AND contype = 'p';
+  `);
+  if (pk.rows[0] && String(pk.rows[0].def).includes("target_env")) return;
+  const legacyEnv = esc(defaultEnvName());
+  // Satu query multi-statement = satu transaksi implisit: gagal di tengah = tidak ada yang berubah
+  await auditDb.query(`
+    ALTER TABLE tenant_studio.tenant_metadata ADD COLUMN IF NOT EXISTS target_env text;
+    UPDATE tenant_studio.tenant_metadata
+      SET target_env = COALESCE(NULLIF(environment, ''), ${legacyEnv}) WHERE target_env IS NULL;
+    ALTER TABLE tenant_studio.tenant_metadata ALTER COLUMN target_env SET NOT NULL;
+    ALTER TABLE tenant_studio.tenant_metadata DROP CONSTRAINT IF EXISTS tenant_metadata_pkey;
+    ALTER TABLE tenant_studio.tenant_metadata ADD PRIMARY KEY (target_env, tenant_id);
+    INSERT INTO tenant_studio.tenant_metadata
+      (target_env, tenant_id, group_id, client_name, client_code, environment, tags, notes, created_at, updated_at)
+    SELECT ${legacyEnv}, tenant_id, group_id, client_name, client_code, ${legacyEnv}, tags, notes, created_at, updated_at
+    FROM tenant_studio.tenant_metadata
+    WHERE target_env <> ${legacyEnv}
+    ON CONFLICT (target_env, tenant_id) DO NOTHING;
+    UPDATE tenant_studio.tenant_metadata SET environment = target_env;
+  `);
+  console.log("🌐 tenant_metadata dipisah per target env.");
 }

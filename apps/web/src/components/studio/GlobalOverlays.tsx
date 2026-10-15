@@ -4,8 +4,9 @@ import { useStudio } from "../../studio/StudioContext";
 
 export function GlobalOverlays() {
   const {
-    ctxMenu, envConfirm, promptDialog, setCtxMenu, setEnvConfirm, setPromptDialog, setShowChangePassword,
-    setStatusMessage, setUser, showChangePassword, statusMessage, targetEnvs, user
+    ctxMenu, envConfirm, handleDeleteTenant, promptDialog, setCtxMenu, setEnvConfirm, setPromptDialog,
+    setShowChangePassword, setStatusMessage, setTenantToDelete, setUser, showChangePassword, statusMessage,
+    targetEnvName, targetEnvs, tenantToDelete, user
   } = useStudio();
   return (
     <>
@@ -54,6 +55,24 @@ export function GlobalOverlays() {
             />
           </div>
         </div>
+      )}
+
+      {tenantToDelete && (
+        <TypeToConfirmDialog
+          title={`Hapus ${tenantToDelete.name} dari daftar tenant`}
+          description={
+            <>
+              Hanya menghapus tenant ini dari daftar Studio untuk env{" "}
+              <b className="text-slate-200">{targetEnvs.find(e => e.name === targetEnvName)?.label || targetEnvName}</b>.
+              Config tenant di database (<span className="font-mono">{tenantToDelete.totalConfigs} config</span>) dan
+              daftar tenant di env lain tidak disentuh. Tenant bisa didaftarkan lagi kapan saja.
+            </>
+          }
+          expected={tenantToDelete.code}
+          confirmLabel="Hapus dari daftar"
+          onConfirm={() => handleDeleteTenant(tenantToDelete)}
+          onCancel={() => setTenantToDelete(null)}
+        />
       )}
 
       {promptDialog && (

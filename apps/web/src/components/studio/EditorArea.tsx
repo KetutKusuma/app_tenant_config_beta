@@ -1,9 +1,26 @@
-import Editor, { DiffEditor } from "@monaco-editor/react";
+import Editor, { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
+import { useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle, ArrowLeft, ArrowLeftRight, Braces, Check, Copy, Database, Download, FileCode, FolderOpen,
-  History, RefreshCw, RotateCcw, Save, X, Zap
+  AlertTriangle, ArrowLeft, ArrowLeftRight, Braces, Check, ChevronDown, ChevronUp, Copy, Database, Download,
+  FileCode, FolderOpen, History, RefreshCw, RotateCcw, Save, X, Zap
 } from "lucide-react";
+import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
+
+type DiffEditorInstance = Parameters<DiffOnMount>[0];
+
+// Konstanta di luar komponen agar @monaco-editor/react tidak memanggil updateOptions di setiap render
+const DIFF_OPTIONS = {
+  fontSize: 13,
+  minimap: { enabled: false },
+  renderSideBySide: true,
+  readOnly: false,
+  // Baris yang sama dilipat; tersisa 3 baris konteks di sekitar perubahan (lipatan bisa dibuka dengan klik)
+  hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 5, revealLineCount: 20 },
+  renderOverviewRuler: true,
+  scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+  overviewRulerBorder: false
+};
 
 export function EditorArea() {
   const {
@@ -19,6 +36,30 @@ export function EditorArea() {
     setJsonDeltaDirection, setJsonDeltaFormat, setSplitJsonContent, setSplitMode, splitJsonContent,
     splitMode, splitSourceType, splitTitle, tenants
   } = useStudio();
+
+  // Visual Diff: jumlah blok perubahan + navigasi ke perubahan berikutnya/sebelumnya
+  const diffEditorRef = useRef<DiffEditorInstance | null>(null);
+  const [diffChangeCount, setDiffChangeCount] = useState<number | null>(null);
+  const handleDiffMount: DiffOnMount = (editor) => {
+    diffEditorRef.current = editor;
+    const update = () => setDiffChangeCount(editor.getLineChanges()?.length ?? null);
+    update();
+    editor.onDidUpdateDiff(update);
+  };
+  const isDiffVisible = isSplitScreen && splitMode === "diff";
+  useEffect(() => {
+    if (!isDiffVisible) {
+      diffEditorRef.current = null;
+      setDiffChangeCount(null);
+    }
+  }, [isDiffVisible]);
+  const goToDiff = (target: "next" | "previous") => {
+    const editor = diffEditorRef.current;
+    if (!editor) return;
+    editor.goToDiff(target);
+    editor.getModifiedEditor().focus();
+  };
+
   return (
     <>
       {/* Editor Area */}
@@ -71,31 +112,39 @@ export function EditorArea() {
                   </span>
                 </div>
 
-                {/* Aksi: satu tombol utama, sisanya ghost / icon-only */}
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    onClick={
-                      splitSourceType === "tenant" ? handleApplyCompareToLive
-                      : splitSourceType === "db" ? handleApplyDbSnapshot
-                      : handleApplyPresetToLive
-                    }
-                    className="h-6 px-2.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium flex items-center gap-1.5 shadow-sm shadow-cyan-950/50 transition"
-                    title={splitSourceType === "tenant"
-                      ? "Terapkan isi tenant pembanding ke tenant aktif (sebelah kanan)"
-                      : splitSourceType === "db"
-                      ? "Ganti isi editor dengan versi database terbaru (sebelah kiri)"
-                      : "Terapkan isi file preset ini ke konfigurasi database live (sebelah kanan)"}
+                {/* Aksi: navigasi perubahan + aksi ghost (tidak ada tombol penuh yang mencolok) */}
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <span
+                    className="text-[10px] text-slate-400 tabular-nums px-1"
+                    title="Jumlah blok perubahan antara kiri dan kanan"
                   >
-                    <ArrowLeft className="w-3 h-3" /> {splitSourceType === "db" ? "Pakai Versi DB" : "Terapkan ke Live"}
+                    {diffChangeCount === null ? "…" : diffChangeCount === 0 ? "Tidak ada perubahan" : `${diffChangeCount} perubahan`}
+                  </span>
+                  <button
+                    onClick={() => goToDiff("previous")}
+                    disabled={!diffChangeCount}
+                    className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition disabled:opacity-30 disabled:hover:bg-transparent"
+                    title="Perubahan sebelumnya"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" />
                   </button>
-                  {splitSourceType === "tenant" ? (
+                  <button
+                    onClick={() => goToDiff("next")}
+                    disabled={!diffChangeCount}
+                    className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition disabled:opacity-30 disabled:hover:bg-transparent"
+                    title="Perubahan berikutnya"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="w-px h-4 bg-slate-700/70 mx-1" />
+                  {splitSourceType === "tenant" && (
                     <>
                       <button
                         onClick={handleCopyMissingViews}
-                        className="h-6 px-2 rounded-md text-slate-300 hover:text-white hover:bg-slate-800 text-[11px] flex items-center gap-1.5 transition"
-                        title="Salin views yang belum ada dari tenant pembanding ke tenant aktif"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
+                        title="Missing Views: salin views yang belum ada dari tenant pembanding ke tenant aktif"
                       >
-                        <Copy className="w-3 h-3" /> Missing Views
+                        <Copy className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleSwapTenants}
@@ -105,13 +154,29 @@ export function EditorArea() {
                         <ArrowLeftRight className="w-3.5 h-3.5" />
                       </button>
                     </>
-                  ) : splitSourceType === "preset" && (
+                  )}
+                  <button
+                    onClick={
+                      splitSourceType === "tenant" ? handleApplyCompareToLive
+                      : splitSourceType === "db" ? handleApplyDbSnapshot
+                      : handleApplyPresetToLive
+                    }
+                    className="h-6 px-2 rounded-md text-cyan-300 hover:text-cyan-200 hover:bg-slate-800 flex items-center gap-1.5 transition"
+                    title={splitSourceType === "tenant"
+                      ? "Terapkan isi tenant pembanding (kiri) ke tenant aktif (kanan)"
+                      : splitSourceType === "db"
+                      ? "Ganti isi editor (kanan) dengan versi database terbaru (kiri)"
+                      : "Terapkan isi kiri ke editor database live (kanan) untuk di-review"}
+                  >
+                    <ArrowLeft className="w-3 h-3" /> {splitSourceType === "db" ? "Pakai Versi DB" : "Terapkan"}
+                  </button>
+                  {splitSourceType === "preset" && (
                     <button
                       onClick={handleSyncPresetSingleToDb}
-                      className="h-6 px-2 rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-slate-800 text-[11px] flex items-center gap-1.5 transition"
-                      title="Langsung sinkronkan file preset ini ke database untuk config aktif (+ rekam history)"
+                      className="h-6 px-2 rounded-md text-emerald-300 hover:text-emerald-200 hover:bg-slate-800 flex items-center gap-1.5 transition"
+                      title="Sync ke DB: langsung sinkronkan file preset ini ke database untuk config aktif (+ rekam history)"
                     >
-                      <Zap className="w-3 h-3" /> Sync ke DB
+                      <Zap className="w-3 h-3" /> Sync
                     </button>
                   )}
                   <span className="w-px h-4 bg-slate-700/70 mx-1" />
@@ -128,15 +193,12 @@ export function EditorArea() {
                 <DiffEditor
                   height="100%"
                   language="json"
-                  theme="vs-dark"
+                  theme={STUDIO_THEME}
+                  beforeMount={defineStudioTheme}
+                  onMount={handleDiffMount}
                   original={splitJsonContent}
                   modified={jsonContent}
-                  options={{
-                    fontSize: 13,
-                    minimap: { enabled: false },
-                    renderSideBySide: true,
-                    readOnly: false
-                  }}
+                  options={DIFF_OPTIONS}
                 />
               </div>
             </div>
@@ -251,7 +313,8 @@ export function EditorArea() {
                 <Editor
                   height="100%"
                   defaultLanguage="json"
-                  theme="vs-dark"
+                  theme={STUDIO_THEME}
+                  beforeMount={defineStudioTheme}
                   value={deltaJsonString}
                   options={{
                     readOnly: true,
@@ -315,7 +378,8 @@ export function EditorArea() {
                   <Editor
                     height="100%"
                     defaultLanguage="json"
-                    theme="vs-dark"
+                    theme={STUDIO_THEME}
+                    beforeMount={defineStudioTheme}
                     value={jsonContent}
                     onChange={(val) => setJsonContent(val || "")}
                     options={{
@@ -333,15 +397,17 @@ export function EditorArea() {
               <div className="flex-1 flex flex-col bg-slate-950 min-h-0 overflow-hidden">
                 {splitSourceType === "tenant" ? (
                   /* Header for Cross-Tenant Comparison */
-                  <div className="relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-purple-950/30 border-b border-purple-500/30 px-3 flex items-center justify-between gap-2 text-[10px]">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <ArrowLeftRight className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                      <span className="font-semibold text-purple-200 shrink-0">Tenant Pembanding:</span>
+                  <div className="pane-header relative z-10 h-8 shrink-0 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] whitespace-nowrap bg-purple-950/30 border-b border-purple-500/30 pl-3 pr-1.5 flex items-center justify-between gap-3 text-[11px]">
+                    {/* Kiri: pilihan tenant & config pembanding, boleh menyusut */}
+                    <div className="flex items-center gap-1 min-w-0 flex-1 overflow-hidden">
+                      <span title="Tenant Pembanding" className="shrink-0 flex">
+                        <ArrowLeftRight className="w-3.5 h-3.5 text-purple-400" />
+                      </span>
                       <select
                         value={compareTenant?.tenantId || ""}
                         onChange={(e) => handleSwitchCompareTenant(e.target.value)}
-                        className="bg-slate-900 border border-purple-500/40 rounded px-1.5 py-0.2 text-purple-300 font-medium text-[10px] focus:outline-none max-w-[130px] truncate"
-                        title="Ganti tenant pembanding"
+                        className="min-w-[4rem] max-w-[160px] shrink truncate h-6 bg-transparent hover:bg-slate-800 rounded-md px-1 text-purple-200 font-medium focus:outline-none focus:ring-1 focus:ring-purple-500/50 cursor-pointer"
+                        title={`Tenant Pembanding: ${compareTenant?.name || "-"} (klik untuk ganti)`}
                       >
                         {tenants.map(t => (
                           <option key={t.tenantId} value={t.tenantId}>
@@ -352,8 +418,8 @@ export function EditorArea() {
                       <select
                         value={compareConfigId || ""}
                         onChange={(e) => handleSwitchCompareConfig(e.target.value)}
-                        className="bg-slate-900 border border-purple-500/40 rounded px-1.5 py-0.2 text-purple-300 font-mono text-[9px] focus:outline-none max-w-[140px] truncate"
-                        title="Ganti jenis konfigurasi"
+                        className="min-w-[3rem] max-w-[150px] shrink truncate h-6 bg-transparent hover:bg-slate-800 rounded-md px-1 text-slate-400 font-mono text-[10px] focus:outline-none focus:ring-1 focus:ring-purple-500/50 cursor-pointer"
+                        title={`Config pembanding: ${compareConfigType || "-"} (klik untuk ganti)`}
                       >
                         {compareConfigs.map(c => (
                           <option key={c.id} value={c.id}>
@@ -362,68 +428,68 @@ export function EditorArea() {
                         ))}
                       </select>
                       {isCompareTenantDirty && (
-                        <span className="bg-rose-500/20 text-rose-300 px-1 py-0.2 rounded font-mono text-[9px] shrink-0" title="Ada perubahan pada window ini">
-                          Modified
-                        </span>
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0" title="Ada perubahan pada window ini yang belum disimpan" />
                       )}
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0 overflow-x-auto">
-                      <button
-                        onClick={handleSaveCompareTenant}
-                        disabled={!compareConfigId || !isCompareTenantDirty || isSavingCompareTenant}
-                        className="px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-medium flex items-center gap-1 shadow-sm transition disabled:opacity-40"
-                        title={`Simpan perubahan langsung ke database tenant ${compareTenant?.name}`}
-                      >
-                        <Save className="w-2.5 h-2.5" />
-                        {isSavingCompareTenant ? "Menyimpan..." : "Save to Tenant"}
-                      </button>
+                    {/* Aksi: Simpan sebagai tombol utama, sisanya ghost / icon-only */}
+                    <div className="flex items-center gap-0.5 shrink-0">
                       <button
                         onClick={handleFormatCompareTenant}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px]"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Rapikan format JSON (indent 2 spasi)"
                       >
-                        {"{ }"}
+                        <Braces className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleRevertCompareTenant}
                         disabled={!isCompareTenantDirty}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center disabled:opacity-30"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition disabled:opacity-30 disabled:hover:bg-transparent"
                         title="Batalkan perubahan ke isi awal tenant ini"
                       >
-                        <RotateCcw className="w-2.5 h-2.5" />
-                      </button>
-                      <span className="w-px h-4 bg-slate-700" />
-                      <button
-                        onClick={handleApplyCompareToLive}
-                        className="px-2 py-0.5 rounded bg-cyan-600/20 text-cyan-300 hover:bg-cyan-600/40 border border-cyan-500/40 text-[10px] flex items-center gap-1 transition"
-                        title="Terapkan isi window tenant ini ke editor live sebelah kiri"
-                      >
-                        <ArrowLeft className="w-2.5 h-2.5" /> Terapkan ke Live
+                        <RotateCcw className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleCopyMissingViews}
-                        className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 border border-slate-700 text-[10px] flex items-center gap-1"
-                        title="Salin views yang ada di tenant ini tetapi belum ada di tenant aktif"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
+                        title="Missing Views: salin views yang ada di tenant ini tetapi belum ada di tenant aktif"
                       >
-                        <Copy className="w-2.5 h-2.5" /> Missing Views
+                        <Copy className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={handleSwapTenants}
-                        className="px-2 py-0.5 rounded bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40 border border-indigo-500/40 text-[10px] flex items-center gap-1 font-medium transition"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-indigo-300 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Tukar posisi tenant (kiri <-> kanan)"
                       >
-                        <ArrowLeftRight className="w-2.5 h-2.5 text-indigo-400" /> Swap
+                        <ArrowLeftRight className="w-3.5 h-3.5" />
                       </button>
+                      <span className="w-px h-4 bg-slate-700/70 mx-1" />
+                      <button
+                        onClick={handleApplyCompareToLive}
+                        className="h-6 px-2 rounded-md text-cyan-300 hover:text-cyan-200 hover:bg-slate-800 flex items-center gap-1.5 transition"
+                        title="Terapkan isi window tenant ini ke editor live sebelah kiri"
+                      >
+                        <ArrowLeft className="w-3 h-3" /> <span className="pane-label">Terapkan</span>
+                      </button>
+                      <button
+                        onClick={handleSaveCompareTenant}
+                        disabled={!compareConfigId || !isCompareTenantDirty || isSavingCompareTenant}
+                        className="h-6 px-2.5 ml-0.5 rounded-md bg-purple-600 hover:bg-purple-500 text-white font-medium flex items-center gap-1.5 shadow-sm transition disabled:opacity-40 disabled:hover:bg-purple-600"
+                        title={`Simpan perubahan langsung ke database tenant ${compareTenant?.name}`}
+                      >
+                        <Save className="w-3 h-3" />
+                        <span className="pane-label">{isSavingCompareTenant ? "Menyimpan..." : "Simpan"}</span>
+                      </button>
+                      <span className="w-px h-4 bg-slate-700/70 mx-1" />
                       <button
                         onClick={() => {
                           if (isCompareTenantDirty && !confirm("Window tenant pembanding punya perubahan yang belum disimpan. Tutup split screen?")) return;
                           setIsSplitScreen(false);
                         }}
-                        className="text-slate-400 hover:text-slate-200 p-0.5"
+                        className="h-6 w-6 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
                         title="Tutup split perbandingan"
                       >
-                        <X className="w-3 h-3" />
+                        <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
@@ -546,7 +612,8 @@ export function EditorArea() {
                   <Editor
                     height="100%"
                     defaultLanguage="json"
-                    theme="vs-dark"
+                    theme={STUDIO_THEME}
+                    beforeMount={defineStudioTheme}
                     value={splitJsonContent}
                     onChange={(val) => setSplitJsonContent(val || "")}
                     options={{
@@ -567,7 +634,8 @@ export function EditorArea() {
             <Editor
               height="100%"
               defaultLanguage="json"
-              theme="vs-dark"
+              theme={STUDIO_THEME}
+              beforeMount={defineStudioTheme}
               value={jsonContent}
               onChange={(val) => setJsonContent(val || "")}
               options={{

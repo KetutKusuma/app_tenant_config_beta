@@ -1,5 +1,5 @@
 import { api } from "../lib/api";
-import type { ConfigItem, Tenant } from "../types";
+import type { ConfigItem, Tenant, TenantSuggestion } from "../types";
 import type { StudioState } from "./useStudioState";
 import type { CoreActions } from "./useCoreActions";
 
@@ -13,7 +13,7 @@ export function useCrudActions(ctx: StudioState & CoreActions) {
     setExportScope, setIncludeSkillPreset, setIsDeletingConfig, setIsEditingTenant, setIsExportingSkill,
     setIsSavingPreset, setJsonContent, setOriginalContent, setPresetSaveFilename, setPresetSaveTargetDir,
     setSavePresetStatus, setSelectedConfigId, setShowAddConfigModal, setShowDeleteConfigModal,
-    setShowSavePresetModal, setShowTenantModal, setStatusMessage, setTenantForm, tenantForm
+    setShowSavePresetModal, setShowTenantModal, setStatusMessage, setTenantForm, setTenantToDelete, tenantForm
   } = ctx;
 
   const openSavePresetModal = () => {
@@ -152,8 +152,8 @@ export function useCrudActions(ctx: StudioState & CoreActions) {
       const data = await res.json();
       if (data.success) {
         setShowTenantModal(false);
-        setStatusMessage(`✅ Metadata ${tenantForm.clientName} berhasil disimpan!`);
-        fetchTenants(tenantForm.clientCode);
+        setStatusMessage(`✅ ${data.message || `Metadata ${tenantForm.clientName} berhasil disimpan!`}`);
+        fetchTenants(data.code || tenantForm.clientCode);
         setTimeout(() => setStatusMessage(null), 4000);
       } else {
         alert("Gagal menyimpan tenant: " + (data.error || "Error"));
@@ -173,6 +173,36 @@ export function useCrudActions(ctx: StudioState & CoreActions) {
       clientCode: t.code,
       tags: t.tags ? t.tags.join(", ") : "",
       notes: t.notes || ""
+    });
+    setShowTenantModal(true);
+  };
+
+  // Hapus tenant dari daftar Studio env aktif (metadata saja; config di ats_db tetap utuh)
+  const handleDeleteTenant = async (tenant: Tenant) => {
+    try {
+      const res = await api(`/api/tenants/${encodeURIComponent(tenant.tenantId)}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setTenantToDelete(null);
+      setStatusMessage(`🗑️ ${data.message}`);
+      setTimeout(() => setStatusMessage(null), 4000);
+      // Tenant yang sedang dibuka ikut terhapus: muat ulang daftar & pilih tenant lain
+      await fetchTenants(selectedTenant?.tenantId === tenant.tenantId ? undefined : selectedTenant?.code);
+    } catch (err: any) {
+      alert("Gagal menghapus tenant: " + err.message);
+    }
+  };
+
+  // Daftarkan klien yang sudah ada di env lain: nama & kode terisi, tenant_id/group_id diisi manual (beda per env)
+  const openAddTenantFromSuggestion = (sug: TenantSuggestion) => {
+    setIsEditingTenant(false);
+    setTenantForm({
+      tenantId: sug.tenantId || "",
+      groupId: "",
+      clientName: sug.name,
+      clientCode: sug.baseCode,
+      tags: "",
+      notes: ""
     });
     setShowTenantModal(true);
   };
@@ -312,7 +342,7 @@ export function useCrudActions(ctx: StudioState & CoreActions) {
 
   return {
     openSavePresetModal, handleExportSkillOnly, handleSaveToPreset, handleTenantFormSubmit,
-    openEditTenantModal, openAddTenantModal, handleAddConfigSubmit, openDeleteConfigModal,
+    openEditTenantModal, openAddTenantModal, openAddTenantFromSuggestion, handleDeleteTenant, handleAddConfigSubmit, openDeleteConfigModal,
     handleDeleteConfigSubmit
   };
 }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { ContextMenuState } from "../components/ui";
 import { setActiveTargetEnv } from "../lib/api";
 import type {
-  AppProps, ConfigDomain, ConfigItem, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant
+  AppProps, ConfigDomain, ConfigItem, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant, TenantSuggestion
 } from "../types";
 import type { DeltaFormat } from "../utils/jsonDiff";
 
@@ -10,6 +10,11 @@ import type { DeltaFormat } from "../utils/jsonDiff";
 export function useStudioState({ user, setUser, onLogout }: AppProps) {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
+  // Daftar tenant selalu mengikuti target env aktif: saran klien dari env lain + peringatan DB target
+  const [tenantSuggestions, setTenantSuggestions] = useState<TenantSuggestion[]>([]);
+  const [tenantsWarning, setTenantsWarning] = useState<string | null>(null);
+  // Tenant yang akan dihapus dari daftar env aktif (dialog ketik-kode untuk konfirmasi)
+  const [tenantToDelete, setTenantToDelete] = useState<Tenant | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   
   const [configs, setConfigs] = useState<ConfigItem[]>([]);
@@ -135,7 +140,8 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
   const [savePresetStatus, setSavePresetStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   return {
-    user, setUser, onLogout, tenants, setTenants, selectedTenant, setSelectedTenant, searchQuery,
+    user, setUser, onLogout, tenants, setTenants, selectedTenant, setSelectedTenant, tenantSuggestions,
+    setTenantSuggestions, tenantsWarning, setTenantsWarning, tenantToDelete, setTenantToDelete, searchQuery,
     setSearchQuery, configs, setConfigs, selectedConfigId, setSelectedConfigId, activeConfigType,
     setActiveConfigType, currentGroupId, setCurrentGroupId, jsonContent, setJsonContent, originalContent,
     setOriginalContent, configVersion, setConfigVersion, configDomain, setConfigDomain, targetEnvs,

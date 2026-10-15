@@ -1,3 +1,9 @@
+> [!WARNING]
+> **ARSIP — jangan dijadikan acuan (dicek 2026-10-15).** Banyak bagian dokumen ini tidak sesuai kode dan database
+> sebenarnya: skema tabel (Bab 3), anatomi JSON config (Bab 5, nama field `source`/`display`/`type: "file"` tidak dipakai),
+> aturan `resolvePaths` (Bab 5.3/10/12, lihat `docs/NOTE_FOR_FUTURE.md`), Redis Streams (Bab 6, Studio tidak memakai Redis),
+> daftar endpoint (Bab 7), dan status Sync Center (Bab 8.5). Cek langsung ke kode `apps/` dan `docs/NOTE_FOR_FUTURE.md`.
+
 # MASTER PROJECT CONTEXT & ARCHITECTURAL HANDBOOK
 ## Tenant Configuration Studio (Beta) & ATS Multi-Tenant Ecosystem
 > **Dokumen Panduan Konteks Lengkap untuk AI Coding Agents, Software Architects, dan Platform Engineers**  

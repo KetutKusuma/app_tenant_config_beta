@@ -211,7 +211,9 @@ router.post("/api/references/export-bulk", async (req, res) => {
     const { rows } = await req.targetDb!.query(query);
 
     // Ambil info metadata tenant untuk nama folder yang rapi
-    const tenantMetaRes = await auditDb.query("SELECT tenant_id, client_name, client_code FROM tenant_studio.tenant_metadata");
+    const tenantMetaRes = await auditDb.query(
+      `SELECT tenant_id, client_name, client_code FROM tenant_studio.tenant_metadata WHERE target_env = ${esc(req.targetEnv!.name)}`
+    );
     const tenantMap = new Map<string, string>();
     tenantMetaRes.rows.forEach(r => {
       tenantMap.set(r.tenant_id, r.client_name || r.client_code);

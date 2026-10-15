@@ -24,6 +24,8 @@ export interface TargetEnvProfile {
   readonly: boolean;
   /** true = operasi tulis wajib konfirmasi ketik nama profil (header X-Confirm-Env) */
   protected: boolean;
+  /** Akhiran client_code tenant di env ini (mis. "_PROD": IDM_PROD). Kode dasar (IDM) menghubungkan tenant antar env */
+  tenantCodeSuffix: string;
   hostMasked: string;
   source: string;
 }
@@ -109,6 +111,7 @@ function loadProfiles(): Map<string, LoadedProfile> {
         color: vars.STUDIO_ENV_COLOR || "slate",
         readonly: truthy(vars.STUDIO_ENV_READONLY),
         protected: truthy(vars.STUDIO_ENV_PROTECTED),
+        tenantCodeSuffix: (vars.STUDIO_TENANT_CODE_SUFFIX || "").trim().toUpperCase(),
         hostMasked: maskHost(host),
         source: `envs/${file}`,
         mtimeMs,
@@ -130,6 +133,7 @@ function loadProfiles(): Map<string, LoadedProfile> {
       color: "slate",
       readonly: false,
       protected: false,
+      tenantCodeSuffix: "",
       hostMasked: maskHost(host),
       source: ".env",
       mtimeMs: 0,
@@ -152,6 +156,12 @@ function loadProfiles(): Map<string, LoadedProfile> {
 export function listProfiles(): { profiles: TargetEnvProfile[]; errors: string[]; defaultEnv: string } {
   const profiles = [...loadProfiles().values()].map(({ mtimeMs: _m, poolConfig: _c, ...p }) => p);
   return { profiles, errors: [...loadErrors.values()], defaultEnv: defaultEnvName() };
+}
+
+/** Kode dasar tenant: client_code tanpa akhiran env (IDM_PROD -> IDM), dipakai untuk mencocokkan tenant antar env */
+export function baseTenantCode(code: string, suffix: string): string {
+  const upper = (code || "").toUpperCase();
+  return suffix && upper.endsWith(suffix) && upper.length > suffix.length ? upper.slice(0, -suffix.length) : upper;
 }
 
 export function defaultEnvName(): string {
