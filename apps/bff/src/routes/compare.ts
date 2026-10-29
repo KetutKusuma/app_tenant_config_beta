@@ -5,7 +5,7 @@ import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
 import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
-import { planCopy, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
+import { TargetChangedError, isCommitUncertain, planCopy, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
@@ -253,7 +253,8 @@ router.post("/api/compare/copy", async (req, res) => {
     if (plan.create.length + plan.overwrite.length === 0) {
       return res.status(400).json({ error: "Tidak ada config yang perlu disalin: semua sama, hanya ada di tujuan, atau ganda." });
     }
-    // Tujuan berubah sejak dibandingkan → batal seluruhnya, belum ada batch/cadangan yang dibuat.
+    // Tujuan berubah sejak dibandingkan, atau sumber punya config yang tidak ada di ringkasan yang dikonfirmasi
+    // → batal seluruhnya, belum ada batch/cadangan yang dibuat.
     const stale = staleConfigTypes(plan, expectedTargetVersions, tgtRows);
     if (stale.length) return res.status(409).json({ code: "TARGET_CHANGED", error: TARGET_CHANGED_ERROR, configTypes: stale });
 
@@ -312,7 +313,12 @@ router.post("/api/compare/copy", async (req, res) => {
       },
     });
   } catch (err: any) {
-    res.status(500).json({ error: err?.message ?? String(err), batchId });
+    const body: Record<string, unknown> = { error: err?.message ?? String(err), batchId };
+    // Tujuan berubah di tengah tulis (sudah di-ROLLBACK): UI bisa menawarkan muat ulang.
+    if (err instanceof TargetChangedError) Object.assign(body, { code: err.code, configTypes: [err.configType] });
+    // COMMIT mungkin sudah masuk: cadangan isi lama tetap disimpan, user perlu memeriksa tujuan.
+    if (isCommitUncertain(err)) body.commitUncertain = true;
+    res.status(500).json(body);
   }
 });
 

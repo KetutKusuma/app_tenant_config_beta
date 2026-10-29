@@ -23,10 +23,16 @@ export function planCopy(entries: CompareEntry[]): CopyPlan {
   return plan;
 }
 
+// Tipe yang akan ditulis tetapi tidak ada di expected = tidak pernah dilihat user saat konfirmasi → stale.
+// null eksplisit = "diharapkan belum ada di tujuan".
 export function staleConfigTypes(plan: CopyPlan, expected: Record<string, string | null>, currentTarget: ConfigRow[]): string[] {
   const types = [...plan.create.map((r) => r.config_type), ...plan.overwrite.map((o) => o.source.config_type)];
   const stale = new Set<string>();
   for (const type of types) {
+    if (!Object.prototype.hasOwnProperty.call(expected, type)) {
+      stale.add(type);
+      continue;
+    }
     const current = currentTarget.find((r) => r.config_type === type)?.version_token ?? null;
     if (current !== (expected[type] ?? null)) stale.add(type);
   }
@@ -43,6 +49,29 @@ export interface CopyDeps {
 }
 
 const msgOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+export const COMMIT_UNCERTAIN_MESSAGE = "Hasil COMMIT tidak pasti; periksa tujuan. Cadangan isi lama tetap disimpan.";
+
+/** Statement COMMIT melempar: transaksi mungkin sudah tersimpan di server, jadi cadangan isi lama tidak boleh dibuang. */
+export class CommitUncertainError extends Error {
+  readonly commitUncertain = true as const;
+  constructor(cause: unknown) {
+    super(`Hasil COMMIT tidak pasti, periksa tujuan: ${msgOf(cause)}`, { cause });
+    this.name = "CommitUncertainError";
+  }
+}
+export function isCommitUncertain(e: unknown): boolean {
+  return (e as { commitUncertain?: unknown } | null)?.commitUncertain === true;
+}
+
+/** UPDATE/INSERT kena 0 baris: tujuan berubah di tengah salin (transaksi di-ROLLBACK). */
+export class TargetChangedError extends Error {
+  readonly code = "TARGET_CHANGED" as const;
+  constructor(message: string, readonly configType: string) {
+    super(message);
+    this.name = "TargetChangedError";
+  }
+}
 
 export async function runCopy(plan: CopyPlan, deps: CopyDeps): Promise<{ batchId: string; warnings: string[] }> {
   const batchId = await deps.createBatch();
@@ -63,7 +92,10 @@ export async function runCopy(plan: CopyPlan, deps: CopyDeps): Promise<{ batchId
   try {
     created = await deps.writeTarget(plan);
   } catch (e) {
-    return fail(e);
+    if (!isCommitUncertain(e)) return fail(e);
+    // COMMIT mungkin sudah masuk: cadangan isi lama TIDAK dibuang.
+    try { await deps.finishBatch(batchId, "gagal", COMMIT_UNCERTAIN_MESSAGE); } catch (fe) { console.error("finishBatch gagal:", fe); }
+    throw e;
   }
 
   const warnings: string[] = [];
@@ -98,7 +130,9 @@ const jsonb = (v: any) => `${esc(JSON.stringify(v))}::jsonb`;
 
 /**
  * Semua UPDATE + INSERT dalam satu transaksi: berhasil semua atau tidak ada yang tertulis.
- * UPDATE dikunci versi (updated_at::text); INSERT dilewati bila config sudah ada. Keduanya 0 baris → throw → ROLLBACK.
+ * Advisory lock per (tabel, tenant tujuan) menyerialkan Salin ke tenant yang sama, sehingga NOT EXISTS pada INSERT
+ * melihat baris yang di-commit Salin lain. UPDATE dikunci versi (updated_at::text); INSERT dilewati bila config sudah
+ * ada. Keduanya 0 baris → TargetChangedError → ROLLBACK. Error dari statement COMMIT → CommitUncertainError.
  * Mengembalikan baris baru (id baru) agar versi 1-nya bisa dicatat di History.
  */
 export async function writeCopyTx(
@@ -113,6 +147,11 @@ export async function writeCopyTx(
   let broken: Error | undefined;
   try {
     await client.query("BEGIN");
+    const lockKey = `${t.table}:${target.tenantId ?? "GLOBAL_DEFAULT"}`;
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext(${esc(lockKey)}));`);
+    // esc() hanya menggandakan kutip: pastikan backslash tidak diperlakukan sebagai escape.
+    await client.query("SET LOCAL standard_conforming_strings = on;");
+    await client.query("SET LOCAL lock_timeout = '5s';");
 
     for (const { source, target: old } of plan.overwrite) {
       const pathSet = t.hasPath ? `, path = ${esc(source.path || defaultPath(source.config_type))}` : "";
@@ -122,7 +161,7 @@ export async function writeCopyTx(
         WHERE id = ${esc(old.id)} AND updated_at::text = ${esc(old.version_token)} AND deleted_at IS NULL;
       `);
       if (r.rowCount !== 1) {
-        throw new Error(`Config ${source.config_type} di tujuan berubah saat proses salin. Tidak ada yang ditulis. Muat ulang perbandingan.`);
+        throw new TargetChangedError(`Config ${source.config_type} di tujuan berubah saat proses salin. Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
       }
     }
 
@@ -140,7 +179,7 @@ export async function writeCopyTx(
         RETURNING updated_at::text AS version_token;
       `);
       if (r.rowCount !== 1) {
-        throw new Error(`Config ${source.config_type} sudah ada di tujuan (dibuat saat proses salin). Tidak ada yang ditulis. Muat ulang perbandingan.`);
+        throw new TargetChangedError(`Config ${source.config_type} sudah ada di tujuan (dibuat saat proses salin). Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
       }
       created.push({
         id, tenant_id: target.tenantId, group_id: target.groupId, config_type: source.config_type, path,
@@ -148,7 +187,11 @@ export async function writeCopyTx(
       });
     }
 
-    await client.query("COMMIT");
+    try {
+      await client.query("COMMIT");
+    } catch (commitErr) {
+      throw new CommitUncertainError(commitErr);
+    }
     return created;
   } catch (err) {
     try {
