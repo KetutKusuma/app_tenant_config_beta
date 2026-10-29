@@ -77,6 +77,9 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
   const [compareModalConfigType, setCompareModalConfigType] = useState<string>("");
   const [compareModalMode, setCompareModalMode] = useState<"side-by-side" | "diff" | "json-delta">("side-by-side");
 
+  // Layar Bandingkan antar env (satu tenant di dua env, semua config)
+  const [showEnvCompare, setShowEnvCompare] = useState(false);
+
   // JSON Delta State (Structural JSON Diff)
   const [jsonDeltaFormat, setJsonDeltaFormat] = useState<DeltaFormat>("full");
   const [jsonDeltaDirection, setJsonDeltaDirection] = useState<"left-to-right" | "right-to-left">("left-to-right");
@@ -154,7 +157,7 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     compareTenant, setCompareTenant, compareConfigId, setCompareConfigId, compareConfigType,
     setCompareConfigType, compareConfigs, setCompareConfigs, compareTenantOriginalContent,
     setCompareTenantOriginalContent, compareConfigVersion, setCompareConfigVersion, isSavingCompareTenant,
-    setIsSavingCompareTenant, isCompareTenantDirty, showCompareTenantModal, setShowCompareTenantModal,
+    setIsSavingCompareTenant, isCompareTenantDirty, showCompareTenantModal, setShowCompareTenantModal, showEnvCompare, setShowEnvCompare,
     compareModalTenantId, setCompareModalTenantId, compareModalConfigType, setCompareModalConfigType,
     compareModalMode, setCompareModalMode, jsonDeltaFormat, setJsonDeltaFormat, jsonDeltaDirection,
     setJsonDeltaDirection, deltaCopied, setDeltaCopied, presetDirPath, setPresetDirPath, presetInputPath,

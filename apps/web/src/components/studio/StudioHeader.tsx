@@ -12,7 +12,7 @@ export function StudioHeader() {
     activeConfigType, configDomain, copiedTenantId, copyToClipboard, currentGroupId, fetchTargetEnvs,
     handleCompareWithDb, handleCompareWithOriginal, handleSave, handleSwitchTargetEnv, handleValidate,
     handleValidateAndSave, histories, isSaving, isSplitScreen, isTargetReadonly, jsonContent, onLogout,
-    openCompareTenantModal, openEditTenantModal, openSavePresetModal, openSyncCenter, originalContent,
+    openCompareTenantModal, setShowEnvCompare, openEditTenantModal, openSavePresetModal, openSyncCenter, originalContent,
     presetDirPath, references, selectedConfigId, selectedTenant, setIsSplitScreen, setShowChangePassword,
     setShowDocsModal, setShowHistoryModal, setShowRefDrawer, showHistoryModal, targetEnvName, targetEnvs,
     user
@@ -124,6 +124,13 @@ export function StudioHeader() {
                 icon: <ArrowLeftRight className="w-3.5 h-3.5" />,
                 disabled: !selectedTenant,
                 onSelect: openCompareTenantModal
+              },
+              {
+                key: "env",
+                label: "Antar env / semua config…",
+                hint: "Satu tenant di dua env, semua config",
+                icon: <Layers className="w-3.5 h-3.5" />,
+                onSelect: () => setShowEnvCompare(true)
               },
               {
                 key: "db",

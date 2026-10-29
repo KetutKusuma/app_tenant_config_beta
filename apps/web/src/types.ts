@@ -109,6 +109,12 @@ export const ENV_DOT: Record<string, string> = {
   rose: "bg-rose-400", sky: "bg-sky-400", violet: "bg-violet-400", teal: "bg-teal-400"
 };
 
+export interface ConfigRow { id: string; tenant_id: string | null; group_id: string | null; config_type: string; path: string | null; value: any; is_default: boolean; version_token: string }
+export type CompareStatus = "sama" | "beda" | "hanya_kiri" | "hanya_kanan" | "ganda";
+export interface CompareEntry { configType: string; status: CompareStatus; changeCount: number; left: ConfigRow | null; right: ConfigRow | null }
+export interface CompareSummary { total: number; sama: number; beda: number; hanyaKiri: number; hanyaKanan: number; ganda: number }
+export interface CompareSide { env: string; tenantId: string }
+
 export interface AppProps {
   user: StudioUser;
   setUser: (u: StudioUser) => void;

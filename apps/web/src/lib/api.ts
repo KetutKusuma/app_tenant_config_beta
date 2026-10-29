@@ -25,7 +25,8 @@ export const api = async (input: string, init: RequestInit = {}, confirmEnv?: st
     ...(init.headers as Record<string, string> | undefined),
     "X-Config-Domain": activeDomain
   };
-  if (activeTargetEnv) headers["X-Target-Env"] = activeTargetEnv;
+  // Header X-Target-Env yang diisi pemanggil (mis. layar Bandingkan antar env) tidak boleh ditimpa env aktif
+  if (activeTargetEnv && !headers["X-Target-Env"]) headers["X-Target-Env"] = activeTargetEnv;
   if (confirmEnv) headers["X-Confirm-Env"] = confirmEnv;
   const res = await fetch(input, { ...init, credentials: "same-origin", headers });
   // Sesi habis/di-logout di tab lain: kembalikan ke layar login

@@ -16,6 +16,7 @@ import { DeleteConfigModal } from "./components/studio/DeleteConfigModal";
 import { SavePresetModal } from "./components/studio/SavePresetModal";
 import { SyncCenterModal } from "./components/studio/SyncCenterModal";
 import { CompareTenantModal } from "./components/studio/CompareTenantModal";
+import { EnvCompareScreen } from "./components/studio/EnvCompareScreen";
 
 // Kerangka Tenant Studio. State & aksi ada di studio/ (hook), tiap bagian UI di components/studio/.
 export default function App(props: AppProps) {
@@ -49,6 +50,7 @@ export default function App(props: AppProps) {
         <SavePresetModal />
         <SyncCenterModal />
         <CompareTenantModal />
+        <EnvCompareScreen />
 
         {/* Panduan mengikuti domain aktif: tenant_configurations vs pipeline_workflow_configurations */}
         <DocsModal isOpen={showDocsModal && configDomain === "tenant_config"} onClose={() => setShowDocsModal(false)} />
