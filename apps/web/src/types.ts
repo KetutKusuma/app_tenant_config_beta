@@ -120,3 +120,18 @@ export interface AppProps {
   setUser: (u: StudioUser) => void;
   onLogout: () => void;
 }
+
+export interface ExportSqlResult {
+  sql: string;
+  fileName: string;
+  batchId: string;
+  beforeSnapshot: "tersimpan" | "tidak_tersedia";
+  warning: string | null;
+}
+export interface CopyResult {
+  batchId: string;
+  created: string[];
+  overwritten: string[];
+  skipped: { same: string[]; targetOnly: string[]; duplicates: string[] };
+  warnings: string[];
+}

@@ -5,6 +5,8 @@ import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { useEnvCompare } from "../../studio/useEnvCompare";
 import { ENV_DOT, type CompareSide, type CompareStatus, type TargetEnvInfo } from "../../types";
+import { CopyConfigsDialog } from "./CopyConfigsDialog";
+import { ExportSqlDialog } from "./ExportSqlDialog";
 import { PaneTitle } from "./PaneTitle";
 
 type DiffEditorInstance = Parameters<DiffOnMount>[0];
@@ -83,6 +85,7 @@ function EnvCompareBody() {
   const c = useEnvCompare();
   const diffRef = useRef<DiffEditorInstance | null>(null);
   const envReq = useRef({ left: 0, right: 0 });
+  const [dialog, setDialog] = useState<"export" | "copy" | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -164,8 +167,27 @@ function EnvCompareBody() {
             {s.ganda > 0 && <span className="text-rose-300">{` · ${s.ganda} ganda`}</span>}
           </span>
         )}
-        {/* SLOT-TASK-12/13: tombol "Salin ke Kanan…", "Export SQL (n)" (Task 12) dan "Riwayat" (Task 13) ditambahkan di sini */}
-        <div id="env-compare-actions" className="flex items-center gap-1" />
+        {/* SLOT-TASK-13: tombol "Riwayat" ditambahkan di sini */}
+        <div id="env-compare-actions" className="flex items-center gap-1">
+          {!rightEnv?.readonly && (
+            <button
+              onClick={() => setDialog("copy")}
+              disabled={!ready || c.loading}
+              className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
+              title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
+            >
+              Salin ke Kanan…
+            </button>
+          )}
+          <button
+            onClick={() => setDialog("export")}
+            disabled={!ready || c.checked.size === 0}
+            className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition disabled:opacity-40"
+            title="Buat file SQL dari config yang dicentang"
+          >
+            {`Export SQL (${c.checked.size})`}
+          </button>
+        </div>
         <button
           onClick={() => setShowEnvCompare(false)}
           className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
@@ -299,6 +321,19 @@ function EnvCompareBody() {
           )}
         </div>
       </div>
+      {dialog === "export" && (
+        <ExportSqlDialog
+          left={c.left} right={c.right} checkedTypes={[...c.checked]}
+          tenantsFor={c.tenantsFor} loadTenants={c.loadTenants} onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "copy" && (
+        <CopyConfigsDialog
+          left={c.left} right={c.right} leftTenant={leftTenant} rightTenant={rightTenant} entries={c.entries}
+          onClose={() => setDialog(null)}
+          onDone={() => { setDialog(null); void c.reload(); }}
+        />
+      )}
     </div>
   );
 }
