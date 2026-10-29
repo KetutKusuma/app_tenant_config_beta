@@ -14,3 +14,6 @@ envs/*.env
 
 # OS / editor
 .DS_Store
+
+# Mockup brainstorming lokal
+.superpowers/
