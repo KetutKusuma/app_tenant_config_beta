@@ -160,7 +160,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
         return { configType: c, path: r.path ?? null, value: r.value, isDefault: !!r.is_default };
       }),
     });
-    const fileName = exportFileName(sourceMeta.code, D.table, now);
+    const fileName = exportFileName(targetTenantCode, D.table, now);
 
     const batchId = await createBatch({
       kind: "export_sql",
