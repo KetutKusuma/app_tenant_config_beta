@@ -1,13 +1,16 @@
 import express from "express";
 import { domainOf } from "../domain";
-import { poolFor } from "../envs";
+import { assertWritable, poolFor } from "../envs";
 import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
-import { createBatch } from "../compare/batches";
+import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
+import { planCopy, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
+import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
-// Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja).
+// Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja),
+// Export SQL (hanya membuat teks), Salin ke Kanan (menulis ke env X-Target-Env), dan riwayat batch.
 
 export const router = express.Router();
 
@@ -179,6 +182,164 @@ router.post("/api/compare/export-sql", async (req, res) => {
     });
 
     res.json({ data: { sql, fileName, batchId, beforeSnapshot: beforeSnapshot ? "tersimpan" : "tidak_tersedia", warning } });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- Salin ke Kanan: tulis config tenant sumber ke tenant tujuan di env X-Target-Env (cadangkan dulu) ----
+
+export interface CopyBody {
+  sourceEnv: string;
+  sourceTenantId: string;
+  targetTenantId: string;
+  /** version_token (updated_at::text) tiap config tujuan saat dibandingkan; null = belum ada di tujuan */
+  expectedTargetVersions: Record<string, string | null>;
+}
+
+export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: false; error: string } {
+  const fail = (error: string) => ({ ok: false as const, error });
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  if (!body || typeof body !== "object" || Array.isArray(body)) return fail("Body permintaan tidak valid");
+  const sourceEnv = str(body.sourceEnv), sourceTenantId = str(body.sourceTenantId), targetTenantId = str(body.targetTenantId);
+  if (!sourceEnv || !sourceTenantId || !targetTenantId) return fail("sourceEnv, sourceTenantId, dan targetTenantId wajib diisi");
+  const ev = body.expectedTargetVersions;
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return fail("expectedTargetVersions wajib berupa objek { config_type: versi | null }");
+  const expectedTargetVersions: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(ev)) {
+    if (v !== null && typeof v !== "string") return fail(`expectedTargetVersions.${k} harus teks atau null`);
+    expectedTargetVersions[k] = v;
+  }
+  return { ok: true, value: { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions } };
+}
+
+// GLOBAL_DEFAULT boleh belum terdaftar di tenant_metadata; kodenya "GLOBAL_DEFAULT".
+async function tenantMetaOrGlobal(env: string, tenantId: string) {
+  const m = await fetchTenantMeta(env, tenantId);
+  if (m || tenantId !== "GLOBAL_DEFAULT") return m;
+  return { tenantId, groupId: null, name: "GLOBAL_DEFAULT", code: "GLOBAL_DEFAULT", baseCode: "GLOBAL_DEFAULT" };
+}
+
+const TARGET_CHANGED_ERROR = "Config di tujuan berubah sejak dibandingkan. Muat ulang perbandingan.";
+
+router.post("/api/compare/copy", async (req, res) => {
+  let batchId: string | null = null;
+  try {
+    // Penjaga tulis paling awal: read-only → 403, dilindungi tanpa X-Confirm-Env yang cocok → 428.
+    if (!assertWritable(req, res)) return;
+    const targetEnv = req.targetEnv, targetDb = req.targetDb;
+    if (!targetEnv || !targetDb) return res.status(400).json({ error: "Env tujuan (X-Target-Env) tidak diketahui" });
+
+    const parsed = parseCopyBody(req.body);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    const { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions } = parsed.value;
+    if (!findProfile(sourceEnv)) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
+    if (sourceEnv === targetEnv.name && sourceTenantId === targetTenantId) {
+      return res.status(400).json({ error: "Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain." });
+    }
+
+    const targetMeta = await tenantMetaOrGlobal(targetEnv.name, targetTenantId);
+    if (!targetMeta) return res.status(400).json({ error: `Tenant tujuan belum terdaftar di env '${targetEnv.name}'` });
+    const sourceMeta = await tenantMetaOrGlobal(sourceEnv, sourceTenantId);
+    if (!sourceMeta) return res.status(400).json({ error: `Tenant sumber belum terdaftar di env '${sourceEnv}'` });
+
+    // Isi sumber dan tujuan dibaca ulang saat Salin ditekan.
+    const D = domainOf(req);
+    const [srcRows, tgtRows] = await Promise.all([
+      fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
+      fetchTenantRows(targetDb, D, targetTenantId),
+    ]);
+    const plan = planCopy(buildCompareEntries(srcRows, tgtRows).entries);
+    if (plan.create.length + plan.overwrite.length === 0) {
+      return res.status(400).json({ error: "Tidak ada config yang perlu disalin: semua sama, hanya ada di tujuan, atau ganda." });
+    }
+    // Tujuan berubah sejak dibandingkan → batal seluruhnya, belum ada batch/cadangan yang dibuat.
+    const stale = staleConfigTypes(plan, expectedTargetVersions, tgtRows);
+    if (stale.length) return res.status(409).json({ code: "TARGET_CHANGED", error: TARGET_CHANGED_ERROR, configTypes: stale });
+
+    const targetTenantSql = targetTenantId === "GLOBAL_DEFAULT" ? null : targetTenantId;
+    const targetGroupId = resolveGroupId(targetTenantSql, targetMeta.groupId);
+    const author = actorName(req);
+    const from = `${sourceEnv} · ${sourceMeta.code}`;
+    const created = plan.create.map((r) => r.config_type);
+    const overwritten = plan.overwrite.map((o) => o.source.config_type);
+
+    const deps: CopyDeps = {
+      createBatch: async () => {
+        batchId = await createBatch({
+          kind: "salin",
+          domain: D.key,
+          sourceEnv,
+          sourceTenantId,
+          sourceTenantCode: sourceMeta.code,
+          targetEnv: targetEnv.name,
+          targetTenantId,
+          targetGroupId,
+          targetTenantCode: targetMeta.code,
+          mode: "timpa",
+          configTypes: [...created, ...overwritten].sort(),
+          counts: {
+            dibuat: plan.create.length,
+            ditimpa: plan.overwrite.length,
+            sama: plan.same.length,
+            hanyaTujuan: plan.targetOnly.length,
+            ganda: plan.duplicates.length,
+          },
+          status: "menunggu",
+          author,
+        });
+        return batchId;
+      },
+      backupOld: async (row, id) => {
+        await snapshotBeforeChange(row, `Sebelum disalin dari ${from}`, author, targetEnv.name, id);
+      },
+      discardBatchBackups: discardBatchSnapshots,
+      writeTarget: (p) => writeCopyTx(() => targetDb.connect(), D, p, { tenantId: targetTenantSql, groupId: targetGroupId }),
+      recordCreated: async (row, id) => {
+        await snapshotBeforeChange(row, `Disalin dari ${from}`, author, targetEnv.name, id);
+      },
+      finishBatch,
+    };
+
+    const result = await runCopy(plan, deps);
+    res.json({
+      data: {
+        batchId: result.batchId,
+        created,
+        overwritten,
+        skipped: { same: plan.same, targetOnly: plan.targetOnly, duplicates: plan.duplicates },
+        warnings: result.warnings,
+      },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? String(err), batchId });
+  }
+});
+
+// ---- Riwayat batch Salin / Export SQL ----
+
+router.get("/api/compare/batches", async (req, res) => {
+  try {
+    const q = (k: string) => (typeof req.query[k] === "string" ? (req.query[k] as string).trim() : "") || undefined;
+    const limit = q("limit");
+    const data = await listBatches({
+      sourceEnv: q("sourceEnv"),
+      sourceTenantId: q("sourceTenantId"),
+      targetEnv: q("targetEnv"),
+      targetTenantId: q("targetTenantId"),
+      limit: limit ? Number(limit) : undefined,
+    });
+    res.json({ data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/api/compare/batches/:id", async (req, res) => {
+  try {
+    const data = await getBatch(req.params.id);
+    if (!data) return res.status(404).json({ error: "Batch tidak ditemukan" });
+    res.json({ data });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

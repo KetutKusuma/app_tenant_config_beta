@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseExportBody } from "./compare.js";
+import { parseCopyBody, parseExportBody } from "./compare.js";
 
 const profileBody = (over: any = {}) => ({
   sourceEnv: "development", sourceTenantId: "t-1", configTypes: ["A"], mode: "timpa",
@@ -38,4 +38,48 @@ test("mode salah dan field kosong ditolak", () => {
   assert.equal(parseExportBody(profileBody({ mode: "x" })).ok, false);
   assert.equal(parseExportBody(profileBody({ sourceEnv: "" })).ok, false);
   assert.equal(parseExportBody(null).ok, false);
+});
+
+// ---- parseCopyBody (Salin ke Kanan) ----
+
+const copyBody = (over: any = {}) => ({
+  sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
+  expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null }, ...over,
+});
+
+test("parseCopyBody: body valid diterima dan di-trim", () => {
+  const r = parseCopyBody(copyBody({ sourceEnv: " development ", targetTenantId: " t-2 " }));
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.deepEqual(r.value, {
+      sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
+      expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
+    });
+  }
+});
+
+test("parseCopyBody: expectedTargetVersions kosong diterima", () => {
+  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: {} })).ok, true);
+});
+
+test("parseCopyBody: field wajib kosong ditolak", () => {
+  assert.equal(parseCopyBody(null).ok, false);
+  assert.equal(parseCopyBody("x").ok, false);
+  assert.equal(parseCopyBody(copyBody({ sourceEnv: "" })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ sourceTenantId: undefined })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ targetTenantId: "  " })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ sourceEnv: 5 })).ok, false);
+});
+
+test("parseCopyBody: expectedTargetVersions bukan objek ditolak", () => {
+  for (const v of [undefined, null, "x", 1, ["a"]]) {
+    const r = parseCopyBody(copyBody({ expectedTargetVersions: v }));
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.error, /expectedTargetVersions/);
+  }
+});
+
+test("parseCopyBody: nilai versi selain teks/null ditolak", () => {
+  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: 1 } })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: {} } })).ok, false);
 });

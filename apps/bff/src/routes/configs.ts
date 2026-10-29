@@ -248,11 +248,14 @@ router.delete("/api/configs/:configId", async (req, res) => {
 router.get("/api/configs/:configId/histories", async (req, res) => {
   try {
     const { configId } = req.params;
+    // batch_*: diisi bila entri dibuat oleh Salin (label "Salin · <env sumber> · <kode tenant sumber>")
     const histRes = await auditDb.query(`
-      SELECT id, version, group_id, config_value, change_summary, author_name, created_at 
-      FROM tenant_studio.tenant_config_histories 
-      WHERE core_config_id = ${esc(configId)} AND target_env = ${esc(req.targetEnv!.name)}
-      ORDER BY version DESC;
+      SELECT h.id, h.version, h.group_id, h.config_value, h.change_summary, h.author_name, h.created_at,
+        h.batch_id, b.kind AS batch_kind, b.source_env AS batch_source_env, b.source_tenant_code AS batch_source_tenant_code
+      FROM tenant_studio.tenant_config_histories h
+      LEFT JOIN tenant_studio.config_change_batches b ON b.id = h.batch_id
+      WHERE h.core_config_id = ${esc(configId)} AND h.target_env = ${esc(req.targetEnv!.name)}
+      ORDER BY h.version DESC;
     `);
     res.json({ data: histRes.rows });
   } catch (err: any) {
