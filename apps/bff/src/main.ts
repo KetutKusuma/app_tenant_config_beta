@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import fs from "fs";
+import path from "path";
 import { auditDb, esc } from "./db";
 import { registerAuth } from "./auth";
 import { targetEnvMiddleware } from "./envs";
@@ -13,7 +15,7 @@ import { router as syncRoutes } from "./routes/sync";
 // Titik masuk BFF Tenant Config Studio: middleware global lalu route per area (lihat routes/).
 
 const app = express();
-const PORT = process.env.PORT_BFF || 4000;
+const PORT = process.env.PORT_BFF || process.env.PORT || 4000;
 
 // Cookie session butuh origin eksplisit + credentials (bukan wildcard)
 app.use(cors({ origin: process.env.STUDIO_WEB_ORIGIN || "http://localhost:3000", credentials: true }));
@@ -29,6 +31,13 @@ app.use(configRoutes);
 app.use(validatorRoutes);
 app.use(referenceRoutes);
 app.use(syncRoutes);
+
+// Deploy (mis. Railway): BFF sekaligus menyajikan hasil build web agar /api satu origin dengan UI (cookie session SameSite=Lax)
+const WEB_DIST = path.resolve(__dirname, "../../web/dist");
+if (fs.existsSync(WEB_DIST)) {
+  app.use(express.static(WEB_DIST));
+  app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(path.join(WEB_DIST, "index.html")));
+}
 
 initStudioSchema();
 
