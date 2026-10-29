@@ -48,7 +48,7 @@ export function writeJsonFileWithBackup(filePath: string, value: any): { existed
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
   return { existed };
 }
-export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, env: string): Promise<{ historyId: string; version: number }> {
+export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, env: string, batchId: string | null = null): Promise<{ historyId: string; version: number }> {
   const v = await auditDb.query(`
     SELECT COALESCE(MAX(version), 0) AS last_version
     FROM tenant_studio.tenant_config_histories
@@ -58,7 +58,7 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
   const summaryText = typeof summary === "function" ? summary(nextVersion) : summary;
   const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
-    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
+    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, batch_id)
     VALUES (
       ${row.tenant_id ? esc(row.tenant_id) : "NULL"},
       ${row.group_id ? esc(row.group_id) : "NULL"},
@@ -68,7 +68,8 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
       ${esc(JSON.stringify(row.value || {}))}::jsonb,
       ${esc(summaryText)},
       ${esc(author)},
-      ${esc(env)}
+      ${esc(env)},
+      ${esc(batchId)}
     )
     RETURNING id;
   `);
@@ -76,6 +77,9 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
 }
 export async function discardSnapshot(historyId: string): Promise<void> {
   await auditDb.query(`DELETE FROM tenant_studio.tenant_config_histories WHERE id = ${esc(historyId)};`);
+}
+export async function discardBatchSnapshots(batchId: string): Promise<void> {
+  await auditDb.query(`DELETE FROM tenant_studio.tenant_config_histories WHERE batch_id = ${esc(batchId)};`);
 }
 export async function upsertPresetLink(userId: string, env: string, tenantId: string, configType: string, filePath: string) {
   await auditDb.query(`

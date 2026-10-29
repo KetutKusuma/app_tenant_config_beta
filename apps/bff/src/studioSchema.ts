@@ -26,6 +26,7 @@ export function initStudioSchema() {
   // Tabel auth + user default + migrasi preset_links menjadi per-user (PK: user_id, tenant_id, config_type)
   .then(() => initAuthSchema(auditDb, esc))
   .then(() => migrateTargetEnvColumns())
+  .then(() => migrateChangeBatches())
   .catch((err) => console.error("Gagal menyiapkan tabel studio (preset_links/auth):", err.message));
 }
 
@@ -81,4 +82,37 @@ async function migrateTenantMetadataEnv() {
     UPDATE tenant_studio.tenant_metadata SET environment = target_env;
   `);
   console.log("🌐 tenant_metadata dipisah per target env.");
+}
+
+// Batch Salin/Export SQL antar env + kolom batch_id di history. Murni aditif dan idempotent.
+export async function migrateChangeBatches() {
+  await auditDb.query(`
+    CREATE TABLE IF NOT EXISTS tenant_studio.config_change_batches (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      kind text NOT NULL,
+      domain text NOT NULL,
+      source_env text NOT NULL,
+      source_tenant_id text NOT NULL,
+      source_tenant_code text,
+      target_env text NOT NULL,
+      target_tenant_id text NOT NULL,
+      target_group_id text,
+      target_tenant_code text,
+      mode text NOT NULL,
+      config_types text[] NOT NULL DEFAULT '{}',
+      counts jsonb,
+      status text NOT NULL,
+      error text,
+      sql_text text,
+      before_snapshot jsonb,
+      author_name text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      finished_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS config_change_batches_target_idx
+      ON tenant_studio.config_change_batches (target_env, target_tenant_id, created_at DESC);
+    ALTER TABLE tenant_studio.tenant_config_histories ADD COLUMN IF NOT EXISTS batch_id uuid;
+    CREATE INDEX IF NOT EXISTS tenant_config_histories_batch_idx
+      ON tenant_studio.tenant_config_histories (batch_id);
+  `);
 }
