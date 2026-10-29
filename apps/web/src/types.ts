@@ -42,6 +42,33 @@ export interface HistoryItem {
   change_summary: string;
   author_name: string;
   created_at: string;
+  batch_id?: string | null;
+  batch_kind?: "salin" | "export_sql" | null;
+  batch_source_env?: string | null;
+  batch_source_tenant_code?: string | null;
+}
+
+export interface ChangeBatch {
+  id: string;
+  kind: "salin" | "export_sql";
+  domain: string;
+  source_env: string;
+  source_tenant_id: string;
+  source_tenant_code: string | null;
+  target_env: string;
+  target_tenant_id: string | null;
+  target_group_id: string | null;
+  target_tenant_code: string | null;
+  mode: string | null;
+  config_types: string[];
+  counts: Record<string, number> | null;
+  status: "menunggu" | "berhasil" | "gagal" | "diekspor";
+  error: string | null;
+  sql_text?: string | null;
+  before_snapshot?: unknown;
+  author_name: string | null;
+  created_at: string;
+  finished_at: string | null;
 }
 
 export interface ReferenceItem {

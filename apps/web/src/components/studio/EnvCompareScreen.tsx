@@ -5,6 +5,7 @@ import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { useEnvCompare } from "../../studio/useEnvCompare";
 import { ENV_DOT, type CompareSide, type CompareStatus, type TargetEnvInfo } from "../../types";
+import { ChangeBatchesPanel } from "./ChangeBatchesPanel";
 import { CopyConfigsDialog } from "./CopyConfigsDialog";
 import { ExportSqlDialog } from "./ExportSqlDialog";
 import { PaneTitle } from "./PaneTitle";
@@ -86,6 +87,7 @@ function EnvCompareBody() {
   const diffRef = useRef<DiffEditorInstance | null>(null);
   const envReq = useRef({ left: 0, right: 0 });
   const [dialog, setDialog] = useState<"export" | "copy" | null>(null);
+  const [showBatches, setShowBatches] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -167,8 +169,14 @@ function EnvCompareBody() {
             {s.ganda > 0 && <span className="text-rose-300">{` · ${s.ganda} ganda`}</span>}
           </span>
         )}
-        {/* SLOT-TASK-13: tombol "Riwayat" ditambahkan di sini */}
         <div id="env-compare-actions" className="flex items-center gap-1">
+          <button
+            onClick={() => setShowBatches(true)}
+            className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition"
+            title="Riwayat Salin dan Export SQL"
+          >
+            Riwayat
+          </button>
           <button
             onClick={() => setDialog("copy")}
             disabled={!ready || c.loading}
@@ -319,6 +327,7 @@ function EnvCompareBody() {
           )}
         </div>
       </div>
+      {showBatches && <ChangeBatchesPanel left={c.left} right={c.right} onClose={() => setShowBatches(false)} />}
       {dialog === "export" && (
         <ExportSqlDialog
           left={c.left} right={c.right} checkedTypes={[...c.checked]}

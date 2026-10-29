@@ -37,6 +37,14 @@ export function HistoryPanel() {
                       Group: {h.group_id}
                     </div>
                   )}
+                  {h.batch_id && (
+                    <span
+                      className="inline-block max-w-full truncate align-top px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[9px]"
+                      title={`Salin · ${h.batch_source_env ?? "?"} · ${h.batch_source_tenant_code ?? "?"}`}
+                    >
+                      {`Salin · ${h.batch_source_env ?? "?"} · ${h.batch_source_tenant_code ?? "?"}`}
+                    </span>
+                  )}
                   <p className="text-slate-300 text-[10px]">{h.change_summary}</p>
                   <div className="flex items-center justify-between text-[9px] text-slate-500 pt-1 border-t border-slate-900">
                     <span>{h.author_name}</span>
