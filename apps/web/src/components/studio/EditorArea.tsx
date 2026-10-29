@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
+import { PaneTitle } from "./PaneTitle";
 
 type DiffEditorInstance = Parameters<DiffOnMount>[0];
 
@@ -14,6 +15,7 @@ const DIFF_OPTIONS = {
   fontSize: 13,
   minimap: { enabled: false },
   renderSideBySide: true,
+  useInlineViewWhenSpaceIsLimited: false,
   readOnly: false,
   // Baris yang sama dilipat; tersisa 3 baris konteks di sekitar perubahan (lipatan bisa dibuka dengan klik)
   hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 5, revealLineCount: 20 },
@@ -34,8 +36,9 @@ export function EditorArea() {
     isSavingCompareTenant, isSavingLocal, isSplitScreen, jsonContent, jsonDeltaDirection, jsonDeltaFormat,
     localFilePath, originalContent, selectedConfigId, selectedTenant, setIsSplitScreen, setJsonContent,
     setJsonDeltaDirection, setJsonDeltaFormat, setSplitJsonContent, setSplitMode, splitJsonContent,
-    splitMode, splitSourceType, splitTitle, tenants
+    splitMode, splitSourceType, splitTitle, targetEnvName, targetEnvs, tenants
   } = useStudio();
+  const activeEnv = targetEnvs.find(e => e.name === targetEnvName);
 
   // Visual Diff: jumlah blok perubahan + navigasi ke perubahan berikutnya/sebelumnya
   const diffEditorRef = useRef<DiffEditorInstance | null>(null);
@@ -73,45 +76,6 @@ export function EditorArea() {
             /* Monaco Diff Editor */
             <div className="w-full h-full flex flex-col">
               <div className="relative z-10 h-9 shrink-0 bg-slate-900 border-b border-slate-800/80 shadow-[0_4px_12px_-4px_rgba(0,0,0,0.6)] px-3 flex items-center justify-between gap-4 text-[11px] whitespace-nowrap">
-                {/* Kiri vs Kanan: label ringkas, detail di tooltip */}
-                <div className="flex items-center gap-2 min-w-0 overflow-hidden">
-                  {splitSourceType === "tenant" ? (
-                    <span
-                      className="flex items-center gap-1.5 min-w-0"
-                      title={`Tenant Pembanding (Kiri): ${compareTenant?.name || splitTitle} — ${compareConfigType}`}
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full bg-purple-400 shrink-0" />
-                      <span className="font-medium text-purple-200 truncate">{compareTenant?.name || splitTitle}</span>
-                      <span className="font-mono text-[10px] text-slate-500 truncate">{compareConfigType}</span>
-                    </span>
-                  ) : (
-                    <span
-                      className="flex items-center gap-1.5 min-w-0"
-                      title={`${splitSourceType === "preset" ? "Preset Lokal" : "Snapshot"} (Kiri): ${splitTitle}`}
-                    >
-                      {splitSourceType === "preset" ? (
-                        <FolderOpen className="w-3 h-3 text-amber-400 shrink-0" />
-                      ) : (
-                        <History className="w-3 h-3 text-emerald-400 shrink-0" />
-                      )}
-                      <span className={`font-medium truncate ${splitSourceType === "preset" ? "text-amber-200" : "text-emerald-200"}`}>{splitTitle}</span>
-                    </span>
-                  )}
-                  <span className="text-slate-600 text-[10px] shrink-0">vs</span>
-                  <span
-                    className="flex items-center gap-1.5 min-w-0"
-                    title={splitSourceType === "tenant"
-                      ? `Tenant Aktif (Kanan): ${selectedTenant?.name} — ${activeConfigType}`
-                      : `${splitSourceType === "preset" ? "Database Live" : "Editor Anda"} (Kanan): ${activeConfigType}`}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
-                    <span className="font-medium text-indigo-200 truncate">
-                      {splitSourceType === "tenant" ? selectedTenant?.name : splitSourceType === "preset" ? "Database Live" : "Editor Anda"}
-                    </span>
-                    <span className="font-mono text-[10px] text-slate-500 truncate">{activeConfigType}</span>
-                  </span>
-                </div>
-
                 {/* Aksi: navigasi perubahan + aksi ghost (tidak ada tombol penuh yang mencolok) */}
                 <div className="flex items-center gap-0.5 shrink-0">
                   <span
@@ -188,6 +152,32 @@ export function EditorArea() {
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
+              </div>
+              {/* Judul tiap sisi, tepat di atas separuh DiffEditor-nya */}
+              <div className="grid grid-cols-2 shrink-0 bg-slate-900/70 border-b border-slate-800/80">
+                {splitSourceType === "tenant" ? (
+                  <PaneTitle
+                    envLabel={activeEnv?.label ?? targetEnvName}
+                    envColor={activeEnv?.color ?? ""}
+                    tenantName={compareTenant?.name || splitTitle}
+                    tenantCode={compareTenant?.code}
+                    configType={compareConfigType ?? undefined}
+                  />
+                ) : splitSourceType === "preset" ? (
+                  <PaneTitle envLabel="Preset Lokal" envColor="" icon={<FolderOpen className="w-3 h-3 text-amber-400 shrink-0" />} tenantName={splitTitle} />
+                ) : splitSourceType === "db" ? (
+                  <PaneTitle envLabel="Database terbaru" envColor="" icon={<Database className="w-3 h-3 text-emerald-400 shrink-0" />} />
+                ) : (
+                  <PaneTitle envLabel={splitTitle} envColor="" icon={<History className="w-3 h-3 text-emerald-400 shrink-0" />} />
+                )}
+                <PaneTitle
+                  envLabel={activeEnv?.label ?? targetEnvName}
+                  envColor={activeEnv?.color ?? ""}
+                  tenantName={selectedTenant?.name}
+                  tenantCode={selectedTenant?.code}
+                  configType={activeConfigType}
+                  muted="Editor"
+                />
               </div>
               <div className="flex-1 min-h-0">
                 <DiffEditor

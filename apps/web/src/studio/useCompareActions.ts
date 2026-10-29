@@ -89,7 +89,7 @@ export function useCompareActions(ctx: StudioState & CoreActions) {
         setSplitMode(initialMode || compareModalMode || "side-by-side");
         setIsSplitScreen(true);
         setShowCompareTenantModal(false);
-        setStatusMessage(`⇄ Split aktif: ${selectedTenant?.name} vs ${targetTenant.name} (${targetConfig.config_type})`);
+        setStatusMessage(`⇄ Split aktif: kiri ${targetTenant.name}, kanan ${selectedTenant?.name} (${targetConfig.config_type})`);
         setTimeout(() => setStatusMessage(null), 3500);
       }
     } catch (err: any) {
