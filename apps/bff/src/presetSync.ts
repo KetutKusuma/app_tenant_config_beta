@@ -58,7 +58,7 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
   const summaryText = typeof summary === "function" ? summary(nextVersion) : summary;
   const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
-    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, batch_id)
+    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env${batchId ? ", batch_id" : ""})
     VALUES (
       ${row.tenant_id ? esc(row.tenant_id) : "NULL"},
       ${row.group_id ? esc(row.group_id) : "NULL"},
@@ -68,8 +68,7 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
       ${esc(JSON.stringify(row.value || {}))}::jsonb,
       ${esc(summaryText)},
       ${esc(author)},
-      ${esc(env)},
-      ${esc(batchId)}
+      ${esc(env)}${batchId ? `,\n      ${esc(batchId)}` : ""}
     )
     RETURNING id;
   `);

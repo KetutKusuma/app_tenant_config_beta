@@ -5,7 +5,7 @@ import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
 import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
-import { TargetChangedError, isCommitUncertain, planCopy, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
+import { TargetChangedError, isCommitUncertain, planCopy, planMismatch, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
@@ -195,6 +195,9 @@ export interface CopyBody {
   targetTenantId: string;
   /** version_token (updated_at::text) tiap config tujuan saat dibandingkan; null = belum ada di tujuan */
   expectedTargetVersions: Record<string, string | null>;
+  /** tipe config yang ditampilkan sebagai "dibuat" / "ditimpa" saat user mengonfirmasi */
+  confirmedCreate: string[];
+  confirmedOverwrite: string[];
 }
 
 export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: false; error: string } {
@@ -210,7 +213,15 @@ export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: 
     if (v !== null && typeof v !== "string") return fail(`expectedTargetVersions.${k} harus teks atau null`);
     expectedTargetVersions[k] = v;
   }
-  return { ok: true, value: { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions } };
+  const strList = (name: string, v: unknown): string[] | string => {
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) return `${name} wajib berupa daftar teks`;
+    return v as string[];
+  };
+  const confirmedCreate = strList("confirmedCreate", body.confirmedCreate);
+  if (typeof confirmedCreate === "string") return fail(confirmedCreate);
+  const confirmedOverwrite = strList("confirmedOverwrite", body.confirmedOverwrite);
+  if (typeof confirmedOverwrite === "string") return fail(confirmedOverwrite);
+  return { ok: true, value: { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions, confirmedCreate, confirmedOverwrite } };
 }
 
 // GLOBAL_DEFAULT boleh belum terdaftar di tenant_metadata; kodenya "GLOBAL_DEFAULT".
@@ -220,6 +231,7 @@ async function tenantMetaOrGlobal(env: string, tenantId: string) {
   return { tenantId, groupId: null, name: "GLOBAL_DEFAULT", code: "GLOBAL_DEFAULT", baseCode: "GLOBAL_DEFAULT" };
 }
 
+const PLAN_CHANGED_ERROR = "Rencana salin berubah sejak dikonfirmasi (sumber atau tujuan berubah). Muat ulang perbandingan.";
 const TARGET_CHANGED_ERROR = "Config di tujuan berubah sejak dibandingkan. Muat ulang perbandingan.";
 
 router.post("/api/compare/copy", async (req, res) => {
@@ -232,7 +244,7 @@ router.post("/api/compare/copy", async (req, res) => {
 
     const parsed = parseCopyBody(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions } = parsed.value;
+    const { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions, confirmedCreate, confirmedOverwrite } = parsed.value;
     if (!findProfile(sourceEnv)) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
     if (sourceEnv === targetEnv.name && sourceTenantId === targetTenantId) {
       return res.status(400).json({ error: "Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain." });
@@ -257,6 +269,9 @@ router.post("/api/compare/copy", async (req, res) => {
     // → batal seluruhnya, belum ada batch/cadangan yang dibuat.
     const stale = staleConfigTypes(plan, expectedTargetVersions, tgtRows);
     if (stale.length) return res.status(409).json({ code: "TARGET_CHANGED", error: TARGET_CHANGED_ERROR, configTypes: stale });
+    // Rencana segar (sumber ikut dibaca ulang) berbeda dari yang dikonfirmasi user → batal, sebelum batch/cadangan.
+    const mismatch = planMismatch(plan, confirmedCreate, confirmedOverwrite);
+    if (mismatch.length) return res.status(409).json({ code: "TARGET_CHANGED", error: PLAN_CHANGED_ERROR, configTypes: mismatch });
 
     const targetTenantSql = targetTenantId === "GLOBAL_DEFAULT" ? null : targetTenantId;
     const targetGroupId = resolveGroupId(targetTenantSql, targetMeta.groupId);

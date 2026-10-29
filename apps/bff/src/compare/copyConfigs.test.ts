@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  planCopy, staleConfigTypes, runCopy, writeCopyTx, CommitUncertainError, TargetChangedError, isCommitUncertain,
+  planCopy, planMismatch, staleConfigTypes, runCopy, writeCopyTx, CommitUncertainError, TargetChangedError, isCommitUncertain,
   COMMIT_UNCERTAIN_MESSAGE, type CopyDeps, type CopyPlan, type TxClient,
 } from "./copyConfigs";
 import type { CompareEntry, ConfigRow } from "./types";
@@ -56,6 +56,19 @@ test("staleConfigTypes: tipe rencana yang tidak ada di expected → stale (null 
   // kunci warisan prototype tidak dianggap ada
   const planProto: CopyPlan = { create: [row("constructor")], overwrite: [], same: [], targetOnly: [], duplicates: [] };
   assert.deepEqual(staleConfigTypes(planProto, {}, []), ["constructor"]);
+});
+
+test("planMismatch: himpunan sama (urutan beda) → kosong; tambah/kurang/pindah kelompok → daftar A→Z", () => {
+  const plan: CopyPlan = {
+    create: [row("B"), row("C")],
+    overwrite: [{ source: row("A"), target: row("A", "t1") }, { source: row("D"), target: row("D", "t1") }],
+    same: [], targetOnly: [], duplicates: [],
+  };
+  assert.deepEqual(planMismatch(plan, ["C", "B"], ["D", "A"]), []);
+  assert.deepEqual(planMismatch(plan, ["B", "C"], ["A"]), ["D"]); // D sebelumnya "sama" bagi user
+  assert.deepEqual(planMismatch(plan, ["B", "C", "E"], ["A", "D"]), ["E"]); // E kini sama/ganda
+  assert.deepEqual(planMismatch(plan, ["B"], ["A", "D", "C"]), ["C"]); // C pindah dibuat → ditimpa
+  assert.deepEqual(planMismatch({ ...plan, create: [], overwrite: [] }, [], []), []);
 });
 
 function setup(opts: { backup?: boolean; write?: boolean | Error; record?: boolean; discard?: boolean; finish?: boolean } = {}) {

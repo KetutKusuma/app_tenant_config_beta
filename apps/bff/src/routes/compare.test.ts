@@ -44,7 +44,8 @@ test("mode salah dan field kosong ditolak", () => {
 
 const copyBody = (over: any = {}) => ({
   sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
-  expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null }, ...over,
+  expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
+  confirmedCreate: ["B"], confirmedOverwrite: ["A"], ...over,
 });
 
 test("parseCopyBody: body valid diterima dan di-trim", () => {
@@ -54,6 +55,7 @@ test("parseCopyBody: body valid diterima dan di-trim", () => {
     assert.deepEqual(r.value, {
       sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
       expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
+      confirmedCreate: ["B"], confirmedOverwrite: ["A"],
     });
   }
 });
@@ -82,4 +84,15 @@ test("parseCopyBody: expectedTargetVersions bukan objek ditolak", () => {
 test("parseCopyBody: nilai versi selain teks/null ditolak", () => {
   assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: 1 } })).ok, false);
   assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: {} } })).ok, false);
+});
+
+test("parseCopyBody: confirmedCreate/confirmedOverwrite wajib daftar teks", () => {
+  for (const f of ["confirmedCreate", "confirmedOverwrite"]) {
+    for (const v of [undefined, null, "A", { a: 1 }, [1], ["A", null]]) {
+      const r = parseCopyBody(copyBody({ [f]: v }));
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.match(r.error, new RegExp(f));
+    }
+  }
+  assert.equal(parseCopyBody(copyBody({ confirmedCreate: [], confirmedOverwrite: [] })).ok, true);
 });

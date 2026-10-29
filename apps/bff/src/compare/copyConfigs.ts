@@ -39,6 +39,21 @@ export function staleConfigTypes(plan: CopyPlan, expected: Record<string, string
   return [...stale].sort();
 }
 
+/** Rencana segar server vs rencana yang dikonfirmasi user: himpunan tipe dibuat/ditimpa harus sama (urutan bebas). */
+export function planMismatch(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): string[] {
+  const diff = (actual: string[], confirmed: string[]) => {
+    const a = new Set(actual), c = new Set(confirmed);
+    return [...a].filter((t) => !c.has(t)).concat([...c].filter((t) => !a.has(t)));
+  };
+  return [...new Set([
+    ...diff(plan.create.map((r) => r.config_type), confirmedCreate),
+    ...diff(plan.overwrite.map((o) => o.source.config_type), confirmedOverwrite),
+    // tipe yang berpindah kelompok (mis. dibuat → ditimpa) juga dianggap berbeda
+    ...plan.create.map((r) => r.config_type).filter((t) => confirmedOverwrite.includes(t)),
+    ...plan.overwrite.map((o) => o.source.config_type).filter((t) => confirmedCreate.includes(t)),
+  ])].sort();
+}
+
 export interface CopyDeps {
   createBatch(): Promise<string>;
   backupOld(target: ConfigRow, batchId: string): Promise<void>;

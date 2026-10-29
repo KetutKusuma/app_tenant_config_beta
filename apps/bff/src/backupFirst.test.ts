@@ -36,10 +36,18 @@ test("write null → cadangan dibuang, status stale", async () => {
   assert.deepEqual(f.calls, ["backup", "write", "discard:h1"]);
 });
 
-test("write melempar → cadangan dibuang lalu error diteruskan", async () => {
-  const f = fakes({ write: () => { throw new Error("db down"); } });
-  await assert.rejects(backupThenWrite(f.steps), /db down/);
+test("write melempar error pg dari server → cadangan dibuang lalu error diteruskan", async () => {
+  const f = fakes({ write: () => { throw Object.assign(new Error("duplicate key"), { severity: "ERROR", code: "23505" }); } });
+  await assert.rejects(backupThenWrite(f.steps), /duplicate key/);
   assert.deepEqual(f.calls, ["backup", "write", "discard:h1"]);
+});
+
+test("write melempar error koneksi → cadangan dipertahankan, dicatat, error diteruskan", async () => {
+  const f = fakes({ write: () => { throw new Error("connection terminated"); } });
+  const logged: unknown[] = [];
+  await assert.rejects(backupThenWrite({ ...f.steps, onWriteUncertain: (e, id) => logged.push([e instanceof Error ? e.message : e, id]) }), /connection terminated/);
+  assert.deepEqual(f.calls, ["backup", "write"]);
+  assert.deepEqual(logged, [["connection terminated", "h1"]]);
 });
 
 test("sukses → tanpa discard", async () => {
