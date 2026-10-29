@@ -116,8 +116,9 @@ test("baris baru tidak bisa keluar dari komentar", () => {
     items: [{ configType: "C\nEVILCOMMENT", path: "p", value: {}, isDefault: false }],
   }));
   const lines = sql.split("\n");
-  assert.ok(!lines.some((l) => l.startsWith("DELETE")));
   const before = lines.slice(0, lines.indexOf("BEGIN;"));
+  // nilai groupId juga masuk sebagai literal string di INSERT (aman, di dalam kutip); yang dijaga: komentar
+  assert.ok(!before.some((l) => l.startsWith("DELETE")));
   assert.ok(before.every((l) => l === "" || l.startsWith("--")));
   // configType di komentar item satu baris; di SQL ia hanya ada di dalam literal string
   assert.ok(lines.includes("-- [1/1] C EVILCOMMENT"));
