@@ -21,8 +21,8 @@ router.get("/api/compare", async (req, res) => {
 
     const D = domainOf(req);
     const loaded = await loadSides(
-      () => fetchTenantRows(poolFor(leftEnv), D, leftTenant),
-      () => fetchTenantRows(poolFor(rightEnv), D, rightTenant),
+      async () => fetchTenantRows(poolFor(leftEnv), D, leftTenant),
+      async () => fetchTenantRows(poolFor(rightEnv), D, rightTenant),
       { kiri: lp.label, kanan: rp.label }
     );
     if (!loaded.ok) return res.status(502).json({ error: loaded.error, side: loaded.side });
