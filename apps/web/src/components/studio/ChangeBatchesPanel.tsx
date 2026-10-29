@@ -62,9 +62,9 @@ export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide
       if (scope === "all") {
         setRows(await fetchList(new URLSearchParams({ limit: "100" })));
       } else {
-        const q = (s: CompareSide, t: CompareSide) =>
-          new URLSearchParams({ sourceEnv: s.env, sourceTenantId: s.tenantId, targetEnv: t.env, targetTenantId: t.tenantId, limit: "100" });
-        const [a, b] = await Promise.all([fetchList(q(left, right)), fetchList(q(right, left))]);
+        // Batch yang sumbernya salah satu sisi, ke tujuan apa pun (termasuk export ke Production manual)
+        const q = (s: CompareSide) => new URLSearchParams({ sourceEnv: s.env, sourceTenantId: s.tenantId, limit: "100" });
+        const [a, b] = await Promise.all([fetchList(q(left)), fetchList(q(right))]);
         const seen = new Set<string>();
         setRows([...a, ...b].filter((r) => !seen.has(r.id) && seen.add(r.id))
           .sort((x, y) => +new Date(y.created_at) - +new Date(x.created_at)));

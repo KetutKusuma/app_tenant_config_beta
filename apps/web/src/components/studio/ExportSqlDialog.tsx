@@ -70,10 +70,20 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetEnv]);
 
+  // Sumber Kiri → tujuan default Kanan, sumber Kanan → tujuan default Kiri
+  const pickSource = (v: "kiri" | "kanan") => {
+    setSource(v);
+    const dest = v === "kiri" ? right : left;
+    const env = targetEnvs.find((e) => e.name === dest.env)?.name;
+    if (env) { setTargetEnv(env); setTargetTenantId(dest.tenantId); setShowNew(false); }
+    resetResult();
+  };
+
   const resetResult = () => { setResult(null); setError(""); };
 
   const targetOk = isManual ? manualTenant.trim() !== "" : targetTenantId !== "";
-  const canBuild = !busy && checkedTypes.length > 0 && targetOk;
+  const sameAsSource = !isManual && targetTenantId !== "" && targetEnv === srcSide.env && targetTenantId === srcSide.tenantId;
+  const canBuild = !busy && checkedTypes.length > 0 && targetOk && !sameAsSource;
 
   const build = async () => {
     setBusy(true); setError(""); setResult(null);
@@ -151,7 +161,7 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
         <div className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-3 items-center text-xs text-slate-400">
           <span>Sumber</span>
           <div className="flex items-center gap-2 min-w-0">
-            <Segment value={source} onChange={(v) => { setSource(v); resetResult(); }} disabled={busy}
+            <Segment value={source} onChange={pickSource} disabled={busy}
               options={[{ v: "kiri", label: "Kiri" }, { v: "kanan", label: "Kanan" }]} />
             <span className="truncate text-slate-500" title={`${srcEnv?.label ?? srcSide.env} · ${tenantsFor(srcSide.env).find((t) => t.tenantId === srcSide.tenantId)?.name ?? srcSide.tenantId}`}>
               {`${srcEnv?.label ?? srcSide.env} · ${tenantsFor(srcSide.env).find((t) => t.tenantId === srcSide.tenantId)?.name ?? srcSide.tenantId}`}
@@ -210,6 +220,10 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
           <Segment value={mode} onChange={(v) => { setMode(v); resetResult(); }} disabled={busy}
             options={[{ v: "timpa", label: "Timpa" }, { v: "lewati", label: "Lewati" }]} />
         </div>
+
+        {sameAsSource && (
+          <div className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-2">Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain.</div>
+        )}
 
         {error && <div className="text-xs text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md px-3 py-2">{error}</div>}
 

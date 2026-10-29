@@ -8,6 +8,8 @@ import { useDialogEsc } from "./useDialogEsc";
 const GHOST = "px-3 py-1.5 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40";
 const PRIMARY = "px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition disabled:opacity-40";
 
+const UNKNOWN_RESULT = "Hasil tidak pasti — koneksi terputus. Muat ulang perbandingan dan periksa tujuan serta Riwayat.";
+
 function Group({ label, hint, names }: { label: string; hint: string; names: string[] }) {
   return (
     <details className="rounded-md border border-slate-800 px-3 py-2 text-xs">
@@ -39,7 +41,8 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [stale, setStale] = useState<string[] | null>(null);
-  const [uncertain, setUncertain] = useState(false);
+  // "commit" = server memastikan cadangan tersimpan; "unknown" = koneksi putus / respons bukan JSON, tidak ada yang pasti
+  const [uncertain, setUncertain] = useState<null | "commit" | "unknown">(null);
 
   const leftEnv = targetEnvs.find((e) => e.name === left.env);
   const rightEnv = targetEnvs.find((e) => e.name === right.env);
@@ -63,7 +66,7 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
     return p;
   }, [entries]);
   const n = plan.create.length + plan.overwrite.length;
-  const done = stale !== null || uncertain;
+  const done = stale !== null || uncertain !== null;
 
   const closeDialog = () => { if (done || doneWarn) onDone(); else onClose(); };
   useDialogEsc(() => {
@@ -74,14 +77,14 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
 
   const run = async () => {
     setConfirming(false);
-    setBusy(true); setError(""); setStale(null); setUncertain(false);
+    setBusy(true); setError(""); setStale(null); setUncertain(null);
     try {
       const expectedTargetVersions: Record<string, string | null> = {};
       for (const e of entries) expectedTargetVersions[e.configType] = e.right?.version_token ?? null;
       const res = await api("/api/compare/copy", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Target-Env": right.env },
-        body: JSON.stringify({ sourceEnv: left.env, sourceTenantId: left.tenantId, targetTenantId: right.tenantId, expectedTargetVersions })
+        body: JSON.stringify({ sourceEnv: left.env, sourceTenantId: left.tenantId, targetTenantId: right.tenantId, expectedTargetVersions, confirmedCreate: plan.create, confirmedOverwrite: plan.overwrite })
       }, rightEnv?.protected ? right.env : undefined);
       const json = await res.json().catch(() => ({}));
       if (res.ok) {
@@ -90,7 +93,7 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
         setTimeout(() => setStatusMessage(null), 3500);
         if (d.warnings?.length) {
           setError(d.warnings.join("\n"));
-          setUncertain(false);
+          setUncertain(null);
           setStale(null);
           setDoneWarn(true);
           return;
@@ -101,15 +104,18 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
       if (json.code === "TARGET_CHANGED") {
         setError(json.error || "Isi tujuan berubah sejak perbandingan dimuat.");
         setStale(json.configTypes ?? []);
-      } else if (json.commitUncertain || (res.status >= 500 && !json.error)) {
+      } else if (json.commitUncertain) {
         setError(json.error || "Hasil tidak pasti — periksa tujuan lalu muat ulang perbandingan.");
-        setUncertain(true);
+        setUncertain("commit");
+      } else if (res.status >= 500 && !json.error) {
+        setError(UNKNOWN_RESULT);
+        setUncertain("unknown");
       } else {
         setError(json.error || `HTTP ${res.status}`);
       }
     } catch (e: any) {
-      setError("Hasil tidak pasti — periksa tujuan lalu muat ulang perbandingan.");
-      setUncertain(true);
+      setError(UNKNOWN_RESULT);
+      setUncertain("unknown");
     } finally {
       setBusy(false);
     }
@@ -141,7 +147,7 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
         {error && (
           <div className={`text-xs whitespace-pre-line rounded-md px-3 py-2 border ${
             doneWarn ? "text-amber-200 bg-amber-500/10 border-amber-500/30" : "text-rose-300 bg-rose-950/40 border-rose-900/50"}`}>
-            {uncertain && <div className="font-semibold mb-1">Hasil tidak pasti. Periksa isi tujuan; isi lama sudah disimpan di History.</div>}
+            {uncertain === "commit" && <div className="font-semibold mb-1">Hasil tidak pasti. Periksa isi tujuan; isi lama sudah disimpan di History.</div>}
             {error}
             {stale && stale.length > 0 && <div className="mt-1 font-mono text-[11px] break-words">{stale.join(", ")}</div>}
           </div>
