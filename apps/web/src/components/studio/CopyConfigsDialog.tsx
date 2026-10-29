@@ -65,7 +65,12 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
   const n = plan.create.length + plan.overwrite.length;
   const done = stale !== null || uncertain;
 
-  useDialogEsc(onClose, !busy && !confirming);
+  const closeDialog = () => { if (done || doneWarn) onDone(); else onClose(); };
+  useDialogEsc(() => {
+    if (busy) return;
+    if (confirming) setConfirming(false);
+    else closeDialog();
+  });
 
   const run = async () => {
     setConfirming(false);
@@ -96,21 +101,22 @@ export function CopyConfigsDialog({ left, right, leftTenant, rightTenant, entrie
       if (json.code === "TARGET_CHANGED") {
         setError(json.error || "Isi tujuan berubah sejak perbandingan dimuat.");
         setStale(json.configTypes ?? []);
-      } else if (json.commitUncertain) {
-        setError(json.error || "Hasil penyalinan tidak pasti.");
+      } else if (json.commitUncertain || (res.status >= 500 && !json.error)) {
+        setError(json.error || "Hasil tidak pasti — periksa tujuan lalu muat ulang perbandingan.");
         setUncertain(true);
       } else {
         setError(json.error || `HTTP ${res.status}`);
       }
     } catch (e: any) {
-      setError(e?.message || "Gagal menyalin");
+      setError("Hasil tidak pasti — periksa tujuan lalu muat ulang perbandingan.");
+      setUncertain(true);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
+    <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4" onMouseDown={(e) => e.target === e.currentTarget && !busy && !confirming && closeDialog()}>
       <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-5 space-y-4">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">Salin ke Kanan</h3>

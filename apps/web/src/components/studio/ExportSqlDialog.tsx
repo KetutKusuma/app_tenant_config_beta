@@ -49,7 +49,7 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
   const [error, setError] = useState("");
   const [result, setResult] = useState<ExportSqlResult | null>(null);
 
-  useDialogEsc(onClose, !busy);
+  useDialogEsc(() => { if (!busy) onClose(); });
 
   const isManual = targetEnv === MANUAL;
   const targetInfo = targetEnvs.find((e) => e.name === targetEnv);
@@ -111,6 +111,11 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
   };
 
   const addTenant = async () => {
+    const id = newForm.tenantId.trim();
+    if (tenantsFor(targetEnv).some((t) => t.tenantId === id)) {
+      setError(`Tenant ini sudah terdaftar di ${targetInfo?.label ?? targetEnv}; pilih dari daftar.`);
+      return;
+    }
     setBusy(true); setError("");
     try {
       const res = await api("/api/tenants", {

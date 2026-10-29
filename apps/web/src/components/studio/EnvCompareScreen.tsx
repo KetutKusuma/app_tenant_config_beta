@@ -169,7 +169,7 @@ function EnvCompareBody() {
         )}
         {/* SLOT-TASK-13: tombol "Riwayat" ditambahkan di sini */}
         <div id="env-compare-actions" className="flex items-center gap-1">
-          {!rightEnv?.readonly && (
+          {(
             <button
               onClick={() => setDialog("copy")}
               disabled={!ready || c.loading}
