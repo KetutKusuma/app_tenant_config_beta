@@ -11,6 +11,7 @@ import { router as configRoutes } from "./routes/configs";
 import { router as validatorRoutes } from "./routes/validator";
 import { router as referenceRoutes } from "./routes/references";
 import { router as syncRoutes } from "./routes/sync";
+import { router as compareRoutes } from "./routes/compare";
 
 // Titik masuk BFF Tenant Config Studio: middleware global lalu route per area (lihat routes/).
 
@@ -31,6 +32,7 @@ app.use(configRoutes);
 app.use(validatorRoutes);
 app.use(referenceRoutes);
 app.use(syncRoutes);
+app.use(compareRoutes);
 
 // Deploy (mis. Railway): BFF sekaligus menyajikan hasil build web agar /api satu origin dengan UI (cookie session SameSite=Lax)
 const WEB_DIST = path.resolve(__dirname, "../../web/dist");
