@@ -23,6 +23,7 @@ export function useEnvCompare() {
     tenantId: ""
   }));
   const [tenantsByEnv, setTenantsByEnv] = useState<Record<string, Tenant[]>>({});
+  const [tenantErrors, setTenantErrors] = useState<Record<string, string>>({});
   const [entries, setEntries] = useState<CompareEntry[]>([]);
   const [summary, setSummary] = useState<CompareSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -37,14 +38,18 @@ export function useEnvCompare() {
       const res = await api("/api/tenants", { headers: { "X-Target-Env": env } });
       const json = await res.json().catch(() => ({}));
       const list: Tenant[] = res.ok ? json.data || [] : [];
+      const msg = !res.ok ? json.error || `HTTP ${res.status}` : json.targetError ? `DB target tidak terjangkau: ${json.targetError}` : "";
+      setTenantErrors((prev) => ({ ...prev, [env]: msg }));
       setTenantsByEnv((prev) => ({ ...prev, [env]: list }));
       return list;
-    } catch {
+    } catch (e: any) {
+      setTenantErrors((prev) => ({ ...prev, [env]: e?.message || "Gagal memuat daftar tenant" }));
       setTenantsByEnv((prev) => ({ ...prev, [env]: [] }));
       return [];
     }
   }, []);
   const tenantsFor = (env: string): Tenant[] => tenantsByEnv[env] ?? [];
+  const tenantErrorFor = (env: string): string => tenantErrors[env] ?? "";
 
   // Saat dibuka: muat tenant kedua env; tenant kanan = tenant dengan baseCode sama dengan tenant kiri
   useEffect(() => {
@@ -65,6 +70,10 @@ export function useEnvCompare() {
     const id = ++reqId.current;
     setLoading(true);
     setError(null);
+    // Jangan biarkan baris/diff sisi lama tampil di bawah judul sisi baru, dan jangan ada centang usang
+    setEntries([]);
+    setSummary(null);
+    setChecked(new Set());
     try {
       const qs = new URLSearchParams({
         leftEnv: left.env, leftTenant: left.tenantId, rightEnv: right.env, rightTenant: right.tenantId
@@ -75,6 +84,8 @@ export function useEnvCompare() {
       if (!res.ok) {
         setEntries([]);
         setSummary(null);
+        setChecked(new Set());
+        setSelectedType(null);
         setError({ message: json.error || `HTTP ${res.status}`, side: json.side });
         return;
       }
@@ -94,6 +105,8 @@ export function useEnvCompare() {
       if (id !== reqId.current) return;
       setEntries([]);
       setSummary(null);
+      setChecked(new Set());
+      setSelectedType(null);
       setError({ message: e?.message || "Gagal membandingkan" });
     } finally {
       if (id === reqId.current) setLoading(false);
@@ -105,6 +118,9 @@ export function useEnvCompare() {
       reqId.current++;
       setEntries([]);
       setSummary(null);
+      setChecked(new Set());
+      setSelectedType(null);
+      setError(null);
       setLoading(false);
       return;
     }
@@ -136,7 +152,7 @@ export function useEnvCompare() {
   }, [entries, query]);
 
   return {
-    left, right, setLeft, setRight, swap, tenantsFor, loadTenants,
+    left, right, setLeft, setRight, swap, tenantsFor, tenantErrorFor, loadTenants,
     entries, summary, loading, error, reload,
     selectedType, setSelectedType, checked, toggleChecked, checkDifferent,
     query, setQuery, visibleEntries

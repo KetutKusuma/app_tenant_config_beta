@@ -16,7 +16,7 @@ export function useCoreActions(s: StudioState) {
     setPresetDirPath, setPresetInputPath, setReferences, setSelectedConfigId, setSelectedTenant,
     setShowValidationPanel, setSplitJsonContent, setSplitMode, setSplitSourceType, setSplitTitle,
     setStatusMessage, setTargetEnvName, setTargetEnvs, setTenantSuggestions, setTenants, setTenantsWarning,
-    setUser, setValidationIssues,
+    setUser, setValidationIssues, showEnvCompare,
     splitJsonContent, targetEnvName, targetEnvs, tenants, user
   } = s;
 
@@ -491,6 +491,11 @@ export function useCoreActions(s: StudioState) {
       setStatusMessage(msg);
       setTimeout(() => setStatusMessage(null), 2500);
     };
+    // Layar Bandingkan antar env terbuka: editor studio tersembunyi, jangan menyimpan/validasi/fokus cari
+    if (showEnvCompare) {
+      if (key === "s") e.preventDefault();
+      return;
+    }
     if (key === "s") {
       e.preventDefault();
       if (!selectedConfigId || isSaving) return;

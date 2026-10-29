@@ -1,6 +1,6 @@
 import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { useEnvCompare } from "../../studio/useEnvCompare";
@@ -44,11 +44,12 @@ export function EnvCompareScreen() {
 }
 
 function SidePicker({
-  label, side, errorMsg, envs, tenants, onEnv, onTenant
+  label, side, errorMsg, tenantError, envs, tenants, onEnv, onTenant
 }: {
   label: string;
   side: CompareSide;
   errorMsg?: string;
+  tenantError?: string;
   envs: TargetEnvInfo[];
   tenants: { tenantId: string; name: string; code: string }[];
   onEnv: (env: string) => void;
@@ -56,14 +57,15 @@ function SidePicker({
 }) {
   const env = envs.find((e) => e.name === side.env);
   return (
-    <div className="flex items-center gap-1.5" title={errorMsg}>
+    <div className="flex items-center gap-1.5" title={tenantError || errorMsg}>
       <span className="text-slate-500 text-xs">{label}</span>
       <span className={`w-2 h-2 rounded-full shrink-0 ${ENV_DOT[env?.color ?? ""] ?? "bg-slate-400"}`} />
       <select className={SELECT_CLS} value={side.env} onChange={(e) => onEnv(e.target.value)} title="Env">
         {envs.map((e) => <option key={e.name} value={e.name}>{e.label}</option>)}
       </select>
       <select
-        className={`${SELECT_CLS} ${errorMsg ? "border-rose-500/60" : ""}`}
+        className={`${SELECT_CLS} ${errorMsg || tenantError ? "border-rose-500/60" : ""}`}
+        disabled={Boolean(tenantError)}
         value={side.tenantId}
         onChange={(e) => onTenant(e.target.value)}
         title="Tenant"
@@ -71,6 +73,7 @@ function SidePicker({
         <option value="">Pilih tenant…</option>
         {tenants.map((t) => <option key={t.tenantId} value={t.tenantId}>{t.name} ({t.code})</option>)}
       </select>
+      {tenantError && <span className="text-[10px] text-rose-300 max-w-[220px] truncate" title={tenantError}>{tenantError}</span>}
     </div>
   );
 }
@@ -79,10 +82,14 @@ function EnvCompareBody() {
   const { targetEnvs, setShowEnvCompare } = useStudio();
   const c = useEnvCompare();
   const diffRef = useRef<DiffEditorInstance | null>(null);
+  const envReq = useRef({ left: 0, right: 0 });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setShowEnvCompare(false);
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      // Esc di dalam Monaco (mis. menutup widget cari) bukan untuk menutup layar
+      if ((e.target as HTMLElement | null)?.closest?.(".monaco-editor")) return;
+      setShowEnvCompare(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -96,8 +103,11 @@ function EnvCompareBody() {
     const cur = which === "left" ? c.left : c.right;
     const setter = which === "left" ? c.setLeft : c.setRight;
     const base = tenantInfo(cur)?.baseCode;
+    const req = ++envReq.current[which];
     setter({ env, tenantId: "" });
     const list = await c.loadTenants(env);
+    // Abaikan hasil usang: pengguna sudah mengganti env sisi ini lagi
+    if (req !== envReq.current[which]) return;
     const match = base ? list.find((t) => t.baseCode === base) : undefined;
     if (match) setter({ env, tenantId: match.tenantId });
   };
@@ -117,7 +127,8 @@ function EnvCompareBody() {
     ed.getModifiedEditor().focus();
   };
 
-  const toText = (v: unknown) => (v === undefined || v === null ? "" : JSON.stringify(v, null, 2));
+  const leftText = useMemo(() => (entry?.left?.value == null ? "" : JSON.stringify(entry.left.value, null, 2)), [entry]);
+  const rightText = useMemo(() => (entry?.right?.value == null ? "" : JSON.stringify(entry.right.value, null, 2)), [entry]);
   const leftEnv = envInfo(c.left.env);
   const rightEnv = envInfo(c.right.env);
   const leftTenant = tenantInfo(c.left);
@@ -130,7 +141,7 @@ function EnvCompareBody() {
       {/* Bar atas */}
       <div className="bg-slate-900 border-b border-slate-800 px-3 py-2 flex items-center gap-2 flex-wrap">
         <SidePicker
-          label="Kiri" side={c.left} envs={targetEnvs} tenants={c.tenantsFor(c.left.env)}
+          label="Kiri" side={c.left} tenantError={c.tenantErrorFor(c.left.env)} envs={targetEnvs} tenants={c.tenantsFor(c.left.env)}
           errorMsg={c.error?.side === "kiri" ? c.error.message : undefined}
           onEnv={(e) => changeEnv("left", e)} onTenant={(id) => c.setLeft({ ...c.left, tenantId: id })}
         />
@@ -142,7 +153,7 @@ function EnvCompareBody() {
           <ArrowLeftRight className="w-3.5 h-3.5" />
         </button>
         <SidePicker
-          label="Kanan" side={c.right} envs={targetEnvs} tenants={c.tenantsFor(c.right.env)}
+          label="Kanan" side={c.right} tenantError={c.tenantErrorFor(c.right.env)} envs={targetEnvs} tenants={c.tenantsFor(c.right.env)}
           errorMsg={c.error?.side === "kanan" ? c.error.message : undefined}
           onEnv={(e) => changeEnv("right", e)} onTenant={(id) => c.setRight({ ...c.right, tenantId: id })}
         />
@@ -233,20 +244,8 @@ function EnvCompareBody() {
           )}
           {entry ? (
             <>
-              <div className="bg-slate-900 border-b border-slate-800 flex items-center">
-                <div className="grid grid-cols-2 flex-1 min-w-0">
-                  <PaneTitle
-                    envLabel={leftEnv?.label ?? c.left.env} envColor={leftEnv?.color ?? "slate"}
-                    tenantName={leftTenant?.name} tenantCode={leftTenant?.code} configType={entry.configType}
-                    muted={entry.left ? undefined : "(tidak ada di kiri)"}
-                  />
-                  <PaneTitle
-                    envLabel={rightEnv?.label ?? c.right.env} envColor={rightEnv?.color ?? "slate"}
-                    tenantName={rightTenant?.name} tenantCode={rightTenant?.code} configType={entry.configType}
-                    muted={entry.right ? undefined : "(tidak ada di kanan)"}
-                  />
-                </div>
-                <div className="flex items-center gap-0.5 shrink-0 px-2">
+              <div className="bg-slate-900 border-b border-slate-800">
+                <div className="flex items-center justify-end gap-0.5 px-2 h-7">
                   <span className="text-[10px] text-slate-400 tabular-nums px-1" title="Jumlah perubahan antara kiri dan kanan (dihitung server)">
                     {`${entry.changeCount} perubahan`}
                   </span>
@@ -267,6 +266,18 @@ function EnvCompareBody() {
                     <ChevronDown className="w-3.5 h-3.5" />
                   </button>
                 </div>
+                <div className="grid grid-cols-2">
+                  <PaneTitle
+                    envLabel={leftEnv?.label ?? c.left.env} envColor={leftEnv?.color ?? "slate"}
+                    tenantName={leftTenant?.name} tenantCode={leftTenant?.code} configType={entry.configType}
+                    muted={entry.left ? undefined : "(tidak ada di kiri)"}
+                  />
+                  <PaneTitle
+                    envLabel={rightEnv?.label ?? c.right.env} envColor={rightEnv?.color ?? "slate"}
+                    tenantName={rightTenant?.name} tenantCode={rightTenant?.code} configType={entry.configType}
+                    muted={entry.right ? undefined : "(tidak ada di kanan)"}
+                  />
+                </div>
               </div>
               <div className="flex-1 min-h-0">
                 <DiffEditor
@@ -275,8 +286,8 @@ function EnvCompareBody() {
                   theme={STUDIO_THEME}
                   beforeMount={defineStudioTheme}
                   onMount={handleMount}
-                  original={toText(entry.left?.value)}
-                  modified={toText(entry.right?.value)}
+                  original={leftText}
+                  modified={rightText}
                   options={DIFF_OPTIONS}
                 />
               </div>
