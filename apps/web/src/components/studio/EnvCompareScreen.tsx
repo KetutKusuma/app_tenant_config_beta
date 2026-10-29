@@ -169,16 +169,14 @@ function EnvCompareBody() {
         )}
         {/* SLOT-TASK-13: tombol "Riwayat" ditambahkan di sini */}
         <div id="env-compare-actions" className="flex items-center gap-1">
-          {(
-            <button
-              onClick={() => setDialog("copy")}
-              disabled={!ready || c.loading}
-              className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
-              title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
-            >
-              Salin ke Kanan…
-            </button>
-          )}
+          <button
+            onClick={() => setDialog("copy")}
+            disabled={!ready || c.loading}
+            className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
+            title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
+          >
+            Salin ke Kanan…
+          </button>
           <button
             onClick={() => setDialog("export")}
             disabled={!ready || c.checked.size === 0}
