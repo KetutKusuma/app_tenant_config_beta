@@ -48,14 +48,15 @@ export function writeJsonFileWithBackup(filePath: string, value: any): { existed
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
   return { existed };
 }
-export async function snapshotBeforeChange(row: any, summary: string, author: string, env: string): Promise<number> {
+export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, env: string): Promise<{ historyId: string; version: number }> {
   const v = await auditDb.query(`
     SELECT COALESCE(MAX(version), 0) AS last_version
     FROM tenant_studio.tenant_config_histories
     WHERE core_config_id = ${esc(row.id)} AND target_env = ${esc(env)};
   `);
   const nextVersion = parseInt(v.rows[0].last_version, 10) + 1;
-  await auditDb.query(`
+  const summaryText = typeof summary === "function" ? summary(nextVersion) : summary;
+  const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
     (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
     VALUES (
@@ -65,12 +66,16 @@ export async function snapshotBeforeChange(row: any, summary: string, author: st
       ${esc(row.id)},
       ${nextVersion},
       ${esc(JSON.stringify(row.value || {}))}::jsonb,
-      ${esc(summary)},
+      ${esc(summaryText)},
       ${esc(author)},
       ${esc(env)}
-    );
+    )
+    RETURNING id;
   `);
-  return nextVersion;
+  return { historyId: String(ins.rows[0].id), version: nextVersion };
+}
+export async function discardSnapshot(historyId: string): Promise<void> {
+  await auditDb.query(`DELETE FROM tenant_studio.tenant_config_histories WHERE id = ${esc(historyId)};`);
 }
 export async function upsertPresetLink(userId: string, env: string, tenantId: string, configType: string, filePath: string) {
   await auditDb.query(`

@@ -5,6 +5,8 @@ import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
 import { domainOf, presetDirFor, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
+import { backupThenWrite } from "../backupFirst";
+import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
 
 // Route: file preset lokal (katalog, baca, simpan, ekspor massal, ekspor skill, sync 1 file).
 
@@ -348,49 +350,42 @@ router.post("/api/references/sync-single", async (req, res) => {
     if (stale) return res.status(409).json(stale);
     const jsonParsed = typeof content === "string" ? JSON.parse(content) : content;
 
-    // Ambil versi terakhir dari history
-    const vRes = await auditDb.query(`
-      SELECT COALESCE(MAX(version), 0) as max_v 
-      FROM tenant_studio.tenant_config_histories 
-      WHERE core_config_id = ${esc(configId)} AND target_env = ${esc(req.targetEnv!.name)};
-    `);
-    const nextVersion = (vRes.rows[0]?.max_v || 0) + 1;
-
-    // 1. Update nilai baru di database, hanya jika versi DB belum berubah sejak dicek
-    const updRes = await req.targetDb!.query(`
-      UPDATE ${D.table} 
-      SET 
-        value = ${esc(JSON.stringify(jsonParsed))}::jsonb,
-        updated_at = NOW()
-      WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
-      RETURNING updated_at::text AS version_token;
-    `);
-    if (updRes.rows.length === 0) {
+    // Cadangkan isi lama ke history DULU; bila tulis gagal/stale, cadangan dibuang
+    let backupVersion = 0;
+    const outcome = await backupThenWrite({
+      backup: async () => {
+        const snap = await snapshotBeforeChange(
+          currentConfig,
+          `Synchronized from preset file: ${sourceFilename || "local file"}`,
+          authorName,
+          req.targetEnv!.name
+        );
+        backupVersion = snap.version;
+        return snap.historyId;
+      },
+      write: async () => {
+        const updRes = await req.targetDb!.query(`
+          UPDATE ${D.table} 
+          SET 
+            value = ${esc(JSON.stringify(jsonParsed))}::jsonb,
+            updated_at = NOW()
+          WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
+          RETURNING updated_at::text AS version_token;
+        `);
+        return updRes.rows[0] ?? null;
+      },
+      discard: discardSnapshot,
+      onDiscardError: (e) => console.error("Gagal membuang cadangan history:", e)
+    });
+    if (outcome.status === "stale") {
       return res.status(409).json(staleVersionError("", "changed")!);
     }
-
-    // 2. Simpan snapshot kondisi SEBELUM perubahan ke history
-    await auditDb.query(`
-      INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
-      VALUES (
-        ${currentConfig.tenant_id ? esc(currentConfig.tenant_id) : "NULL"}, 
-        ${currentConfig.group_id ? esc(currentConfig.group_id) : "NULL"}, 
-        ${esc(currentConfig.config_type || "UNKNOWN")}, 
-        ${esc(configId)}, 
-        ${nextVersion}, 
-        ${esc(JSON.stringify(currentConfig.value || {}))}::jsonb, 
-        ${esc(`Synchronized from preset file: ${sourceFilename || "local file"}`)}, 
-        ${esc(authorName)},
-        ${esc(req.targetEnv!.name)}
-      );
-    `);
 
     res.json({
       success: true,
       message: `Konfigurasi ${currentConfig.config_type} berhasil disinkronkan dari file preset ke database!`,
-      version: nextVersion,
-      versionToken: updRes.rows[0].version_token,
+      version: backupVersion,
+      versionToken: outcome.result.version_token,
       data: jsonParsed
     });
   } catch (err: any) {

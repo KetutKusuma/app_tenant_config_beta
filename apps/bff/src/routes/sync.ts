@@ -6,7 +6,8 @@ import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
 import { domainOf, presetDirFor } from "../domain";
 import { assertWritable } from "../envs";
-import { isSafePresetPath, normalizeName, sameJson, scanJsonFiles, setPresetBase, snapshotBeforeChange, upsertPresetLink, writeJsonFileWithBackup } from "../presetSync";
+import { backupThenWrite } from "../backupFirst";
+import { isSafePresetPath, normalizeName, sameJson, scanJsonFiles, setPresetBase, snapshotBeforeChange, discardSnapshot, upsertPresetLink, writeJsonFileWithBackup } from "../presetSync";
 
 // Route: Sync Center (status, tautan file, apply push/pull) dan tulis file preset lokal.
 
@@ -249,19 +250,39 @@ router.post("/api/sync/apply", async (req, res) => {
             report("failed", "Database sudah berubah sejak pull terakhir. Pull dulu, lalu terapkan ulang perubahan file.");
             continue;
           }
-          const upd = await req.targetDb!.query(`
-            UPDATE ${D.table}
-            SET value = ${esc(JSON.stringify(parsed))}::jsonb, updated_at = NOW()
-            WHERE id = ${esc(row.id)} AND updated_at::text = ${esc(row.version_token)}
-            RETURNING updated_at::text AS version_token;
-          `);
-          if (upd.rows.length === 0) {
+          let backedUp = false;
+          let outcome;
+          try {
+            outcome = await backupThenWrite({
+              backup: async () => {
+                const snap = await snapshotBeforeChange(row, `Push dari file: ${path.basename(filePath)}`, authorName, req.targetEnv!.name);
+                backedUp = true;
+                return snap.historyId;
+              },
+              write: async () => {
+                const upd = await req.targetDb!.query(`
+                  UPDATE ${D.table}
+                  SET value = ${esc(JSON.stringify(parsed))}::jsonb, updated_at = NOW()
+                  WHERE id = ${esc(row.id)} AND updated_at::text = ${esc(row.version_token)}
+                  RETURNING updated_at::text AS version_token;
+                `);
+                return upd.rows[0] ?? null;
+              },
+              discard: discardSnapshot,
+              onDiscardError: (e) => console.error("Gagal membuang cadangan history:", e)
+            });
+          } catch (e: any) {
+            if (!backedUp) {
+              report("failed", "Gagal mencadangkan isi lama: " + e.message);
+              continue;
+            }
+            throw e;
+          }
+          if (outcome.status === "stale") {
             report("failed", "Database berubah saat proses push. Pull dulu, lalu coba lagi.");
             continue;
           }
-          // Snapshot data SEBELUM perubahan
-          await snapshotBeforeChange(row, `Push dari file: ${path.basename(filePath)}`, authorName, req.targetEnv!.name);
-          await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, upd.rows[0].version_token);
+          await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, outcome.result.version_token);
           report("updated");
         } else if (createIfMissing) {
           const newId = randomUUID();

@@ -4,6 +4,8 @@ import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
 import { domainOf, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
+import { backupThenWrite } from "../backupFirst";
+import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
 
 // Route: CRUD konfigurasi (detail, buat, update + optimistic locking, hapus) dan riwayat.
 
@@ -121,49 +123,43 @@ router.put("/api/configs/:configId", async (req, res) => {
     if (stale) return res.status(409).json(stale);
     const finalGroupId = groupId !== undefined ? (groupId ? groupId.trim() : null) : currentConfig.group_id;
 
-    const verRes = await auditDb.query(`
-      SELECT COALESCE(MAX(version), 0) as last_version 
-      FROM tenant_studio.tenant_config_histories 
-      WHERE core_config_id = ${esc(configId)} AND target_env = ${esc(req.targetEnv!.name)};
-    `);
-    const nextVersion = parseInt(verRes.rows[0].last_version, 10) + 1;
-
-    // 1. Update konfigurasi aktif dengan data BARU, hanya jika versi DB belum berubah sejak dicek
-    const updRes = await req.targetDb!.query(`
-      UPDATE ${D.table} 
-      SET 
-        value = ${esc(JSON.stringify(value))}::jsonb, 
-        group_id = ${finalGroupId ? esc(finalGroupId) : "NULL"},
-        updated_at = NOW() 
-      WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
-      RETURNING updated_at::text AS version_token;
-    `);
-    if (updRes.rows.length === 0) {
+    // Cadangkan isi lama ke history DULU; bila tulis gagal/stale, cadangan dibuang
+    let backupVersion = 0;
+    const outcome = await backupThenWrite({
+      backup: async () => {
+        const snap = await snapshotBeforeChange(
+          currentConfig,
+          changeSummary || ((v: number) => `Snapshot sebelum perubahan v${v}`),
+          authorName,
+          req.targetEnv!.name
+        );
+        backupVersion = snap.version;
+        return snap.historyId;
+      },
+      write: async () => {
+        const updRes = await req.targetDb!.query(`
+          UPDATE ${D.table} 
+          SET 
+            value = ${esc(JSON.stringify(value))}::jsonb, 
+            group_id = ${finalGroupId ? esc(finalGroupId) : "NULL"},
+            updated_at = NOW() 
+          WHERE id = ${esc(configId)} AND updated_at::text = ${esc(currentConfig.version_token)}
+          RETURNING updated_at::text AS version_token;
+        `);
+        return updRes.rows[0] ?? null;
+      },
+      discard: discardSnapshot,
+      onDiscardError: (e) => console.error("Gagal membuang cadangan history:", e)
+    });
+    if (outcome.status === "stale") {
       return res.status(409).json(staleVersionError("", "changed")!);
     }
 
-    // 2. Simpan snapshot data SEBELUM perubahan ke audit history (Previous Version Backup)
-    await auditDb.query(`
-      INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
-      VALUES (
-        ${currentConfig.tenant_id ? esc(currentConfig.tenant_id) : "NULL"}, 
-        ${currentConfig.group_id ? esc(currentConfig.group_id) : "NULL"}, 
-        ${currentConfig.config_type ? esc(currentConfig.config_type) : "NULL"}, 
-        ${esc(configId)}, 
-        ${nextVersion}, 
-        ${esc(JSON.stringify(currentConfig.value || {}))}::jsonb, 
-        ${esc(changeSummary || `Snapshot sebelum perubahan v${nextVersion}`)}, 
-        ${esc(authorName)},
-        ${esc(req.targetEnv!.name)}
-      );
-    `);
-
     res.json({
       success: true,
-      message: `Configuration ${configId} successfully updated to version ${nextVersion}`,
-      version: nextVersion,
-      versionToken: updRes.rows[0].version_token
+      message: `Configuration ${configId} successfully updated to version ${backupVersion}`,
+      version: backupVersion,
+      versionToken: outcome.result.version_token
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
