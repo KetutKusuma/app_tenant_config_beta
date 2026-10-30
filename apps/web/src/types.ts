@@ -162,3 +162,50 @@ export interface CopyResult {
   skipped: { same: string[]; targetOnly: string[]; duplicates: string[] };
   warnings: string[];
 }
+
+// ---- Popup "Salin config" (cermin respons GET /api/compare/copy-preview di BFF) ----
+export type PreviewStatus = "baru" | "timpa" | "sama" | "ganda" | "hanya_tujuan" | "tidak_dibaca";
+export interface PreviewPathConflict { ownerTenantId: string | null; ownerConfigType: string; suggestion: string }
+export interface PreviewItem {
+  configType: string;
+  status: PreviewStatus;
+  /** version_token config di tujuan; null bila belum ada atau tujuan tidak dibaca */
+  targetVersion: string | null;
+  autoSummary: string | null;
+  /** path akhir; null untuk domain tanpa kolom path */
+  path: string | null;
+  pathConflict: PreviewPathConflict | null;
+}
+export interface CopyPreview {
+  targetReadable: boolean;
+  /** null bila tujuan production-manual */
+  targetTenantCode: string | null;
+  domains: Array<{ domain: ConfigDomain; items: PreviewItem[] }>;
+}
+
+/** Entri env tujuan khusus: production diisi manual (tidak bisa dibaca), hasilnya file SQL */
+export const MANUAL_ENV = "production-manual";
+
+export interface CopyDialogRequest {
+  source: { env: string; tenantId: string };
+  domains: ConfigDomain[];
+  preselect: Array<{ domain: ConfigDomain; configType: string }> | "all";
+  target?: { env: string; tenantId: string };
+  lockTarget?: boolean;
+}
+export interface CopyDialogDone { target: { env: string; tenantId: string }; wrote: boolean }
+
+/** Status cek path langsung (GET /api/compare/path-check) untuk satu kolom path pengganti */
+export type PathStatus = "memeriksa" | "tersedia" | "dipakai";
+
+/** Respons sukses POST /api/compare/copy (bentuk multi-domain) */
+export interface CopyBatchResult {
+  batchId: string;
+  domains: Array<{
+    domain: ConfigDomain;
+    created: string[];
+    overwritten: string[];
+    skipped: { same: string[]; targetOnly: string[]; duplicates: string[]; unselected: string[] };
+  }>;
+  warnings: string[];
+}
