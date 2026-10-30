@@ -4,6 +4,8 @@ import { canonicalize } from "./presetSync";
 
 export const REASON_MAX = 500;
 export const QUICK_SAVE_REASON = "Update via Tenant Studio";
+// Lebar kolom tenant_config_histories.change_summary (varchar(500)): catatan tersimpan tidak boleh lebih panjang.
+export const NOTE_MAX = 500;
 
 const ROOT_PATH = "(akar)";
 const EMPTY_PATH = "(kosong)";
@@ -92,7 +94,15 @@ export function autoSummary(
 }
 
 // Bentuk tersimpan catatan: "<alasan> — <bagian otomatis digabung ' · '>". Bagian kosong dibuang.
+// Hasil tidak pernah lebih dari NOTE_MAX karakter: alasan dipertahankan utuh, bagian otomatis dipotong
+// (diakhiri "…") bila tidak muat; bila sisa ruang kurang dari 4 karakter, hanya alasan yang dikembalikan.
 export function composeNote(reason: string, ...parts: Array<string | null | undefined>): string {
+  const head = reason.slice(0, NOTE_MAX);
   const rest = parts.filter((p): p is string => typeof p === "string" && p.trim() !== "");
-  return rest.length === 0 ? reason : `${reason} — ${rest.join(" · ")}`;
+  if (rest.length === 0) return head;
+  const sep = " — ";
+  const room = NOTE_MAX - head.length - sep.length;
+  if (room < 1) return head;
+  const joined = rest.join(" · ");
+  return head + sep + (joined.length <= room ? joined : joined.slice(0, room - 1) + "…");
 }

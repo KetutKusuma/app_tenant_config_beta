@@ -55,7 +55,8 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
     WHERE core_config_id = ${esc(row.id)} AND target_env = ${esc(env)};
   `);
   const nextVersion = parseInt(v.rows[0].last_version, 10) + 1;
-  const summaryText = typeof summary === "function" ? summary(nextVersion) : summary;
+  // change_summary adalah varchar(500): potong sebagai jaring pengaman bila pemanggil tidak memakai composeNote
+  const summaryText = (typeof summary === "function" ? summary(nextVersion) : summary).slice(0, 500);
   const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
     (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env${batchId ? ", batch_id" : ""})

@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseReason, diffPaths, autoSummary, composeNote, REASON_MAX, QUICK_SAVE_REASON } from "./changeSummary";
+import { parseReason, diffPaths, autoSummary, composeNote, REASON_MAX, QUICK_SAVE_REASON, NOTE_MAX } from "./changeSummary";
 
 test("konstanta", () => {
   assert.equal(REASON_MAX, 500);
+  assert.equal(NOTE_MAX, 500);
   assert.equal(QUICK_SAVE_REASON, "Update via Tenant Studio");
 });
 
@@ -60,4 +61,32 @@ test("composeNote", () => {
   assert.equal(composeNote("Rilis", null, "Ubah 1 field: a"), "Rilis — Ubah 1 field: a");
   assert.equal(composeNote("Rilis"), "Rilis");
   assert.equal(composeNote("Rilis", null, undefined, ""), "Rilis");
+});
+
+test("composeNote tidak pernah melebihi NOTE_MAX (kolom varchar(500))", () => {
+  const full = "r".repeat(500);
+  assert.equal(composeNote(full, "Ubah 1 field: a", "Config baru"), full);
+  assert.equal(composeNote(full, "Ubah 1 field: a").length, 500);
+
+  const reason = "r".repeat(100);
+  const note = composeNote(reason, "p".repeat(1000));
+  assert.equal(note.length, 500);
+  assert.ok(note.startsWith(reason + " — "));
+  assert.ok(note.endsWith("…"));
+
+  // pas muat: tidak dipotong dan tanpa "…"
+  const fit = composeNote(reason, "p".repeat(397));
+  assert.equal(fit.length, 500);
+  assert.ok(!fit.endsWith("…"));
+
+  // sisa ruang tepat 4 karakter: " — " + "…"
+  assert.equal(composeNote("r".repeat(496), "pppp"), "r".repeat(496) + " — …");
+  // sisa ruang kurang dari 4 karakter: hanya alasan
+  assert.equal(composeNote("r".repeat(497), "pppp"), "r".repeat(497));
+
+  // alasan lebih panjang dari NOTE_MAX dipotong, bagian otomatis dibuang
+  assert.equal(composeNote("r".repeat(600), "p").length, 500);
+
+  // catatan pendek tidak berubah
+  assert.equal(composeNote("Rilis", "Ubah 1 field: a"), "Rilis — Ubah 1 field: a");
 });
