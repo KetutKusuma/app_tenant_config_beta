@@ -155,13 +155,6 @@ export interface ExportSqlResult {
   beforeSnapshot: "tersimpan" | "tidak_tersedia";
   warning: string | null;
 }
-export interface CopyResult {
-  batchId: string;
-  created: string[];
-  overwritten: string[];
-  skipped: { same: string[]; targetOnly: string[]; duplicates: string[] };
-  warnings: string[];
-}
 
 // ---- Popup "Salin config" (cermin respons GET /api/compare/copy-preview di BFF) ----
 export type PreviewStatus = "baru" | "timpa" | "sama" | "ganda" | "hanya_tujuan" | "tidak_dibaca";

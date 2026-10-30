@@ -1,6 +1,6 @@
 import {
-  AlertTriangle, ArrowLeftRight, Building2, Check, Copy, Database, Download, Edit2, FileCode, FilePlus, Layers,
-  Plus, RefreshCw, Search, Trash2, Users, Workflow
+  AlertTriangle, ArrowLeftRight, Building2, Check, Copy, CopyPlus, Database, Download, Edit2, FileCode, FilePlus,
+  Layers, Plus, RefreshCw, Search, Trash2, Users, Workflow
 } from "lucide-react";
 import { DOMAIN_LABEL, ENV_DOT } from "../../types";
 import { useStudio } from "../../studio/StudioContext";
@@ -10,9 +10,9 @@ export function Sidebar() {
     activeConfigType, configDomain, configs, copiedTenantId, copyToClipboard, fetchTenants, filteredTenants,
     handleCompareWithDb, handleStartTenantComparison, handleSwitchDomain, openAddTenantFromSuggestion,
     openAddTenantModal, openCompareTenantModal, openConfig, openDeleteConfigModal, openEditTenantModal,
-    openSavePresetModal, openTenant, searchInputRef, searchQuery, selectedConfigId, selectedTenant, setCtxMenu,
-    setSearchQuery, setShowAddConfigModal, setTenantToDelete, targetEnvName, targetEnvs, tenants, tenantSuggestions,
-    tenantsWarning
+    openSavePresetModal, openTenant, searchInputRef, searchQuery, selectedConfigId, selectedTenant, setCopyDialog,
+    setCtxMenu, setSearchQuery, setShowAddConfigModal, setTenantToDelete, targetEnvName, targetEnvs, tenants,
+    tenantSuggestions, tenantsWarning
   } = useStudio();
   // Daftar tenant milik target env aktif saja (tenant_id berbeda di dev / staging / production)
   const activeEnv = targetEnvs.find(e => e.name === targetEnvName);
@@ -159,6 +159,18 @@ export function Sidebar() {
                     onSelect: () => handleStartTenantComparison(t.tenantId, activeConfigType || "CANDIDATE_STABLE")
                   },
                   { key: "edit", label: "Edit nama / label…", icon: <Edit2 className="w-3.5 h-3.5" />, onSelect: () => openEditTenantModal(t) },
+                  ...(t.tenantId !== "GLOBAL_DEFAULT"
+                    ? [{
+                        key: "duplicate",
+                        label: "Duplikat tenant…",
+                        icon: <CopyPlus className="w-3.5 h-3.5" />,
+                        onSelect: () => setCopyDialog({
+                          source: { env: targetEnvName, tenantId: t.tenantId },
+                          domains: ["tenant_config", "workflow_pipeline"],
+                          preselect: "all"
+                        })
+                      }]
+                    : []),
                   "divider",
                   { key: "copy-id", label: "Copy tenant_id", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(t.tenantId) },
                   ...(t.groupId
@@ -287,6 +299,17 @@ export function Sidebar() {
                         { key: "db", label: "Bandingkan dengan DB terbaru", icon: <Database className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: handleCompareWithDb },
                         { key: "tenant", label: "Bandingkan dengan tenant lain…", icon: <ArrowLeftRight className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openCompareTenantModal },
                         { key: "export", label: "Ekspor sebagai preset…", icon: <Download className="w-3.5 h-3.5" />, disabled: !isConfigActive, hint: isConfigActive ? undefined : "buka dulu", onSelect: openSavePresetModal },
+                        {
+                          key: "copy-to",
+                          label: "Salin ke…",
+                          icon: <Copy className="w-3.5 h-3.5" />,
+                          disabled: !selectedTenant,
+                          onSelect: () => selectedTenant && setCopyDialog({
+                            source: { env: targetEnvName, tenantId: selectedTenant.tenantId },
+                            domains: [configDomain],
+                            preselect: [{ domain: configDomain, configType: c.config_type }]
+                          })
+                        },
                         "divider",
                         { key: "copy-type", label: "Copy nama config", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.config_type) },
                         { key: "copy-id", label: "Copy ID", icon: <Copy className="w-3.5 h-3.5" />, onSelect: () => copyToClipboard(c.id) },

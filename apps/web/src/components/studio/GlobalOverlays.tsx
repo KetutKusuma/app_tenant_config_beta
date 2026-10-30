@@ -1,13 +1,42 @@
+import { api } from "../../lib/api";
+import { useStudio } from "../../studio/StudioContext";
+import type { CopyDialogDone } from "../../types";
 import { ChangePasswordForm } from "../AuthGate";
 import { ContextMenu, PromptDialog, TypeToConfirmDialog } from "../ui";
-import { useStudio } from "../../studio/StudioContext";
+import { CopyConfigDialog } from "./CopyConfigDialog";
 
 export function GlobalOverlays() {
   const {
-    ctxMenu, envConfirm, handleDeleteTenant, promptDialog, setCtxMenu, setEnvConfirm, setPromptDialog,
-    setShowChangePassword, setStatusMessage, setTenantToDelete, setUser, showChangePassword, statusMessage,
-    targetEnvName, targetEnvs, tenantToDelete, user
+    activeConfigType, copyDialog, ctxMenu, currentGroupId, envConfirm, handleDeleteTenant, isDirty, loadConfig,
+    promptDialog, selectedConfigId, selectedTenant, setConfigs, setCopyDialog, setCtxMenu, setEnvConfirm,
+    setPromptDialog, setShowChangePassword, setStatusMessage, setTenantToDelete, setUser, showChangePassword,
+    statusMessage, targetEnvName, targetEnvs, tenantToDelete, user
   } = useStudio();
+
+  const flash = (msg: string, ms: number) => {
+    setStatusMessage(msg);
+    setTimeout(() => setStatusMessage(null), ms);
+  };
+
+  // Popup Salin config selesai. wrote juga true setelah hasil tidak pasti, dan popup tidak punya tombol muat ulang,
+  // jadi muat ulang di sini: daftar config tenant aktif, lalu isi config aktif bila editor tidak punya perubahan
+  const handleCopyDone = async ({ target, wrote }: CopyDialogDone) => {
+    setCopyDialog(null);
+    if (!wrote || !selectedTenant || target.env !== targetEnvName || target.tenantId !== selectedTenant.tenantId) return;
+    try {
+      const res = await api(`/api/tenants/${selectedTenant.tenantId}/configs`);
+      const json = await res.json();
+      if (!res.ok || !json.data) throw new Error(json.error || `HTTP ${res.status}`);
+      setConfigs(json.data);
+      if (isDirty) return flash("Isi tujuan berubah; simpan atau buang perubahan lalu muat ulang.", 6000);
+      // loadConfig sudah ikut memuat riwayat config (fetchHistories)
+      if (selectedConfigId) await loadConfig(selectedConfigId, activeConfigType, currentGroupId);
+    } catch (err: any) {
+      console.error("Gagal memuat ulang setelah salin:", err);
+      flash(`Gagal memuat ulang daftar config: ${err.message}`, 6000);
+    }
+  };
+
   return (
     <>
       {/* Notifikasi status: toast di pojok kanan bawah, tidak memakan ruang header */}
@@ -73,6 +102,10 @@ export function GlobalOverlays() {
           onConfirm={() => handleDeleteTenant(tenantToDelete)}
           onCancel={() => setTenantToDelete(null)}
         />
+      )}
+
+      {copyDialog && (
+        <CopyConfigDialog request={copyDialog} onClose={() => setCopyDialog(null)} onDone={handleCopyDone} />
       )}
 
       {promptDialog && (

@@ -4,9 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { useEnvCompare } from "../../studio/useEnvCompare";
-import { ENV_DOT, type CompareSide, type CompareStatus, type TargetEnvInfo } from "../../types";
+import { ENV_DOT, type CompareSide, type CompareStatus, type CopyDialogRequest, type TargetEnvInfo } from "../../types";
 import { ChangeBatchesPanel } from "./ChangeBatchesPanel";
-import { CopyConfigsDialog } from "./CopyConfigsDialog";
+import { CopyConfigDialog } from "./CopyConfigDialog";
 import { ExportSqlDialog } from "./ExportSqlDialog";
 import { PaneTitle } from "./PaneTitle";
 
@@ -82,11 +82,13 @@ function SidePicker({
 }
 
 function EnvCompareBody() {
-  const { targetEnvs, setShowEnvCompare } = useStudio();
+  const { configDomain, targetEnvs, setShowEnvCompare } = useStudio();
   const c = useEnvCompare();
   const diffRef = useRef<DiffEditorInstance | null>(null);
   const envReq = useRef({ left: 0, right: 0 });
-  const [dialog, setDialog] = useState<"export" | "copy" | null>(null);
+  const [dialog, setDialog] = useState<"export" | null>(null);
+  // Popup Salin config lokal (bukan state studio): sumber = kiri, tujuan = kanan dan dikunci; null = tertutup
+  const [copyRequest, setCopyRequest] = useState<CopyDialogRequest | null>(null);
   const [showBatches, setShowBatches] = useState(false);
 
   useEffect(() => {
@@ -178,7 +180,9 @@ function EnvCompareBody() {
             Riwayat
           </button>
           <button
-            onClick={() => setDialog("copy")}
+            onClick={() => setCopyRequest({
+              source: c.left, target: c.right, lockTarget: true, domains: [configDomain], preselect: "all"
+            })}
             disabled={!ready || c.loading}
             className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
             title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
@@ -334,11 +338,12 @@ function EnvCompareBody() {
           tenantsFor={c.tenantsFor} loadTenants={c.loadTenants} onClose={() => setDialog(null)}
         />
       )}
-      {dialog === "copy" && (
-        <CopyConfigsDialog
-          left={c.left} right={c.right} leftTenant={leftTenant} rightTenant={rightTenant} entries={c.entries}
-          onClose={() => setDialog(null)}
-          onDone={() => { setDialog(null); void c.reload(); }}
+      {/* wrote juga true setelah hasil tidak pasti, dan popup tidak punya tombol muat ulang: perbandingan dimuat ulang di sini */}
+      {copyRequest && (
+        <CopyConfigDialog
+          request={copyRequest}
+          onClose={() => setCopyRequest(null)}
+          onDone={(r) => { setCopyRequest(null); if (r.wrote) void c.reload(); }}
         />
       )}
     </div>

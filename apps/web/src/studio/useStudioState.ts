@@ -2,7 +2,8 @@ import { useState } from "react";
 import type { ContextMenuState } from "../components/ui";
 import { setActiveTargetEnv } from "../lib/api";
 import type {
-  AppProps, ConfigDomain, ConfigItem, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant, TenantSuggestion
+  AppProps, ConfigDomain, ConfigItem, CopyDialogRequest, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant,
+  TenantSuggestion
 } from "../types";
 import type { DeltaFormat } from "../utils/jsonDiff";
 
@@ -46,6 +47,8 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
   }>(null);
   const askReason = (opts: { title: string; description?: string; before?: any; after?: any }) =>
     new Promise<string | null>((resolve) => setPromptDialog({ ...opts, resolve }));
+  // Popup "Salin config" global (Salin ke… / Duplikat tenant…); layar Bandingkan antar env memegang popup-nya sendiri
+  const [copyDialog, setCopyDialog] = useState<CopyDialogRequest | null>(null);
   // Snapshot DB terbaru yang sedang dibandingkan (split "db") dan penanda DB sudah lebih baru dari editor
   const [dbSnapshotVersion, setDbSnapshotVersion] = useState<string | null>(null);
   const [isDbNewer, setIsDbNewer] = useState(false);
@@ -151,9 +154,9 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     setActiveConfigType, currentGroupId, setCurrentGroupId, jsonContent, setJsonContent, originalContent,
     setOriginalContent, configVersion, setConfigVersion, configDomain, setConfigDomain, targetEnvs,
     setTargetEnvs, targetEnvName, setTargetEnvName, envConfirm, setEnvConfirm, ctxMenu, setCtxMenu,
-    promptDialog, setPromptDialog, askReason, dbSnapshotVersion, setDbSnapshotVersion, isDbNewer,
-    setIsDbNewer, isLoadingConfig, setIsLoadingConfig, isSaving, setIsSaving, isSplitScreen,
-    setIsSplitScreen, splitMode, setSplitMode, splitSourceType, setSplitSourceType, splitJsonContent,
+    promptDialog, setPromptDialog, askReason, copyDialog, setCopyDialog, dbSnapshotVersion,
+    setDbSnapshotVersion, isDbNewer, setIsDbNewer, isLoadingConfig, setIsLoadingConfig, isSaving, setIsSaving,
+    isSplitScreen, setIsSplitScreen, splitMode, setSplitMode, splitSourceType, setSplitSourceType, splitJsonContent,
     setSplitJsonContent, splitTitle, setSplitTitle, localFilePath, setLocalFilePath,
     localFileOriginalContent, setLocalFileOriginalContent, isSavingLocal, setIsSavingLocal, isLocalDirty,
     compareTenant, setCompareTenant, compareConfigId, setCompareConfigId, compareConfigType,

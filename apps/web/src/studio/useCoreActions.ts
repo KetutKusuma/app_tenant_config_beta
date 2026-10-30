@@ -7,7 +7,7 @@ import type { StudioState } from "./useStudioState";
 // Aksi inti: muat tenant/config, ganti env/domain, validasi, simpan, shortcut & guard perubahan.
 export function useCoreActions(s: StudioState) {
   const {
-    activeConfigType, askReason, configDomain, configVersion, currentGroupId, dbSnapshotVersion,
+    activeConfigType, askReason, configDomain, configVersion, copyDialog, currentGroupId, dbSnapshotVersion,
     isCompareTenantDirty, isLocalDirty, isSaving, jsonContent, originalContent, presetDirPath,
     presetInputPath, searchQuery, selectedConfigId, selectedTenant, setActiveConfigType, setCompareConfigId,
     setCompareTenant, setConfigDomain, setConfigVersion, setConfigs, setCopiedTenantId, setCurrentGroupId,
@@ -492,8 +492,9 @@ export function useCoreActions(s: StudioState) {
       setStatusMessage(msg);
       setTimeout(() => setStatusMessage(null), 2500);
     };
-    // Layar Bandingkan antar env terbuka: editor studio tersembunyi, jangan menyimpan/validasi/fokus cari
-    if (showEnvCompare) {
+    // Layar Bandingkan antar env atau popup Salin config terbuka: editor studio tidak sedang dipakai,
+    // jangan menyimpan/validasi/fokus cari
+    if (showEnvCompare || copyDialog !== null) {
       if (key === "s") e.preventDefault();
       return;
     }

@@ -1,13 +1,14 @@
-import { Building2, Trash2, X } from "lucide-react";
+import { Building2, CopyPlus, Trash2, X } from "lucide-react";
 import { useStudio } from "../../studio/StudioContext";
 
 export function TenantModal() {
   const {
-    handleTenantFormSubmit, isEditingTenant, setShowTenantModal, setTenantForm, setTenantToDelete, showTenantModal,
-    targetEnvName, targetEnvs, tenantForm, tenants
+    handleTenantFormSubmit, isEditingTenant, setCopyDialog, setShowTenantModal, setTenantForm, setTenantToDelete,
+    showTenantModal, targetEnvName, targetEnvs, tenantForm, tenants
   } = useStudio();
   // Saat edit: tenant yang sedang diedit (untuk tombol hapus dari daftar env aktif)
   const editingTenant = isEditingTenant ? tenants.find(t => t.tenantId === tenantForm.tenantId) : undefined;
+  const canDuplicate = Boolean(editingTenant) && editingTenant?.tenantId !== "GLOBAL_DEFAULT";
   // Tenant disimpan per target env; kode otomatis diberi akhiran env (mis. IDM -> IDM_PROD) oleh BFF
   const activeEnv = targetEnvs.find(e => e.name === targetEnvName);
   const codeSuffix = activeEnv?.tenantCodeSuffix || "";
@@ -16,7 +17,8 @@ export function TenantModal() {
       {/* Modal: Tambah / Edit Label Tenant */}
       {showTenantModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl w-full max-w-md p-5 space-y-4 shadow-2xl">
+          {/* Footer edit tenant (Hapus + Duplikat + Batal + Simpan) butuh ~495px, lebih lebar dari max-w-md */}
+          <div className={`bg-slate-900 border border-slate-800 rounded-xl w-full ${canDuplicate ? "max-w-xl" : "max-w-md"} p-5 space-y-4 shadow-2xl`}>
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-indigo-400" /> 
@@ -116,19 +118,38 @@ export function TenantModal() {
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
                 {editingTenant && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowTenantModal(false);
-                      setTenantToDelete(editingTenant);
-                    }}
-                    className="mr-auto flex items-center gap-1.5 px-3 py-2 rounded-lg text-rose-300 hover:text-rose-200 hover:bg-rose-500/10 transition"
-                    title={`Hapus dari daftar env ${activeEnv?.label || targetEnvName} (config di database tidak dihapus)`}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Hapus dari daftar
-                  </button>
+                  <div className="mr-auto flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTenantModal(false);
+                        setTenantToDelete(editingTenant);
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-rose-300 hover:text-rose-200 hover:bg-rose-500/10 transition"
+                      title={`Hapus dari daftar env ${activeEnv?.label || targetEnvName} (config di database tidak dihapus)`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Hapus dari daftar
+                    </button>
+                    {canDuplicate && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowTenantModal(false);
+                          setCopyDialog({
+                            source: { env: targetEnvName, tenantId: editingTenant.tenantId },
+                            domains: ["tenant_config", "workflow_pipeline"],
+                            preselect: "all"
+                          });
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-slate-300 hover:text-slate-100 hover:bg-slate-800 transition"
+                        title="Salin config tenant ini ke tenant lain (atau tenant baru)"
+                      >
+                        <CopyPlus className="w-3.5 h-3.5" /> Duplikat tenant…
+                      </button>
+                    )}
+                  </div>
                 )}
                 <button 
                   type="button"

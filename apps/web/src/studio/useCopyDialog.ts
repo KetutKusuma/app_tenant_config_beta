@@ -14,7 +14,7 @@ import { useStudio } from "./StudioContext";
 export const MAX_REASON = 500;
 export const MANUAL_LABEL = "Production (isi manual)";
 export const DOMAIN_TITLE: Record<ConfigDomain, string> = { tenant_config: "Tenant Configurations", workflow_pipeline: "Pipeline Workflow" };
-// Teks "hasil tidak pasti" mengikuti CopyConfigsDialog; kata "perbandingan" diganti "daftar" karena popup ini tidak punya layar Bandingkan
+// Teks "hasil tidak pasti" mengikuti dialog Salin ke Kanan lama (sudah diganti popup ini); kata "perbandingan" diganti "daftar" karena popup ini juga dipakai di luar layar Bandingkan
 export const UNKNOWN_RESULT = "Hasil tidak pasti — koneksi terputus. Muat ulang daftar dan periksa tujuan serta Riwayat.";
 const COMMIT_UNCERTAIN = "Hasil tidak pasti — periksa tujuan lalu muat ulang daftar.";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
