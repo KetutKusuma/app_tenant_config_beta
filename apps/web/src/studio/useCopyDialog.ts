@@ -5,6 +5,7 @@ import {
   type ConfigDomain, type CopyBatchResult, type CopyDialogDone, type CopyDialogRequest, type CopyPreview,
   type ExportSqlResult, type PathStatus, type PreviewItem, type Tenant
 } from "../types";
+import { duplicatePathList, isPathOk, markDuplicatePaths, mergeOverrides, overrideToSend, pendingPathReason, showPathField, UUID_RE } from "./pathRules";
 import { useStudio } from "./StudioContext";
 
 // State dan logika popup "Salin config" (tampilan: components/studio/CopyConfigDialog.tsx).
@@ -17,7 +18,6 @@ export const DOMAIN_TITLE: Record<ConfigDomain, string> = { tenant_config: "Tena
 // Teks "hasil tidak pasti" mengikuti dialog Salin ke Kanan lama (sudah diganti popup ini); kata "perbandingan" diganti "daftar" karena popup ini juga dipakai di luar layar Bandingkan
 export const UNKNOWN_RESULT = "Hasil tidak pasti — koneksi terputus. Muat ulang daftar dan periksa tujuan serta Riwayat.";
 const COMMIT_UNCERTAIN = "Hasil tidak pasti — periksa tujuan lalu muat ulang daftar.";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type Outcome = { kind: "copy"; data: CopyBatchResult } | { kind: "sql"; data: ExportSqlResult };
 export interface NewTenantForm { tenantId: string; groupId: string; clientName: string; clientCode: string }
@@ -152,18 +152,9 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
       }
       return next;
     });
-    setOverrides((prev) => {
-      const next: Record<string, string> = {};
-      for (const { key, item } of all) {
-        const old = keep ? prev[key] : undefined;
-        // Path pengganti lama yang kini dipakai tenant lain: baris bentrok mendapat saran baru; baris lain
-        // mempertahankannya supaya cek path menandainya "Sudah dipakai".
-        const taken = old !== undefined && keep!.takenPaths.includes(old.trim());
-        if (old !== undefined && !(taken && item.pathConflict)) next[key] = old;
-        else if (item.pathConflict) next[key] = item.pathConflict.suggestion; // saran awal
-      }
-      return next;
-    });
+    // Path pengganti lama yang kini dipakai tenant lain: baris bentrok mendapat saran baru; baris lain
+    // mempertahankannya supaya cek path menandainya "Sudah dipakai".
+    setOverrides((prev) => mergeOverrides(prev, all, keep ? keep.takenPaths : null));
     setPreview(data);
   };
 
@@ -211,8 +202,7 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
         const key = itemKey(dom.domain, item.configType);
         const override = (overrides[key] ?? "").trim();
         const st = overrideStatus[key] ?? "memeriksa";
-        // Bentrok: wajib punya path pengganti yang tersedia. Bukan bentrok: override (bila diisi) harus tersedia.
-        const pathOk = item.pathConflict ? override !== "" && st === "tersedia" : override === "" || st === "tersedia";
+        const pathOk = isPathOk(item, override, st);
         const selectable = canSelect(item);
         const wished = selectable && wish.has(key);
         list.push({
@@ -223,15 +213,12 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
       }
     }
     // Path akhir sama di antara config tercentang (ATS mencari config lewat path tanpa filter tenant)
-    const byPath = new Map<string, CopyRow[]>();
-    for (const r of list) if (r.checked && r.path) byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
-    for (const g of byPath.values()) if (g.length > 1) g.forEach((r) => { r.dup = true; });
-    // Kolom tetap tampil begitu ada override, supaya tidak hilang saat user mengetik.
-    // Production isi manual: tujuan tidak bisa dibaca (tidak ada pathConflict dari server), jadi path setiap
-    // config tenant_config yang bisa disalin tetap bisa diedit; SQL-nya yang memeriksa sendiri (spec §8).
+    markDuplicatePaths(list.filter((r) => r.checked));
+    // Production isi manual: path setiap config tenant_config yang bisa disalin tetap bisa diedit (spec §8)
     for (const r of list) {
-      const manualEditable = isManual && r.domain === "tenant_config" && canSelect(r.item);
-      r.showField = r.item.pathConflict !== null || overrides[r.key] !== undefined || r.dup || manualEditable;
+      r.showField = showPathField({
+        item: r.item, override: overrides[r.key], dup: r.dup, alwaysEditable: isManual && r.domain === "tenant_config" && canSelect(r.item)
+      });
     }
     return list;
   }, [preview, wish, overrides, overrideStatus, isManual]);
@@ -252,10 +239,8 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
   const nTimpa = checkedRows.filter((r) => r.item.status === "timpa").length;
   const nUnread = checkedRows.filter((r) => r.item.status === "tidak_dibaca").length;
   const nSkipped = rows.filter((r) => r.item.status !== "hanya_tujuan").length - n;
-  const dupPaths = [...new Set(rows.filter((r) => r.dup).map((r) => r.path as string))].sort();
+  const dupPaths = duplicatePathList(rows);
   const pending = rows.filter((r) => r.pathPending);
-  const pendingChecking = pending.some((r) => (overrideStatus[r.key] ?? "memeriksa") === "memeriksa");
-  const pendingFailed = pending.some((r) => overrideStatus[r.key] === "gagal");
   const targetCode = preview?.targetTenantCode ?? tenantOptions.find((t) => t.tenantId === tenantId)?.code ?? "";
 
   const reasonText = reason.trim();
@@ -266,10 +251,7 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
     if (previewLoading) return "Memuat daftar config…";
     if (previewError || !preview) return "Daftar config belum berhasil dimuat.";
     if (stale) return "Muat ulang daftar config dulu.";
-    if (pending.length > 0) {
-      if (pendingFailed) return "Cek path gagal; coba lagi.";
-      return pendingChecking ? "Path pengganti masih diperiksa." : "Path pengganti sudah dipakai atau kosong; ubah path-nya.";
-    }
+    if (pending.length > 0) return pendingPathReason(pending.map((r) => overrideStatus[r.key] ?? "memeriksa"));
     if (dupPaths.length > 0) return `Path ganda dalam pilihan: ${dupPaths.join(", ")}. Ubah path salah satunya atau kurangi centang.`;
     if (n === 0) return "Centang minimal satu config.";
     if (reasonText === "") return "Isi catatan alasan dulu.";
@@ -337,8 +319,8 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
     const out: Record<string, string> = {};
     if (domain !== "tenant_config") return out;
     for (const r of sel) {
-      const o = (overrides[r.key] ?? "").trim();
-      if (o && o !== r.item.path) out[r.item.configType] = o;
+      const o = overrideToSend(r.item, overrides[r.key]);
+      if (o) out[r.item.configType] = o;
     }
     return out;
   };

@@ -162,10 +162,10 @@ export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide
             <p className="text-xs text-slate-500">Belum ada riwayat.</p>
           ) : rows.map((b) => (
             <div key={b.id} className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-1.5">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold text-slate-200">{b.kind === "salin" ? "Salin" : "Export SQL"}</span>
-                <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{domainLabel(b.domain)}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[b.status] ?? "bg-slate-800 text-slate-300"}`}>{b.status}</span>
+                <span className="shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{domainLabel(b.domain)}</span>
+                <span className={`shrink-0 whitespace-nowrap px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[b.status] ?? "bg-slate-800 text-slate-300"}`}>{b.status}</span>
                 <span className="flex-1" />
                 <span className="text-[10px] text-slate-500 tabular-nums">{new Date(b.created_at).toLocaleString()}</span>
               </div>

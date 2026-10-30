@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
+import { duplicatePathList, isPathOk, markDuplicatePaths, mergeOverrides, overrideToSend, pendingPathReason, showPathField, UUID_RE } from "../../studio/pathRules";
 import { MAX_REASON } from "../../studio/useCopyDialog";
 import { MANUAL_ENV, type CompareSide, type CopyPreview, type ExportSqlResult, type PathStatus, type PreviewItem, type Tenant } from "../../types";
 import { PathOverrideField } from "./PathOverrideField";
 import { useDialogEsc } from "./useDialogEsc";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INPUT = "bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 disabled:opacity-50";
 const GHOST = "px-3 py-1.5 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40";
 const PRIMARY = "px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition disabled:opacity-40";
@@ -135,18 +135,9 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
         if (id !== reqId.current) return;
         if (!res.ok) { setPreviewError(json.error || `HTTP ${res.status}`); return; }
         const data: CopyPreview = json.data;
-        // Saran path awal untuk baris bentrok. Setelah 409: path pengganti lama dipertahankan, kecuali yang baru ketahuan
-        // dipakai tenant lain pada baris yang kini bentrok (diberi saran baru).
-        setOverrides((prev) => {
-          const next: Record<string, string> = {};
-          for (const it of data.domains.find((d) => d.domain === "tenant_config")?.items ?? []) {
-            const old = takenPaths ? prev[it.configType] : undefined;
-            const taken = old !== undefined && takenPaths!.includes(old.trim());
-            if (old !== undefined && !(taken && it.pathConflict)) next[it.configType] = old;
-            else if (it.pathConflict) next[it.configType] = it.pathConflict.suggestion;
-          }
-          return next;
-        });
+        // Saran path awal untuk baris bentrok; setelah 409, override lama dipertahankan (lihat mergeOverrides)
+        const entries = (data.domains.find((d) => d.domain === "tenant_config")?.items ?? []).map((item) => ({ key: item.configType, item }));
+        setOverrides((prev) => mergeOverrides(prev, entries, takenPaths));
         setPreview(data);
       } catch (e: any) {
         if (id === reqId.current) setPreviewError(e?.message || "Gagal memuat daftar path");
@@ -162,23 +153,16 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
     const item = previewItems.get(configType);
     if (!item) return [];
     const override = (overrides[configType] ?? "").trim();
-    const st = overrideStatus[configType] ?? "memeriksa";
-    // Bentrok: wajib punya path pengganti yang tersedia. Bukan bentrok: override (bila diisi) harus tersedia.
-    const pathOk = item.pathConflict ? override !== "" && st === "tersedia" : override === "" || st === "tersedia";
+    const pathOk = isPathOk(item, override, overrideStatus[configType] ?? "memeriksa");
     return [{ configType, item, path: override || item.path, pathOk, dup: false, showField: false }];
   });
   // Path akhir sama di antara config tercentang (ATS mencari config lewat path tanpa filter tenant)
-  const byPath = new Map<string, PathRow[]>();
-  for (const r of pathRows) if (r.path) byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
-  for (const g of byPath.values()) if (g.length > 1) g.forEach((r) => { r.dup = true; });
+  markDuplicatePaths(pathRows);
   // Tujuan manual tidak bisa dibaca (tidak ada pathConflict dari server): path tiap config tetap bisa diubah, SQL yang memeriksa sendiri.
-  // Kolom tetap tampil begitu ada override, supaya tidak hilang saat user mengetik.
-  for (const r of pathRows) r.showField = isManual || r.item.pathConflict !== null || overrides[r.configType] !== undefined || r.dup;
+  for (const r of pathRows) r.showField = showPathField({ item: r.item, override: overrides[r.configType], dup: r.dup, alwaysEditable: isManual });
   const shownRows = pathRows.filter((r) => r.showField);
   const pending = pathRows.filter((r) => !r.pathOk);
-  const pendingChecking = pending.some((r) => (overrideStatus[r.configType] ?? "memeriksa") === "memeriksa");
-  const pendingFailed = pending.some((r) => overrideStatus[r.configType] === "gagal");
-  const dupPaths = [...new Set(pathRows.filter((r) => r.dup).map((r) => r.path as string))].sort();
+  const dupPaths = duplicatePathList(pathRows);
 
   const reasonText = reason.trim();
   const blockReason = (() => {
@@ -188,10 +172,7 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
     if (wantsPreview) {
       if (previewLoading) return "Memuat daftar path…";
       if (previewError || !preview) return "Daftar path belum berhasil dimuat.";
-      if (pending.length > 0) {
-        if (pendingFailed) return "Cek path gagal; coba lagi.";
-        return pendingChecking ? "Path pengganti masih diperiksa." : "Path pengganti sudah dipakai atau kosong; ubah path-nya.";
-      }
+      if (pending.length > 0) return pendingPathReason(pending.map((r) => overrideStatus[r.configType] ?? "memeriksa"));
       if (dupPaths.length > 0) return `Path ganda dalam pilihan: ${dupPaths.join(", ")}. Ubah path salah satunya.`;
     }
     if (reasonText === "") return "Isi catatan alasan dulu.";
@@ -216,8 +197,8 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
       // Path pengganti hanya untuk tenant_config; yang sama dengan path sumbernya tidak perlu dikirim
       const pathOverrides: Record<string, string> = {};
       for (const r of pathRows) {
-        const o = (overrides[r.configType] ?? "").trim();
-        if (o && o !== r.item.path) pathOverrides[r.configType] = o;
+        const o = overrideToSend(r.item, overrides[r.configType]);
+        if (o) pathOverrides[r.configType] = o;
       }
       const res = await api("/api/compare/export-sql", {
         method: "POST",
