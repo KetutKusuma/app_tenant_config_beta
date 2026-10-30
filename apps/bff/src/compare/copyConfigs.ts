@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { esc } from "../db";
-import { defaultPath } from "./sqlExport";
+import type { ConfigDomain } from "../domain";
+import { finalPath, findPathConflicts } from "./pathConflicts";
 import type { CompareEntry, ConfigRow } from "./types";
 
 export interface CopyPlan {
@@ -9,10 +10,18 @@ export interface CopyPlan {
   same: string[];
   targetOnly: string[];
   duplicates: string[];
+  /** create/overwrite yang tidak dipilih user (diisi `selectPlan`); tidak ditulis */
+  unselected: string[];
 }
 
+export interface CopyTable { table: string; typeCol: string; hasPath: boolean }
+/** Satu tabel yang disalin: domain + tabelnya + rencana salin untuk tabel itu. */
+export interface CopyPart { domain: ConfigDomain; table: CopyTable; plan: CopyPlan }
+/** Baris baru hasil salin, ditandai dari domain/tabel mana asalnya. */
+export type CreatedRow = ConfigRow & { domain: ConfigDomain };
+
 export function planCopy(entries: CompareEntry[]): CopyPlan {
-  const plan: CopyPlan = { create: [], overwrite: [], same: [], targetOnly: [], duplicates: [] };
+  const plan: CopyPlan = { create: [], overwrite: [], same: [], targetOnly: [], duplicates: [], unselected: [] };
   for (const e of entries) {
     if (e.status === "hanya_kiri" && e.left) plan.create.push(e.left);
     else if (e.status === "beda" && e.left && e.right) plan.overwrite.push({ source: e.left, target: e.right });
@@ -39,7 +48,7 @@ export function staleConfigTypes(plan: CopyPlan, expected: Record<string, string
   return [...stale].sort();
 }
 
-/** Rencana segar server vs rencana yang dikonfirmasi user: himpunan tipe dibuat/ditimpa harus sama (urutan bebas). */
+/** Sementara dipakai route salin lama; digantikan `selectionMismatch` dan dihapus di Task 5. Himpunan tipe dibuat/ditimpa harus sama (urutan bebas). */
 export function planMismatch(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): string[] {
   const diff = (actual: string[], confirmed: string[]) => {
     const a = new Set(actual), c = new Set(confirmed);
@@ -54,12 +63,55 @@ export function planMismatch(plan: CopyPlan, confirmedCreate: string[], confirme
   ])].sort();
 }
 
+/** Hanya create/overwrite yang dikonfirmasi user yang dipertahankan; sisanya pindah ke `unselected` (terurut). */
+export function selectPlan(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): CopyPlan {
+  const create = new Set(confirmedCreate), overwrite = new Set(confirmedOverwrite);
+  const unselected = new Set(plan.unselected);
+  const keptCreate = plan.create.filter((r) => {
+    if (create.has(r.config_type)) return true;
+    unselected.add(r.config_type);
+    return false;
+  });
+  const keptOverwrite = plan.overwrite.filter((o) => {
+    if (overwrite.has(o.source.config_type)) return true;
+    unselected.add(o.source.config_type);
+    return false;
+  });
+  return { ...plan, create: keptCreate, overwrite: keptOverwrite, unselected: [...unselected].sort() };
+}
+
+/**
+ * Tipe yang dikonfirmasi user tetapi tidak ada di kelompok yang sama pada rencana segar (mis. sudah berubah
+ * menjadi sama, hilang, atau pindah dibuat ↔ ditimpa). Memilih sebagian dari rencana segar tidak dianggap beda.
+ */
+export function selectionMismatch(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): string[] {
+  const create = new Set(plan.create.map((r) => r.config_type));
+  const overwrite = new Set(plan.overwrite.map((o) => o.source.config_type));
+  return [...new Set([
+    ...confirmedCreate.filter((t) => !create.has(t)),
+    ...confirmedOverwrite.filter((t) => !overwrite.has(t)),
+  ])].sort();
+}
+
+/** `path` baris sumber (create dan overwrite.source) diganti path akhirnya; objek asli tidak diubah. */
+export function applyPathOverrides(plan: CopyPlan, overrides: Record<string, string>): CopyPlan {
+  const withPath = (r: ConfigRow): ConfigRow => ({
+    ...r,
+    path: finalPath(r, Object.prototype.hasOwnProperty.call(overrides, r.config_type) ? overrides[r.config_type] : undefined),
+  });
+  return {
+    ...plan,
+    create: plan.create.map(withPath),
+    overwrite: plan.overwrite.map((o) => ({ source: withPath(o.source), target: o.target })),
+  };
+}
+
 export interface CopyDeps {
   createBatch(): Promise<string>;
-  backupOld(target: ConfigRow, batchId: string): Promise<void>;
+  backupOld(o: { source: ConfigRow; target: ConfigRow }, part: CopyPart, batchId: string): Promise<void>;
   discardBatchBackups(batchId: string): Promise<void>;
-  writeTarget(plan: CopyPlan): Promise<ConfigRow[]>;
-  recordCreated(row: ConfigRow, batchId: string): Promise<void>;
+  writeTarget(parts: CopyPart[]): Promise<CreatedRow[]>;
+  recordCreated(row: CreatedRow, batchId: string): Promise<void>;
   finishBatch(batchId: string, status: "berhasil" | "gagal", error?: string): Promise<void>;
 }
 
@@ -88,7 +140,16 @@ export class TargetChangedError extends Error {
   }
 }
 
-export async function runCopy(plan: CopyPlan, deps: CopyDeps): Promise<{ batchId: string; warnings: string[] }> {
+/** Path hasil salin sudah dipakai tenant lain di DB tujuan (transaksi di-ROLLBACK, tidak ada yang ditulis). */
+export class PathConflictError extends Error {
+  readonly code = "PATH_CONFLICT" as const;
+  constructor(message: string, readonly paths: string[]) {
+    super(message);
+    this.name = "PathConflictError";
+  }
+}
+
+export async function runCopy(parts: CopyPart[], deps: CopyDeps): Promise<{ batchId: string; warnings: string[] }> {
   const batchId = await deps.createBatch();
 
   const fail = async (err: unknown): Promise<never> => {
@@ -98,14 +159,14 @@ export async function runCopy(plan: CopyPlan, deps: CopyDeps): Promise<{ batchId
   };
 
   try {
-    for (const o of plan.overwrite) await deps.backupOld(o.target, batchId);
+    for (const part of parts) for (const o of part.plan.overwrite) await deps.backupOld(o, part, batchId);
   } catch (e) {
     return fail(e);
   }
 
-  let created: ConfigRow[];
+  let created: CreatedRow[];
   try {
-    created = await deps.writeTarget(plan);
+    created = await deps.writeTarget(parts);
   } catch (e) {
     if (!isCommitUncertain(e)) return fail(e);
     // COMMIT mungkin sudah masuk: cadangan isi lama TIDAK dibuang.
@@ -137,69 +198,95 @@ export interface TxClient {
   query(sql: string): Promise<{ rowCount: number | null; rows: any[] }>;
   release(err?: Error | boolean): void;
 }
-export interface CopyTable { table: string; typeCol: string; hasPath: boolean }
 /** tenantId null = GLOBAL_DEFAULT (tenant_id IS NULL di DB tujuan) */
 export interface CopyTarget { tenantId: string | null; groupId: string | null }
 
 const jsonb = (v: any) => `${esc(JSON.stringify(v))}::jsonb`;
 
+// Urutan pengambilan advisory lock: sama untuk semua Salin, apa pun urutan `parts`, supaya dua Salin
+// bersamaan ke tenant yang sama tidak saling menunggu (deadlock).
+const LOCK_ORDER = ["public.tenant_configurations", "public.pipeline_workflow_configurations"];
+const lockRank = (table: string) => {
+  const i = LOCK_ORDER.indexOf(table);
+  return i === -1 ? LOCK_ORDER.length : i;
+};
+
 /**
- * Semua UPDATE + INSERT dalam satu transaksi: berhasil semua atau tidak ada yang tertulis.
+ * Semua UPDATE + INSERT dari semua `parts` dalam satu transaksi: berhasil semua atau tidak ada yang tertulis.
  * Advisory lock per (tabel, tenant tujuan) menyerialkan Salin ke tenant yang sama, sehingga NOT EXISTS pada INSERT
- * melihat baris yang di-commit Salin lain. UPDATE dikunci versi (updated_at::text); INSERT dilewati bila config sudah
- * ada. Keduanya 0 baris → TargetChangedError → ROLLBACK. Error dari statement COMMIT → CommitUncertainError.
- * Mengembalikan baris baru (id baru) agar versi 1-nya bisa dicatat di History.
+ * dan cek path melihat baris yang di-commit Salin lain. Untuk tabel ber-path, path akhir (create + overwrite)
+ * dicek terhadap tenant lain di dalam transaksi (`findPathConflicts`); ada yang bentrok → PathConflictError → ROLLBACK.
+ * Cek ini dilewati bila tujuan GLOBAL_DEFAULT (tenantId null): salin ke sana tidak dipakai lagi oleh jalur baru.
+ * UPDATE dikunci versi (updated_at::text); INSERT dilewati bila config sudah ada. Keduanya 0 baris →
+ * TargetChangedError → ROLLBACK. Error dari statement COMMIT → CommitUncertainError.
+ * Baris baru selalu `is_default = false`. Mengembalikan baris baru (id baru) agar versi 1-nya bisa dicatat di History.
  */
-export async function writeCopyTx(
+export async function writeCopyTxMulti(
   connect: () => Promise<TxClient>,
-  t: CopyTable,
-  plan: CopyPlan,
+  parts: CopyPart[],
   target: CopyTarget,
   newId: () => string = randomUUID
-): Promise<ConfigRow[]> {
+): Promise<CreatedRow[]> {
   const tenantCond = target.tenantId === null ? "tenant_id IS NULL" : `tenant_id = ${esc(target.tenantId)}`;
+  const lockOrder = [...parts].sort((a, b) => lockRank(a.table.table) - lockRank(b.table.table) || a.table.table.localeCompare(b.table.table));
   const client = await connect();
   let broken: Error | undefined;
   try {
     await client.query("BEGIN");
-    const lockKey = `${t.table}:${target.tenantId ?? "GLOBAL_DEFAULT"}`;
-    await client.query(`SELECT pg_advisory_xact_lock(hashtext(${esc(lockKey)}));`);
+    for (const { table: t } of lockOrder) {
+      const lockKey = `${t.table}:${target.tenantId ?? "GLOBAL_DEFAULT"}`;
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext(${esc(lockKey)}));`);
+    }
     // esc() hanya menggandakan kutip: pastikan backslash tidak diperlakukan sebagai escape.
     await client.query("SET LOCAL standard_conforming_strings = on;");
     await client.query("SET LOCAL lock_timeout = '5s';");
 
-    for (const { source, target: old } of plan.overwrite) {
-      const pathSet = t.hasPath ? `, path = ${esc(source.path || defaultPath(source.config_type))}` : "";
-      const r = await client.query(`
-        UPDATE ${t.table}
-        SET value = ${jsonb(source.value)}${pathSet}, updated_at = NOW()
-        WHERE id = ${esc(old.id)} AND updated_at::text = ${esc(old.version_token)} AND deleted_at IS NULL;
-      `);
-      if (r.rowCount !== 1) {
-        throw new TargetChangedError(`Config ${source.config_type} di tujuan berubah saat proses salin. Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
+    if (target.tenantId !== null) {
+      const conflicts = new Set<string>();
+      for (const { table: t, plan } of lockOrder) {
+        if (!t.hasPath) continue;
+        const paths = [...plan.create, ...plan.overwrite.map((o) => o.source)].map((r) => finalPath(r));
+        for (const path of (await findPathConflicts(client, t.table, paths, target.tenantId)).keys()) conflicts.add(path);
+      }
+      if (conflicts.size > 0) {
+        const paths = [...conflicts].sort();
+        throw new PathConflictError(`Path sudah dipakai tenant lain di tujuan: ${paths.join(", ")}. Tidak ada yang ditulis.`, paths);
       }
     }
 
-    const created: ConfigRow[] = [];
-    for (const source of plan.create) {
-      const id = newId();
-      const path = t.hasPath ? source.path || defaultPath(source.config_type) : null;
-      const isDefault = !!source.is_default;
-      const cols = ["id", "tenant_id", "group_id", t.typeCol, ...(t.hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at"];
-      const vals = [esc(id), esc(target.tenantId), esc(target.groupId), esc(source.config_type), ...(t.hasPath ? [esc(path)] : []), jsonb(source.value), esc(isDefault), "NOW()", "NOW()"];
-      const r = await client.query(`
-        INSERT INTO ${t.table} (${cols.join(", ")})
-        SELECT ${vals.join(", ")}
-        WHERE NOT EXISTS (SELECT 1 FROM ${t.table} WHERE ${tenantCond} AND ${t.typeCol} = ${esc(source.config_type)} AND deleted_at IS NULL)
-        RETURNING updated_at::text AS version_token;
-      `);
-      if (r.rowCount !== 1) {
-        throw new TargetChangedError(`Config ${source.config_type} sudah ada di tujuan (dibuat saat proses salin). Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
+    const created: CreatedRow[] = [];
+    for (const { domain, table: t, plan } of parts) {
+      for (const { source, target: old } of plan.overwrite) {
+        const pathSet = t.hasPath ? `, path = ${esc(finalPath(source))}` : "";
+        const r = await client.query(`
+          UPDATE ${t.table}
+          SET value = ${jsonb(source.value)}${pathSet}, updated_at = NOW()
+          WHERE id = ${esc(old.id)} AND updated_at::text = ${esc(old.version_token)} AND deleted_at IS NULL;
+        `);
+        if (r.rowCount !== 1) {
+          throw new TargetChangedError(`Config ${source.config_type} di tujuan berubah saat proses salin. Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
+        }
       }
-      created.push({
-        id, tenant_id: target.tenantId, group_id: target.groupId, config_type: source.config_type, path,
-        value: source.value, is_default: isDefault, version_token: String(r.rows[0].version_token),
-      });
+
+      for (const source of plan.create) {
+        const id = newId();
+        const path = t.hasPath ? finalPath(source) : null;
+        const cols = ["id", "tenant_id", "group_id", t.typeCol, ...(t.hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at"];
+        const vals = [esc(id), esc(target.tenantId), esc(target.groupId), esc(source.config_type), ...(t.hasPath ? [esc(path)] : []), jsonb(source.value), "false", "NOW()", "NOW()"];
+        const r = await client.query(`
+          INSERT INTO ${t.table} (${cols.join(", ")})
+          SELECT ${vals.join(", ")}
+          WHERE NOT EXISTS (SELECT 1 FROM ${t.table} WHERE ${tenantCond} AND ${t.typeCol} = ${esc(source.config_type)} AND deleted_at IS NULL)
+          RETURNING updated_at::text AS version_token;
+        `);
+        if (r.rowCount !== 1) {
+          throw new TargetChangedError(`Config ${source.config_type} sudah ada di tujuan (dibuat saat proses salin). Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
+        }
+        created.push({
+          id, tenant_id: target.tenantId, group_id: target.groupId, config_type: source.config_type, path,
+          value: source.value, is_default: false, version_token: String(r.rows[0].version_token), domain,
+        });
+      }
     }
 
     try {
@@ -220,4 +307,19 @@ export async function writeCopyTx(
   } finally {
     client.release(broken);
   }
+}
+
+/**
+ * Pembungkus sementara untuk route salin lama (satu tabel); dihapus bersama `planMismatch` saat route ditulis ulang (Task 5).
+ */
+export async function writeCopyTx(
+  connect: () => Promise<TxClient>,
+  t: CopyTable,
+  plan: CopyPlan,
+  target: CopyTarget,
+  newId: () => string = randomUUID
+): Promise<ConfigRow[]> {
+  const domain: ConfigDomain = t.hasPath ? "tenant_config" : "workflow_pipeline";
+  const created = await writeCopyTxMulti(connect, [{ domain, table: t, plan }], target, newId);
+  return created.map(({ domain: _domain, ...row }) => row);
 }

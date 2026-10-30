@@ -5,7 +5,7 @@ import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
 import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
-import { TargetChangedError, isCommitUncertain, planCopy, planMismatch, runCopy, staleConfigTypes, writeCopyTx, type CopyDeps } from "../compare/copyConfigs";
+import { TargetChangedError, isCommitUncertain, planCopy, planMismatch, runCopy, staleConfigTypes, writeCopyTxMulti, type CopyDeps, type CopyPart } from "../compare/copyConfigs";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
@@ -279,6 +279,8 @@ router.post("/api/compare/copy", async (req, res) => {
     const from = `${sourceEnv} · ${sourceMeta.code}`;
     const created = plan.create.map((r) => r.config_type);
     const overwritten = plan.overwrite.map((o) => o.source.config_type);
+    // Mesin salin sudah multi-tabel; route lama ini tetap satu tabel (satu part) sampai ditulis ulang.
+    const parts: CopyPart[] = [{ domain: D.key, table: { table: D.table, typeCol: D.typeCol, hasPath: D.hasPath }, plan }];
 
     const deps: CopyDeps = {
       createBatch: async () => {
@@ -306,18 +308,18 @@ router.post("/api/compare/copy", async (req, res) => {
         });
         return batchId;
       },
-      backupOld: async (row, id) => {
-        await snapshotBeforeChange(row, `Sebelum disalin dari ${from}`, author, targetEnv.name, id);
+      backupOld: async (o, _part, id) => {
+        await snapshotBeforeChange(o.target, `Sebelum disalin dari ${from}`, author, targetEnv.name, id);
       },
       discardBatchBackups: discardBatchSnapshots,
-      writeTarget: (p) => writeCopyTx(() => targetDb.connect(), D, p, { tenantId: targetTenantSql, groupId: targetGroupId }),
+      writeTarget: (ps) => writeCopyTxMulti(() => targetDb.connect(), ps, { tenantId: targetTenantSql, groupId: targetGroupId }),
       recordCreated: async (row, id) => {
         await snapshotBeforeChange(row, `Disalin dari ${from}`, author, targetEnv.name, id);
       },
       finishBatch,
     };
 
-    const result = await runCopy(plan, deps);
+    const result = await runCopy(parts, deps);
     res.json({
       data: {
         batchId: result.batchId,
