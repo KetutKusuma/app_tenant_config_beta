@@ -2,14 +2,84 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseCopyBody, parseExportBody, parsePathCheckQuery, parsePreviewQuery } from "./compare.js";
 
+const exportDomain = (over: any = {}) => ({ domain: "tenant_config", configTypes: ["A"], pathOverrides: {}, ...over });
 const profileBody = (over: any = {}) => ({
-  sourceEnv: "development", sourceTenantId: "t-1", configTypes: ["A"], mode: "timpa",
-  target: { kind: "profile", env: "staging", tenantId: "t-2" }, ...over,
+  sourceEnv: "development", sourceTenantId: "t-1", mode: "timpa", reason: "Rilis Q4",
+  target: { kind: "profile", env: "staging", tenantId: "t-2" }, domains: [exportDomain()], ...over,
 });
 
-test("configTypes kosong ditolak", () => {
-  const r = parseExportBody(profileBody({ configTypes: [] }));
-  assert.equal(r.ok, false);
+test("configTypes kosong ditolak dengan pesan Pilih minimal satu config", () => {
+  assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ configTypes: [] })] })), { ok: false, error: "Pilih minimal satu config" });
+  for (const v of [undefined, null, "A", {}]) {
+    assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ configTypes: v })] })), { ok: false, error: "Pilih minimal satu config" });
+  }
+  // satu domain kosong cukup untuk menolak, walau domain lain terisi
+  const r = parseExportBody(profileBody({ domains: [exportDomain(), exportDomain({ domain: "workflow_pipeline", configTypes: [] })] }));
+  assert.deepEqual(r, { ok: false, error: "Pilih minimal satu config" });
+});
+
+test("configTypes harus berisi teks tidak kosong", () => {
+  for (const v of [[1], ["A", null], ["A", "  "]]) {
+    assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ configTypes: v })] })), { ok: false, error: "configTypes harus berisi teks" });
+  }
+});
+
+test("alasan kosong, bukan teks, atau terlalu panjang memakai pesan parseReason", () => {
+  assert.deepEqual(parseExportBody(profileBody({ reason: " " })), { ok: false, error: "Catatan (alasan) wajib diisi" });
+  assert.deepEqual(parseExportBody(profileBody({ reason: undefined })), { ok: false, error: "Catatan (alasan) wajib diisi" });
+  assert.deepEqual(parseExportBody(profileBody({ reason: "x".repeat(501) })), { ok: false, error: "Catatan (alasan) maksimal 500 karakter" });
+  assert.equal(parseExportBody(profileBody({ reason: "x".repeat(500) })).ok, true);
+});
+
+test("domains kosong atau bukan larik ditolak", () => {
+  for (const v of [[], undefined, null, "tenant_config", {}, 1]) {
+    assert.deepEqual(parseExportBody(profileBody({ domains: v })), { ok: false, error: "domains wajib berisi minimal satu domain" });
+  }
+});
+
+test("domain tidak dikenal atau dobel ditolak, termasuk nama prototype", () => {
+  for (const x of ["bogus", "constructor", "__proto__"]) {
+    assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ domain: x })] })), { ok: false, error: `Domain '${x}' tidak dikenal` });
+  }
+  assert.equal(parseExportBody(profileBody({ domains: [null] })).ok, false);
+  assert.equal(parseExportBody(profileBody({ domains: ["tenant_config"] })).ok, false);
+  assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain(), exportDomain()] })), { ok: false, error: "Domain 'tenant_config' disebut dua kali" });
+});
+
+test("pathOverrides: harus objek bernilai teks, workflow tidak boleh punya isi", () => {
+  assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ pathOverrides: { A: 5 } })] })), { ok: false, error: "pathOverrides.A harus teks" });
+  for (const v of ["x", ["a"], 1]) {
+    assert.deepEqual(parseExportBody(profileBody({ domains: [exportDomain({ pathOverrides: v })] })), { ok: false, error: "pathOverrides wajib berupa objek { config_type: path }" });
+  }
+  assert.deepEqual(
+    parseExportBody(profileBody({ domains: [exportDomain({ domain: "workflow_pipeline", pathOverrides: { A: "/x" } })] })),
+    { ok: false, error: "pathOverrides hanya untuk tenant_config" },
+  );
+  assert.equal(parseExportBody(profileBody({ domains: [exportDomain({ domain: "workflow_pipeline", pathOverrides: {} })] })).ok, true);
+  // pathOverrides boleh dihilangkan
+  const r = parseExportBody(profileBody({ domains: [{ domain: "tenant_config", configTypes: ["A"] }] }));
+  assert.ok(r.ok && Object.keys(r.value.domains[0].pathOverrides).length === 0);
+});
+
+test("bentuk baru: field di-trim, tipe didedup, alasan dilipat, dua domain berurutan", () => {
+  const r = parseExportBody(profileBody({
+    sourceEnv: " development ", reason: "  Rilis\n  Q4  ",
+    domains: [
+      exportDomain({ configTypes: [" A ", "B", "A"], pathOverrides: { B: "  /ats/x/b  " } }),
+      exportDomain({ domain: "workflow_pipeline", configTypes: ["F"] }),
+    ],
+  }));
+  assert.deepEqual(r, {
+    ok: true,
+    value: {
+      sourceEnv: "development", sourceTenantId: "t-1", mode: "timpa", reason: "Rilis Q4",
+      target: { kind: "profile", env: "staging", tenantId: "t-2" },
+      domains: [
+        { domain: "tenant_config", configTypes: ["A", "B"], pathOverrides: { B: "/ats/x/b" } },
+        { domain: "workflow_pipeline", configTypes: ["F"], pathOverrides: {} },
+      ],
+    },
+  });
 });
 
 test("manual tenantId bukan UUID ditolak dan menyebut UUID", () => {
@@ -38,6 +108,14 @@ test("mode salah dan field kosong ditolak", () => {
   assert.equal(parseExportBody(profileBody({ mode: "x" })).ok, false);
   assert.equal(parseExportBody(profileBody({ sourceEnv: "" })).ok, false);
   assert.equal(parseExportBody(null).ok, false);
+});
+
+test("body lama (configTypes di tingkat atas, tanpa domains/alasan) ditolak", () => {
+  const r = parseExportBody({
+    sourceEnv: "development", sourceTenantId: "t-1", configTypes: ["A"], mode: "timpa",
+    target: { kind: "profile", env: "staging", tenantId: "t-2" },
+  });
+  assert.equal(r.ok, false);
 });
 
 // ---- parseCopyBody (Salin multi-domain) ----

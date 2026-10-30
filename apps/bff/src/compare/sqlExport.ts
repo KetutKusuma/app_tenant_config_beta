@@ -1,12 +1,18 @@
 import { esc } from "../db.js";
+import type { ConfigDomain } from "../domain.js";
+import { finalPath, pathGuardSql } from "./pathConflicts.js";
+import type { ConfigRow } from "./types.js";
 
 export interface ExportTable { table: string; typeCol: string; hasPath: boolean }
+/** `path` sudah final (override sudah dipakai); kosong dipulihkan dari config_type oleh builder. */
 export interface ExportItem { configType: string; path: string | null; value: any; isDefault: boolean }
+/** Satu tabel di file export: tabelnya dan config yang ditulis ke tabel itu. */
+export interface ExportSection { domain: ExportTable; items: ExportItem[] }
 export interface ExportSqlInput {
-  domain: ExportTable; mode: "timpa" | "lewati";
+  sections: ExportSection[]; mode: "timpa" | "lewati";
   source: { env: string; tenantCode: string };
   target: { env: string; tenantId: string | null; groupId: string | null; tenantCode: string };
-  author: string; createdAt: Date; items: ExportItem[];
+  author: string; createdAt: Date; reason: string;
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -32,17 +38,49 @@ export function defaultPath(configType: string): string {
   return configType.toLowerCase().replace(/_/g, "-");
 }
 
+/**
+ * Item export dari baris sumber. Path akhir: override (di-trim) menang, lalu path sumber, lalu turunan config_type;
+ * `null` untuk tabel tanpa kolom path. `is_default` hanya diteruskan ke tujuan global; selain itu selalu false.
+ */
+export function exportItemOf(row: ConfigRow, opts: { hasPath: boolean; override?: string; toGlobal: boolean }): ExportItem {
+  return {
+    configType: row.config_type,
+    path: opts.hasPath ? finalPath(row, opts.override) : null,
+    value: row.value,
+    isDefault: opts.toGlobal ? !!row.is_default : false,
+  };
+}
+
+const pathOf = (item: ExportItem) => item.path || defaultPath(item.configType);
+
+/** Kunci config_type di batch dan before_snapshot: polos untuk satu domain, `domain:type` bila dua domain. */
+export const typeKey = (multi: boolean, domain: ConfigDomain, configType: string) => (multi ? `${domain}:${configType}` : configType);
+
+/** Bentuk baris batch riwayat untuk Export SQL: satu domain → kuncinya; dua domain → "semua". */
+export function exportBatchShape(
+  sections: Array<{ domain: ConfigDomain; configTypes: string[] }>,
+): { domain: string; configTypes: string[]; counts: Record<string, unknown> } {
+  const multi = sections.length > 1;
+  const total = sections.reduce((n, s) => n + s.configTypes.length, 0);
+  return {
+    domain: multi ? "semua" : sections[0].domain,
+    configTypes: sections.flatMap((s) => s.configTypes.map((t) => typeKey(multi, s.domain, t))).sort(),
+    counts: multi
+      ? { total, perDomain: Object.fromEntries(sections.map((s) => [s.domain, { total: s.configTypes.length }])) }
+      : { total },
+  };
+}
+
 export function exportFileName(tenantCode: string, table: string, date: Date): string {
   return `${tenantCode.replace(/[^A-Za-z0-9_-]/g, "_")}_${table.replace(/^public\./, "")}_${ymd(date)}.sql`;
 }
 
-function itemSql(input: ExportSqlInput, item: ExportItem, tenantId: string | null, groupId: string | null): string {
-  const { domain, mode } = input;
+function itemSql(mode: ExportSqlInput["mode"], domain: ExportTable, item: ExportItem, tenantId: string | null, groupId: string | null): string {
   const { table, typeCol, hasPath } = domain;
   const tenantCond = tenantId === null ? "tenant_id IS NULL" : `tenant_id = ${esc(tenantId)}`;
   const where = `${tenantCond} AND ${typeCol} = ${esc(item.configType)} AND deleted_at IS NULL`;
   const json = esc(JSON.stringify(item.value)) + "::jsonb";
-  const path = esc(item.path || defaultPath(item.configType));
+  const path = esc(pathOf(item));
   const out: string[] = [];
 
   if (mode === "timpa") {
@@ -55,19 +93,28 @@ function itemSql(input: ExportSqlInput, item: ExportItem, tenantId: string | nul
 }
 
 export function buildExportSql(input: ExportSqlInput): string {
-  const { domain, mode, source, target, author, createdAt, items } = input;
+  const { sections, mode, source, target, author, createdAt, reason } = input;
   const tenantId = normTenantId(target.tenantId);
   const groupId = resolveGroupId(tenantId, target.groupId);
-  const n = items.length;
+  const n = sections.reduce((sum, s) => sum + s.items.length, 0);
   const stamp = `${ymd(createdAt)} ${pad(createdAt.getHours())}:${pad(createdAt.getMinutes())}`;
   const header = [
     "-- Tenant Studio · Export SQL",
     "-- Catatan : dibuat oleh Tenant Studio dan TIDAK dijalankan otomatis. Periksa sebelum menjalankan.",
-    `-- Tabel   : ${oneLine(domain.table)}`,
+    `-- Tabel   : ${sections.map((s) => oneLine(s.domain.table)).join(", ")}`,
     `-- Sumber  : ${oneLine(source.env)} · ${oneLine(source.tenantCode)}`,
     `-- Tujuan  : ${oneLine(target.env)} · ${oneLine(target.tenantCode)} · tenant_id ${oneLine(tenantId ?? "NULL")} · group_id ${oneLine(groupId ?? "NULL")}`,
     `-- Dibuat  : ${stamp} oleh ${oneLine(author)} · ${n} config · jika sudah ada: ${oneLine(mode)}`,
+    `-- Alasan  : ${oneLine(reason)}`,
   ].join("\n");
-  const blocks = items.map((it, i) => `-- [${i + 1}/${n}] ${oneLine(it.configType)}\n${itemSql(input, it, tenantId, groupId)}`);
-  return `${header}\n\nBEGIN;\nSET LOCAL standard_conforming_strings = on;\n\n${blocks.join("\n\n")}${n ? "\n\n" : ""}COMMIT;\n`;
+
+  // Satu transaksi untuk semua tabel; nomor item berlanjut. Penjaga path hanya untuk tabel ber-path dan tenant tujuan
+  // bukan NULL (ATS mencari config lewat path tanpa filter tenant, jadi path tidak boleh dipakai tenant lain).
+  let i = 0;
+  const chunks = sections.flatMap(({ domain, items }) => {
+    const guard = domain.hasPath && tenantId !== null ? pathGuardSql(domain.table, tenantId, items.map(pathOf)) : "";
+    const blocks = items.map((it) => `-- [${++i}/${n}] ${oneLine(it.configType)}\n${itemSql(mode, domain, it, tenantId, groupId)}`);
+    return [`-- == ${oneLine(domain.table)} ==`, ...(guard ? [guard] : []), ...blocks];
+  });
+  return `${header}\n\nBEGIN;\nSET LOCAL standard_conforming_strings = on;\n\n${chunks.join("\n\n")}${chunks.length ? "\n\n" : ""}COMMIT;\n`;
 }

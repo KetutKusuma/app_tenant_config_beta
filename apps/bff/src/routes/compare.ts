@@ -1,9 +1,9 @@
 import express from "express";
-import { DOMAINS, domainOf, type ConfigDomain } from "../domain";
+import { DOMAINS, domainOf, type ConfigDomain, type DomainSpec } from "../domain";
 import { assertWritable, poolFor } from "../envs";
 import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
-import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
+import { buildExportSql, exportBatchShape, exportFileName, exportItemOf, resolveGroupId, typeKey, type ExportSection } from "../compare/sqlExport";
 import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
 import {
   PathConflictError, TargetChangedError, applyPathOverrides, batchShape, isCommitUncertain, overriddenSourcePaths, planCopy, runCopy,
@@ -14,6 +14,7 @@ import { attachConflicts, previewItems, previewSourceOnly, type CopyPreview, typ
 import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
+import type { ConfigRow } from "../compare/types";
 
 // Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja),
 // pratinjau salin dan cek path (baca saja), Export SQL (hanya membuat teks),
@@ -160,42 +161,100 @@ router.get("/api/compare/path-check", async (req, res) => {
   }
 });
 
+// ---- Aturan body yang sama untuk Salin dan Export SQL ----
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+const pathConflictError = (paths: string[]) => `Path sudah dipakai tenant lain di tujuan: ${paths.join(", ")}`;
+
+/** Satu entri `domains` yang lolos tahap 1: domain dikenal, tidak dobel, `pathOverrides` sah (di-trim). */
+interface DomainStage { domain: ConfigDomain; raw: Record<string, unknown>; pathOverrides: Record<string, string> }
+
+function parseDomainStage(domains: unknown): { ok: true; stage: DomainStage[] } | { ok: false; error: string } {
+  const fail = (error: string) => ({ ok: false as const, error });
+  if (!Array.isArray(domains) || domains.length === 0) return fail("domains wajib berisi minimal satu domain");
+  const seen = new Set<string>();
+  const stage: DomainStage[] = [];
+  for (const d of domains) {
+    const name = isPlainObject(d) ? d.domain : undefined;
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${String(name)}' tidak dikenal`);
+    if (seen.has(name)) return fail(`Domain '${name}' disebut dua kali`);
+    seen.add(name);
+    const raw = d as Record<string, unknown>;
+    const po = raw.pathOverrides;
+    const pathOverrides: Record<string, string> = {};
+    if (po !== undefined && po !== null) {
+      if (!isPlainObject(po)) return fail("pathOverrides wajib berupa objek { config_type: path }");
+      if (name === "workflow_pipeline" && Object.keys(po).length > 0) return fail("pathOverrides hanya untuk tenant_config");
+      for (const [k, v] of Object.entries(po)) {
+        if (typeof v !== "string") return fail(`pathOverrides.${k} harus teks`);
+        pathOverrides[k] = v.trim();
+      }
+    }
+    stage.push({ domain: name as ConfigDomain, raw, pathOverrides });
+  }
+  return { ok: true, stage };
+}
+
 // ---- Export SQL (hanya membuat teks SQL + mencatat batch di audit DB; tidak menulis ke DB target) ----
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SNAPSHOT_WARNING = "Isi lama di tujuan tidak bisa dicadangkan otomatis.";
 
+export interface ExportDomainBody {
+  domain: ConfigDomain;
+  configTypes: string[];
+  /** config_type → path tujuan pengganti (hanya tenant_config) */
+  pathOverrides: Record<string, string>;
+}
+
 export interface ExportBody {
   sourceEnv: string;
   sourceTenantId: string;
-  configTypes: string[];
   mode: "timpa" | "lewati";
+  reason: string;
   target: { kind: "profile"; env: string; tenantId: string } | { kind: "manual"; tenantId: string; groupId?: string };
+  domains: ExportDomainBody[];
 }
 
 export function parseExportBody(body: any): { ok: true; value: ExportBody } | { ok: false; error: string } {
   const fail = (error: string) => ({ ok: false as const, error });
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  if (!body || typeof body !== "object") return fail("Body permintaan tidak valid");
+  if (!isPlainObject(body)) return fail("Body permintaan tidak valid");
   const sourceEnv = str(body.sourceEnv), sourceTenantId = str(body.sourceTenantId);
   if (!sourceEnv || !sourceTenantId) return fail("sourceEnv dan sourceTenantId wajib diisi");
-  if (!Array.isArray(body.configTypes) || body.configTypes.length === 0) return fail("Pilih minimal satu config");
-  if (!body.configTypes.every((t: unknown) => typeof t === "string" && t.trim())) return fail("configTypes harus berisi teks");
-  const configTypes = Array.from(new Set<string>(body.configTypes.map((t: string) => t.trim())));
+
+  const staged = parseDomainStage(body.domains);
+  if (!staged.ok) return fail(staged.error);
+  const domains: ExportDomainBody[] = [];
+  for (const { domain, raw, pathOverrides } of staged.stage) {
+    const types = raw.configTypes;
+    if (!Array.isArray(types) || types.length === 0) return fail("Pilih minimal satu config");
+    if (!types.every((t: unknown) => typeof t === "string" && t.trim())) return fail("configTypes harus berisi teks");
+    domains.push({ domain, configTypes: Array.from(new Set<string>(types.map((t: string) => t.trim()))), pathOverrides });
+  }
+
   if (body.mode !== "timpa" && body.mode !== "lewati") return fail("mode harus 'timpa' atau 'lewati'");
+  const mode: "timpa" | "lewati" = body.mode;
+  const reason = parseReason(body.reason);
+  if (!reason.ok) return fail(reason.error);
+
   const t = body.target;
-  if (!t || typeof t !== "object") return fail("target wajib diisi");
+  if (!isPlainObject(t)) return fail("target wajib diisi");
   if (t.kind === "profile") {
     const env = str(t.env), tenantId = str(t.tenantId);
     if (!env || !tenantId) return fail("target.env dan target.tenantId wajib diisi");
-    return { ok: true, value: { sourceEnv, sourceTenantId, configTypes, mode: body.mode, target: { kind: "profile", env, tenantId } } };
+    return { ok: true, value: { sourceEnv, sourceTenantId, mode, reason: reason.value, target: { kind: "profile", env, tenantId }, domains } };
   }
   if (t.kind === "manual") {
     const tenantId = str(t.tenantId);
     if (tenantId !== "GLOBAL_DEFAULT" && !UUID_RE.test(tenantId)) return fail("Tenant ID tujuan harus berupa UUID atau GLOBAL_DEFAULT");
     const groupId = str(t.groupId);
     if (groupId && !UUID_RE.test(groupId)) return fail("Group ID tujuan harus berupa UUID");
-    return { ok: true, value: { sourceEnv, sourceTenantId, configTypes, mode: body.mode, target: { kind: "manual", tenantId, ...(groupId ? { groupId } : {}) } } };
+    return {
+      ok: true,
+      value: { sourceEnv, sourceTenantId, mode, reason: reason.value, target: { kind: "manual", tenantId, ...(groupId ? { groupId } : {}) }, domains },
+    };
   }
   return fail("target.kind harus 'profile' atau 'manual'");
 }
@@ -204,22 +263,26 @@ router.post("/api/compare/export-sql", async (req, res) => {
   try {
     const parsed = parseExportBody(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, configTypes, mode, target } = parsed.value;
-    const D = domainOf(req);
+    const { sourceEnv, sourceTenantId, mode, reason, target, domains } = parsed.value;
     const sp = findProfile(sourceEnv);
     if (!sp) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
 
     const sourceMeta = await fetchTenantMeta(sourceEnv, sourceTenantId);
     if (!sourceMeta) return res.status(400).json({ error: `Tenant sumber belum terdaftar di env '${sourceEnv}'` });
 
-    // Isi sumber dibaca ulang saat request.
-    const srcRows = await fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId, configTypes);
-    const byType = new Map<string, typeof srcRows>();
-    for (const r of srcRows) byType.set(r.config_type, [...(byType.get(r.config_type) ?? []), r]);
-    const missing = configTypes.filter((c) => !byType.has(c));
-    if (missing.length) return res.status(400).json({ error: `Config tidak ada di sumber: ${missing.join(", ")}` });
-    const dupes = configTypes.filter((c) => (byType.get(c)?.length ?? 0) > 1);
-    if (dupes.length) return res.status(400).json({ error: `Config berstatus ganda di sumber: ${dupes.join(", ")}` });
+    // Isi sumber tiap domain dibaca ulang saat request.
+    const sources: Array<{ d: ExportDomainBody; D: DomainSpec; rowOf: Map<string, ConfigRow> }> = [];
+    for (const d of domains) {
+      const D = DOMAINS[d.domain];
+      const srcRows = await fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId, d.configTypes);
+      const byType = new Map<string, ConfigRow[]>();
+      for (const r of srcRows) byType.set(r.config_type, [...(byType.get(r.config_type) ?? []), r]);
+      const missing = d.configTypes.filter((c) => !byType.has(c));
+      if (missing.length) return res.status(400).json({ error: `Config tidak ada di sumber: ${missing.join(", ")}` });
+      const dupes = d.configTypes.filter((c) => (byType.get(c)?.length ?? 0) > 1);
+      if (dupes.length) return res.status(400).json({ error: `Config berstatus ganda di sumber: ${dupes.join(", ")}` });
+      sources.push({ d, D, rowOf: new Map(d.configTypes.map((c) => [c, byType.get(c)![0]])) });
+    }
 
     // Tentukan tujuan.
     const isGlobal = target.tenantId === "GLOBAL_DEFAULT";
@@ -247,19 +310,48 @@ router.post("/api/compare/export-sql", async (req, res) => {
       groupInput = target.groupId ?? null;
       snapshotEnv = findProfile("production") ? "production" : null;
     }
+    // Tujuan global = NULL di SQL (tidak pernah literal 'GLOBAL_DEFAULT').
     const tenantIdForSql = isGlobal ? null : target.tenantId;
     const groupId = resolveGroupId(tenantIdForSql, groupInput);
 
-    // before_snapshot: hanya baca; gagal tidak menggagalkan export.
+    // Item per tabel: path akhir (override menang; hanya tenant_config) dan is_default (hanya diteruskan ke tujuan global).
+    const sections: ExportSection[] = sources.map(({ d, D, rowOf }) => ({
+      domain: { table: D.table, typeCol: D.typeCol, hasPath: D.hasPath },
+      items: d.configTypes.map((c) => exportItemOf(rowOf.get(c)!, {
+        hasPath: D.hasPath,
+        override: Object.prototype.hasOwnProperty.call(d.pathOverrides, c) ? d.pathOverrides[c] : undefined,
+        toGlobal: isGlobal,
+      })),
+    }));
+
+    // ATS mencari config lewat path tanpa filter tenant: path akhir harus unik dalam pilihan dan tidak dipakai tenant lain
+    // di tujuan. Tujuan profil dicek sekarang; file SQL tetap membawa penjaganya karena DB tujuan bisa berubah sebelum dijalankan.
+    for (const s of sections.filter((x) => x.domain.hasPath)) {
+      const items = s.items.map((it) => ({ configType: it.configType, path: it.path as string }));
+      const dupes = duplicateFinalPaths(items);
+      if (dupes.length) return res.status(400).json({ error: `Path ganda dalam pilihan: ${dupes.join(", ")}` });
+      if (target.kind === "profile" && tenantIdForSql !== null) {
+        const conflicts = await findPathConflicts(poolFor(target.env), s.domain.table, items.map((i) => i.path), tenantIdForSql);
+        if (conflicts.size) {
+          const paths = [...conflicts.keys()].sort();
+          return res.status(409).json({ code: "PATH_CONFLICT", error: pathConflictError(paths), paths });
+        }
+      }
+    }
+
+    // before_snapshot: hanya baca; gagal tidak menggagalkan export. Kunci `type` (satu domain) atau `domain:type` (dua domain).
+    const multi = domains.length > 1;
     let beforeSnapshot: Record<string, { id: string; value: any; updated_at: string } | null> | null = null;
     let warning: string | null = null;
     if (snapshotEnv) {
       try {
-        const tr = await fetchTenantRows(poolFor(snapshotEnv), D, target.tenantId, configTypes);
         const snap: Record<string, { id: string; value: any; updated_at: string } | null> = {};
-        for (const c of configTypes) {
-          const row = tr.find((r) => r.config_type === c);
-          snap[c] = row ? { id: row.id, value: row.value, updated_at: row.version_token } : null;
+        for (const { d, D } of sources) {
+          const tr = await fetchTenantRows(poolFor(snapshotEnv), D, target.tenantId, d.configTypes);
+          for (const c of d.configTypes) {
+            const row = tr.find((r) => r.config_type === c);
+            snap[typeKey(multi, d.domain, c)] = row ? { id: row.id, value: row.value, updated_at: row.version_token } : null;
+          }
         }
         beforeSnapshot = snap;
       } catch {
@@ -270,23 +362,27 @@ router.post("/api/compare/export-sql", async (req, res) => {
 
     const now = new Date();
     const author = actorName(req);
-    const sql = buildExportSql({
-      domain: { table: D.table, typeCol: D.typeCol, hasPath: D.hasPath },
-      mode,
-      source: { env: sourceEnv, tenantCode: sourceMeta.code },
-      target: { env: targetEnvLabel, tenantId: tenantIdForSql, groupId: groupInput, tenantCode: targetTenantCode },
-      author,
-      createdAt: now,
-      items: configTypes.map((c) => {
-        const r = byType.get(c)![0];
-        return { configType: c, path: r.path ?? null, value: r.value, isDefault: !!r.is_default };
-      }),
-    });
-    const fileName = exportFileName(targetTenantCode, D.table, now);
+    let sql: string;
+    try {
+      sql = buildExportSql({
+        sections,
+        mode,
+        source: { env: sourceEnv, tenantCode: sourceMeta.code },
+        target: { env: targetEnvLabel, tenantId: tenantIdForSql, groupId: groupInput, tenantCode: targetTenantCode },
+        author,
+        createdAt: now,
+        reason,
+      });
+    } catch (e: any) {
+      // Penjaga path menolak path bertanda `$$` (akan menutup badan DO lebih awal): masalah input, bukan galat server.
+      return res.status(400).json({ error: e?.message ?? String(e) });
+    }
+    const fileName = exportFileName(targetTenantCode, sections.length > 1 ? "semua" : sections[0].domain.table, now);
 
+    const shape = exportBatchShape(domains);
     const batchId = await createBatch({
       kind: "export_sql",
-      domain: D.key,
+      domain: shape.domain,
       sourceEnv,
       sourceTenantId,
       sourceTenantCode: sourceMeta.code,
@@ -295,10 +391,11 @@ router.post("/api/compare/export-sql", async (req, res) => {
       targetGroupId: groupId,
       targetTenantCode,
       mode,
-      configTypes,
-      counts: { total: configTypes.length },
+      configTypes: shape.configTypes,
+      counts: shape.counts,
       status: "diekspor",
       author,
+      note: reason,
       sqlText: sql,
       beforeSnapshot,
     });
@@ -333,34 +430,14 @@ export interface CopyBody {
 export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: false; error: string } {
   const fail = (error: string) => ({ ok: false as const, error });
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
   if (!isPlainObject(body)) return fail("Body permintaan tidak valid");
   const sourceEnv = str(body.sourceEnv), sourceTenantId = str(body.sourceTenantId), targetTenantId = str(body.targetTenantId);
   if (!sourceEnv || !sourceTenantId || !targetTenantId) return fail("sourceEnv, sourceTenantId, dan targetTenantId wajib diisi");
   if (targetTenantId === "GLOBAL_DEFAULT") return fail("GLOBAL_DEFAULT tidak bisa menjadi tujuan salin");
-  if (!Array.isArray(body.domains) || body.domains.length === 0) return fail("domains wajib berisi minimal satu domain");
 
   // Tahap 1: domain dikenal, tidak dobel, pathOverrides.
-  const seen = new Set<string>();
-  const stage: Array<{ domain: ConfigDomain; raw: Record<string, unknown>; pathOverrides: Record<string, string> }> = [];
-  for (const d of body.domains) {
-    const name = isPlainObject(d) ? d.domain : undefined;
-    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${String(name)}' tidak dikenal`);
-    if (seen.has(name)) return fail(`Domain '${name}' disebut dua kali`);
-    seen.add(name);
-    const raw = d as Record<string, unknown>;
-    const po = raw.pathOverrides;
-    const pathOverrides: Record<string, string> = {};
-    if (po !== undefined && po !== null) {
-      if (!isPlainObject(po)) return fail("pathOverrides wajib berupa objek { config_type: path }");
-      if (name === "workflow_pipeline" && Object.keys(po).length > 0) return fail("pathOverrides hanya untuk tenant_config");
-      for (const [k, v] of Object.entries(po)) {
-        if (typeof v !== "string") return fail(`pathOverrides.${k} harus teks`);
-        pathOverrides[k] = v.trim();
-      }
-    }
-    stage.push({ domain: name as ConfigDomain, raw, pathOverrides });
-  }
+  const staged = parseDomainStage(body.domains);
+  if (!staged.ok) return fail(staged.error);
 
   const reason = parseReason(body.reason);
   if (!reason.ok) return fail(reason.error);
@@ -371,7 +448,7 @@ export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: 
     return v as string[];
   };
   const domains: CopyDomainBody[] = [];
-  for (const { domain, raw, pathOverrides } of stage) {
+  for (const { domain, raw, pathOverrides } of staged.stage) {
     const ev = raw.expectedTargetVersions;
     if (!isPlainObject(ev)) return fail("expectedTargetVersions wajib berupa objek { config_type: versi | null }");
     const expectedTargetVersions: Record<string, string | null> = {};
@@ -397,7 +474,6 @@ async function tenantMetaOrGlobal(env: string, tenantId: string) {
 
 const PLAN_CHANGED_ERROR = "Rencana salin berubah sejak dikonfirmasi (sumber atau tujuan berubah). Muat ulang perbandingan.";
 const TARGET_CHANGED_ERROR = "Config di tujuan berubah sejak dibandingkan. Muat ulang perbandingan.";
-const pathConflictError = (paths: string[]) => `Path sudah dipakai tenant lain di tujuan: ${paths.join(", ")}`;
 
 router.post("/api/compare/copy", async (req, res) => {
   let batchId: string | null = null;
