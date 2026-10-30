@@ -143,7 +143,7 @@ export function CopyConfigDialog({ request, onClose, onDone }: {
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4"
-      onMouseDown={(e) => e.target === e.currentTarget && !h.busy && !h.confirming && !h.showHistory && h.close()}>
+      onMouseDown={(e) => e.target === e.currentTarget && !h.busy && !h.registering && !h.confirming && !h.showHistory && h.close()}>
       <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-xl bg-slate-900 border border-slate-700 shadow-2xl p-5 space-y-4">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">Salin config</h3>
@@ -169,7 +169,7 @@ export function CopyConfigDialog({ request, onClose, onDone }: {
             </select>
             <div className="text-[11px] text-slate-500">
               {h.isManual
-                ? "Mode Unduh SQL. Tujuan tidak bisa dibaca, jadi semua config sumber ditulis dengan status Tujuan tidak dibaca."
+                ? "Mode Unduh SQL. Tujuan tidak bisa dibaca, jadi semua config sumber ditulis dengan status Tujuan tidak dibaca. Path tiap config bisa diubah; SQL memeriksa sendiri."
                 : h.sqlMode
                   ? `Mode Unduh SQL: ${h.targetLabel} hanya-baca, hasilnya file SQL.`
                   : `Mode Salin langsung ke ${h.targetLabel}.`}
@@ -196,13 +196,10 @@ export function CopyConfigDialog({ request, onClose, onDone }: {
                   {tenantMissing && <option value={h.tenantId}>{h.tenantId}</option>}
                   {h.tenantOptions.map((t) => <option key={t.tenantId} value={t.tenantId}>{`${t.name} (${t.code})`}</option>)}
                 </select>
-                {h.canRegister && (
-                  <button type="button" className={GHOST} disabled={h.targetLocked} onClick={() => h.setShowNew(!h.showNew)}>+ Daftarkan tenant</button>
-                )}
+                <button type="button" className={GHOST} disabled={h.targetLocked} onClick={() => h.setShowNew(!h.showNew)}>+ Daftarkan tenant</button>
               </div>
               {h.tenantError && <div className="text-[11px] text-amber-200">{h.tenantError}</div>}
-              {!h.canRegister && <div className="text-[11px] text-slate-500">{`${h.targetLabel} hanya-baca: tenant tidak bisa didaftarkan dari sini. Untuk tenant yang belum terdaftar, pakai ${MANUAL_LABEL}.`}</div>}
-              {h.canRegister && h.showNew && (
+              {h.showNew && (
                 <div className="grid grid-cols-2 gap-2 rounded-md border border-slate-800 p-2">
                   <input className={`${INPUT} font-mono`} placeholder="tenant_id (UUID)" value={h.newForm.tenantId} onChange={(e) => h.setNewForm({ ...h.newForm, tenantId: e.target.value })} />
                   <input className={`${INPUT} font-mono`} placeholder="group_id" value={h.newForm.groupId} onChange={(e) => h.setNewForm({ ...h.newForm, groupId: e.target.value })} />
@@ -294,7 +291,7 @@ export function CopyConfigDialog({ request, onClose, onDone }: {
           ) : (
             <>
               {h.blockReason && !h.busy && <p className="flex-1 min-w-0 text-[11px] text-amber-200">{h.blockReason}</p>}
-              <button type="button" className={GHOST} onClick={h.close} disabled={h.busy}>Batal</button>
+              <button type="button" className={GHOST} onClick={h.close} disabled={h.busy || h.registering}>Batal</button>
               <button type="button" className={PRIMARY} disabled={!h.canSubmit} onClick={h.submit}>
                 {h.sqlMode ? (h.busy ? "Membuat SQL…" : "Unduh SQL") : h.busy ? "Menyalin…" : `Salin ${h.n} config…`}
               </button>

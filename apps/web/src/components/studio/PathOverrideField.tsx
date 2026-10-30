@@ -15,7 +15,7 @@ type View =
 /**
  * Kolom path pengganti satu config. ATS mencari config lewat path tanpa filter tenant, jadi path tujuan harus
  * unik. Setiap ketikan dicek (debounce 400 ms) ke path-check; hasilnya dilaporkan lewat `onStatus`.
- * "galat" (gagal mengecek) dilaporkan sebagai `memeriksa`: belum terverifikasi, jadi tetap menahan tombol.
+ * Cek yang gagal (jaringan / 5xx) dilaporkan sebagai `gagal`: belum terverifikasi, jadi tetap menahan tombol.
  */
 export function PathOverrideField({ value, targetEnv, targetTenantId, onChange, onStatus }: {
   value: string;
@@ -44,11 +44,11 @@ export function PathOverrideField({ value, targetEnv, targetTenantId, onChange, 
         const res = await api(`/api/compare/path-check?${qs}`);
         const json = await res.json().catch(() => ({}));
         if (cancelled) return;
-        if (!res.ok) { report({ kind: "galat", message: json.error || `HTTP ${res.status}` }, "memeriksa"); return; }
+        if (!res.ok) { report({ kind: "galat", message: json.error || `HTTP ${res.status}` }, "gagal"); return; }
         if (json.data?.available) report({ kind: "tersedia" }, "tersedia");
         else report({ kind: "dipakai", owner: json.data?.ownerConfigType ?? "" }, "dipakai");
       } catch (e: any) {
-        if (!cancelled) report({ kind: "galat", message: e?.message || "Gagal memeriksa path" }, "memeriksa");
+        if (!cancelled) report({ kind: "galat", message: e?.message || "Gagal memeriksa path" }, "gagal");
       }
     }, DEBOUNCE_MS);
     return () => { cancelled = true; clearTimeout(timer); };

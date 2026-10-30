@@ -14,9 +14,9 @@ import { useStudio } from "./StudioContext";
 export const MAX_REASON = 500;
 export const MANUAL_LABEL = "Production (isi manual)";
 export const DOMAIN_TITLE: Record<ConfigDomain, string> = { tenant_config: "Tenant Configurations", workflow_pipeline: "Pipeline Workflow" };
-// Teks "hasil tidak pasti" sama dengan CopyConfigsDialog
-export const UNKNOWN_RESULT = "Hasil tidak pasti — koneksi terputus. Muat ulang perbandingan dan periksa tujuan serta Riwayat.";
-const COMMIT_UNCERTAIN = "Hasil tidak pasti — periksa tujuan lalu muat ulang perbandingan.";
+// Teks "hasil tidak pasti" mengikuti CopyConfigsDialog; kata "perbandingan" diganti "daftar" karena popup ini tidak punya layar Bandingkan
+export const UNKNOWN_RESULT = "Hasil tidak pasti — koneksi terputus. Muat ulang daftar dan periksa tujuan serta Riwayat.";
+const COMMIT_UNCERTAIN = "Hasil tidak pasti — periksa tujuan lalu muat ulang daftar.";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type Outcome = { kind: "copy"; data: CopyBatchResult } | { kind: "sql"; data: ExportSqlResult };
@@ -226,10 +226,15 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
     const byPath = new Map<string, CopyRow[]>();
     for (const r of list) if (r.checked && r.path) byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
     for (const g of byPath.values()) if (g.length > 1) g.forEach((r) => { r.dup = true; });
-    // Kolom tetap tampil begitu ada override, supaya tidak hilang saat user mengetik
-    for (const r of list) r.showField = r.item.pathConflict !== null || overrides[r.key] !== undefined || r.dup;
+    // Kolom tetap tampil begitu ada override, supaya tidak hilang saat user mengetik.
+    // Production isi manual: tujuan tidak bisa dibaca (tidak ada pathConflict dari server), jadi path setiap
+    // config tenant_config yang bisa disalin tetap bisa diedit; SQL-nya yang memeriksa sendiri (spec §8).
+    for (const r of list) {
+      const manualEditable = isManual && r.domain === "tenant_config" && canSelect(r.item);
+      r.showField = r.item.pathConflict !== null || overrides[r.key] !== undefined || r.dup || manualEditable;
+    }
     return list;
-  }, [preview, wish, overrides, overrideStatus]);
+  }, [preview, wish, overrides, overrideStatus, isManual]);
 
   const groups = useMemo(() => {
     const byDomain = new Map<ConfigDomain, CopyRow[]>();
@@ -250,6 +255,7 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
   const dupPaths = [...new Set(rows.filter((r) => r.dup).map((r) => r.path as string))].sort();
   const pending = rows.filter((r) => r.pathPending);
   const pendingChecking = pending.some((r) => (overrideStatus[r.key] ?? "memeriksa") === "memeriksa");
+  const pendingFailed = pending.some((r) => overrideStatus[r.key] === "gagal");
   const targetCode = preview?.targetTenantCode ?? tenantOptions.find((t) => t.tenantId === tenantId)?.code ?? "";
 
   const reasonText = reason.trim();
@@ -260,7 +266,10 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
     if (previewLoading) return "Memuat daftar config…";
     if (previewError || !preview) return "Daftar config belum berhasil dimuat.";
     if (stale) return "Muat ulang daftar config dulu.";
-    if (pending.length > 0) return pendingChecking ? "Path pengganti masih diperiksa." : "Path pengganti sudah dipakai atau kosong; ubah path-nya.";
+    if (pending.length > 0) {
+      if (pendingFailed) return "Cek path gagal; coba lagi.";
+      return pendingChecking ? "Path pengganti masih diperiksa." : "Path pengganti sudah dipakai atau kosong; ubah path-nya.";
+    }
     if (dupPaths.length > 0) return `Path ganda dalam pilihan: ${dupPaths.join(", ")}. Ubah path salah satunya atau kurangi centang.`;
     if (n === 0) return "Centang minimal satu config.";
     if (reasonText === "") return "Isi catatan alasan dulu.";
@@ -449,7 +458,7 @@ export function useCopyDialog(request: CopyDialogRequest, cb: { onClose(): void;
     envOptions: targetEnvs, targetEnv, targetInfo, targetLabel, isManual, sqlMode, locked, targetLocked: locked || Boolean(req.lockTarget),
     pickEnv, pickTenant, tenantId, tenantOptions, tenantsLoaded, tenantError, effTenantId, manualTenant, typeManualTenant,
     manualGroup, setManualGroup, manualTenantOk, manualGroupOk,
-    canRegister: !isManual && !targetInfo?.readonly, showNew, setShowNew, newForm, setNewForm, regError, registering, registerTenant,
+    showNew, setShowNew, newForm, setNewForm, regError, registering, registerTenant,
     preview, previewLoading, previewError, groups, targetReady,
     toggle, toggleGroup, overrides, setOverride, setOverrideState,
     n, nBaru, nTimpa, nUnread, nSkipped,

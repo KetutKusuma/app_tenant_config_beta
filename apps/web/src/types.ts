@@ -195,8 +195,8 @@ export interface CopyDialogRequest {
 }
 export interface CopyDialogDone { target: { env: string; tenantId: string }; wrote: boolean }
 
-/** Status cek path langsung (GET /api/compare/path-check) untuk satu kolom path pengganti */
-export type PathStatus = "memeriksa" | "tersedia" | "dipakai";
+/** Status cek path langsung (GET /api/compare/path-check) untuk satu kolom path pengganti; "gagal" = cek tidak berhasil (belum terverifikasi) */
+export type PathStatus = "memeriksa" | "tersedia" | "dipakai" | "gagal";
 
 /** Respons sukses POST /api/compare/copy (bentuk multi-domain) */
 export interface CopyBatchResult {
