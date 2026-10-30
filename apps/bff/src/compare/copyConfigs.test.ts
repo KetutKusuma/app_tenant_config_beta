@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  planCopy, planMismatch, selectPlan, selectionMismatch, applyPathOverrides, staleConfigTypes, runCopy, writeCopyTx, writeCopyTxMulti,
+  planCopy, selectPlan, selectionMismatch, applyPathOverrides, staleConfigTypes, runCopy, writeCopyTxMulti, batchShape, overriddenSourcePaths,
   CommitUncertainError, TargetChangedError, PathConflictError, isCommitUncertain,
   COMMIT_UNCERTAIN_MESSAGE, type CopyDeps, type CopyPart, type CopyPlan, type CopyTable, type TxClient,
 } from "./copyConfigs";
@@ -59,19 +59,6 @@ test("staleConfigTypes: tipe rencana yang tidak ada di expected → stale (null 
   // kunci warisan prototype tidak dianggap ada
   const planProto: CopyPlan = { create: [row("constructor")], overwrite: [], same: [], targetOnly: [], duplicates: [], unselected: [] };
   assert.deepEqual(staleConfigTypes(planProto, {}, []), ["constructor"]);
-});
-
-test("planMismatch: himpunan sama (urutan beda) → kosong; tambah/kurang/pindah kelompok → daftar A→Z", () => {
-  const plan: CopyPlan = {
-    create: [row("B"), row("C")],
-    overwrite: [{ source: row("A"), target: row("A", "t1") }, { source: row("D"), target: row("D", "t1") }],
-    same: [], targetOnly: [], duplicates: [], unselected: [],
-  };
-  assert.deepEqual(planMismatch(plan, ["C", "B"], ["D", "A"]), []);
-  assert.deepEqual(planMismatch(plan, ["B", "C"], ["A"]), ["D"]); // D sebelumnya "sama" bagi user
-  assert.deepEqual(planMismatch(plan, ["B", "C", "E"], ["A", "D"]), ["E"]); // E kini sama/ganda
-  assert.deepEqual(planMismatch(plan, ["B"], ["A", "D", "C"]), ["C"]); // C pindah dibuat → ditimpa
-  assert.deepEqual(planMismatch({ ...plan, create: [], overwrite: [] }, [], []), []);
 });
 
 const TENANT_TABLE: CopyTable = { table: "public.tenant_configurations", typeCol: "config_type", hasPath: true };
@@ -474,13 +461,45 @@ test("writeCopyTxMulti: BEGIN melempar → bukan COMMIT tidak pasti", async () =
   assert.equal(f.released.length, 1);
 });
 
-test("writeCopyTx (pembungkus sementara) memanggil writeCopyTxMulti dengan satu part dan mengembalikan ConfigRow tanpa domain", async () => {
-  const f = fakeClient();
-  const created = await writeCopyTx(f.connect, TENANT_TABLE, copyPlan(), { tenantId: "tt", groupId: "gg" }, () => "new-1");
-  assert.equal(f.sql.at(-1), "COMMIT");
-  assert.equal(f.sql.filter((q) => q.startsWith("INSERT INTO")).length, 1);
-  assert.deepEqual(created, [{
-    id: "new-1", tenant_id: "tt", group_id: "gg", config_type: "NEW_TYPE", path: "new-type",
-    value: { a: "it's" }, is_default: false, version_token: "2026-10-29 10:00:00+00",
-  }]);
+// ---- bentuk batch riwayat dan catatan path ----
+
+test("batchShape satu domain: domain = kuncinya, tipe tanpa awalan, terurut, counts datar tanpa perDomain", () => {
+  const plan: CopyPlan = {
+    create: [row("C"), row("A")], overwrite: [ow("B")],
+    same: ["S1", "S2"], targetOnly: ["T"], duplicates: ["G"], unselected: ["U1", "U2", "U3"],
+  };
+  assert.deepEqual(batchShape([tenantPart(plan)]), {
+    domain: "tenant_config",
+    configTypes: ["A", "B", "C"],
+    counts: { dibuat: 2, ditimpa: 1, sama: 2, hanyaTujuan: 1, ganda: 1, tidakDipilih: 3 },
+  });
+  assert.equal(batchShape([workflowPart(plan)]).domain, "workflow_pipeline");
+});
+
+test("batchShape dua domain: 'semua', tipe berawalan domain terurut, counts total plus perDomain", () => {
+  const tenantPlan: CopyPlan = { create: [row("X")], overwrite: [], same: ["S"], targetOnly: [], duplicates: [], unselected: ["U"] };
+  const workflowPlan: CopyPlan = { create: [], overwrite: [ow("W"), ow("A")], same: [], targetOnly: ["T"], duplicates: ["G"], unselected: [] };
+  assert.deepEqual(batchShape([tenantPart(tenantPlan), workflowPart(workflowPlan)]), {
+    domain: "semua",
+    configTypes: ["tenant_config:X", "workflow_pipeline:A", "workflow_pipeline:W"],
+    counts: {
+      dibuat: 1, ditimpa: 2, sama: 1, hanyaTujuan: 1, ganda: 1, tidakDipilih: 1,
+      perDomain: {
+        tenant_config: { dibuat: 1, ditimpa: 0, sama: 1, hanyaTujuan: 0, ganda: 0, tidakDipilih: 1 },
+        workflow_pipeline: { dibuat: 0, ditimpa: 2, sama: 0, hanyaTujuan: 1, ganda: 1, tidakDipilih: 0 },
+      },
+    },
+  });
+});
+
+test("overriddenSourcePaths: hanya baris dibuat yang path-nya diganti override (path sumber atau null)", () => {
+  const withPath = (type: string, path: string | null): ConfigRow => ({ ...row(type), path });
+  const plan: CopyPlan = {
+    create: [withPath("A", "/src/a"), withPath("B", null), withPath("C", "/src/c"), withPath("D", "/src/d"), withPath("constructor", "/src/p")],
+    overwrite: [{ source: withPath("O", "/src/o"), target: row("O", "old") }],
+    same: [], targetOnly: [], duplicates: [], unselected: [],
+  };
+  const m = overriddenSourcePaths(plan, { A: "/ats/x/a", B: "/ats/x/b", C: "/src/c", D: "   ", O: "/ats/x/o" });
+  assert.deepEqual([...m.entries()].sort(), [["A", "/src/a"], ["B", null]]);
+  assert.equal(overriddenSourcePaths(plan, {}).size, 0);
 });

@@ -111,6 +111,7 @@ export async function migrateChangeBatches() {
     );
     CREATE INDEX IF NOT EXISTS config_change_batches_target_idx
       ON tenant_studio.config_change_batches (target_env, target_tenant_id, created_at DESC);
+    ALTER TABLE tenant_studio.config_change_batches ADD COLUMN IF NOT EXISTS note text;
     ALTER TABLE tenant_studio.tenant_config_histories ADD COLUMN IF NOT EXISTS batch_id uuid;
     CREATE INDEX IF NOT EXISTS tenant_config_histories_batch_idx
       ON tenant_studio.tenant_config_histories (batch_id);

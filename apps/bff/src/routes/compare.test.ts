@@ -40,28 +40,80 @@ test("mode salah dan field kosong ditolak", () => {
   assert.equal(parseExportBody(null).ok, false);
 });
 
-// ---- parseCopyBody (Salin ke Kanan) ----
+// ---- parseCopyBody (Salin multi-domain) ----
 
-const copyBody = (over: any = {}) => ({
-  sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
-  expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
+const domainBody = (over: any = {}) => ({
+  domain: "tenant_config", expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
   confirmedCreate: ["B"], confirmedOverwrite: ["A"], ...over,
 });
+const copyBody = (over: any = {}) => ({
+  sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2", reason: "Rilis",
+  domains: [domainBody()], ...over,
+});
 
-test("parseCopyBody: body valid diterima dan di-trim", () => {
-  const r = parseCopyBody(copyBody({ sourceEnv: " development ", targetTenantId: " t-2 " }));
+test("parseCopyBody bentuk baru", () => {
+  const ok = parseCopyBody(copyBody({
+    domains: [{ domain: "tenant_config", expectedTargetVersions: {}, confirmedCreate: ["A"], confirmedOverwrite: [] }],
+  }));
+  assert.equal(ok.ok, true);
+  if (ok.ok) assert.deepEqual(ok.value.domains[0].pathOverrides, {});
+  assert.deepEqual(parseCopyBody(copyBody({ targetTenantId: "GLOBAL_DEFAULT" })), { ok: false, error: "GLOBAL_DEFAULT tidak bisa menjadi tujuan salin" });
+  assert.deepEqual(parseCopyBody(copyBody({ reason: " " })), { ok: false, error: "Catatan (alasan) wajib diisi" });
+  assert.deepEqual(parseCopyBody(copyBody({ domains: [] })), { ok: false, error: "domains wajib berisi minimal satu domain" });
+  const d = domainBody();
+  assert.deepEqual(parseCopyBody(copyBody({ domains: [d, d] })), { ok: false, error: "Domain 'tenant_config' disebut dua kali" });
+  assert.deepEqual(parseCopyBody(copyBody({ domains: [{ ...d, domain: "workflow_pipeline", pathOverrides: { A: "/x" } }] })), { ok: false, error: "pathOverrides hanya untuk tenant_config" });
+});
+
+test("parseCopyBody: body valid diterima, di-trim, alasan dilipat", () => {
+  const r = parseCopyBody(copyBody({
+    sourceEnv: " development ", targetTenantId: " t-2 ", reason: "  Rilis\n  Q4  ",
+    domains: [domainBody({ pathOverrides: { B: "  /ats/x/b  " } })],
+  }));
   assert.equal(r.ok, true);
   if (r.ok) {
     assert.deepEqual(r.value, {
-      sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2",
-      expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
-      confirmedCreate: ["B"], confirmedOverwrite: ["A"],
+      sourceEnv: "development", sourceTenantId: "t-1", targetTenantId: "t-2", reason: "Rilis Q4",
+      domains: [{
+        domain: "tenant_config", expectedTargetVersions: { A: "2026-10-01 00:00:00+00", B: null },
+        confirmedCreate: ["B"], confirmedOverwrite: ["A"], pathOverrides: { B: "/ats/x/b" },
+      }],
     });
   }
 });
 
-test("parseCopyBody: expectedTargetVersions kosong diterima", () => {
-  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: {} })).ok, true);
+test("parseCopyBody: dua domain berbeda diterima, pathOverrides kosong di workflow diterima", () => {
+  const r = parseCopyBody(copyBody({
+    domains: [domainBody(), domainBody({ domain: "workflow_pipeline", pathOverrides: {} })],
+  }));
+  assert.equal(r.ok, true);
+  if (r.ok) assert.deepEqual(r.value.domains.map((d) => d.domain), ["tenant_config", "workflow_pipeline"]);
+});
+
+test("parseCopyBody: domains bukan larik tidak kosong ditolak", () => {
+  for (const v of [undefined, null, "tenant_config", {}, 1]) {
+    assert.deepEqual(parseCopyBody(copyBody({ domains: v })), { ok: false, error: "domains wajib berisi minimal satu domain" });
+  }
+});
+
+test("parseCopyBody: domain tidak dikenal ditolak, termasuk nama prototype", () => {
+  for (const x of ["bogus", "constructor", "__proto__"]) {
+    assert.deepEqual(parseCopyBody(copyBody({ domains: [domainBody({ domain: x })] })), { ok: false, error: `Domain '${x}' tidak dikenal` });
+  }
+  assert.equal(parseCopyBody(copyBody({ domains: [null] })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ domains: ["tenant_config"] })).ok, false);
+});
+
+test("parseCopyBody: pathOverrides harus objek dengan nilai teks", () => {
+  assert.deepEqual(parseCopyBody(copyBody({ domains: [domainBody({ pathOverrides: { B: 5 } })] })), { ok: false, error: "pathOverrides.B harus teks" });
+  assert.deepEqual(parseCopyBody(copyBody({ domains: [domainBody({ pathOverrides: { B: null } })] })), { ok: false, error: "pathOverrides.B harus teks" });
+  for (const v of ["x", ["a"], 1]) assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ pathOverrides: v })] })).ok, false);
+});
+
+test("parseCopyBody: alasan tidak valid memakai pesan parseReason", () => {
+  assert.deepEqual(parseCopyBody(copyBody({ reason: undefined })), { ok: false, error: "Catatan (alasan) wajib diisi" });
+  assert.deepEqual(parseCopyBody(copyBody({ reason: "x".repeat(501) })), { ok: false, error: "Catatan (alasan) maksimal 500 karakter" });
+  assert.equal(parseCopyBody(copyBody({ reason: "x".repeat(500) })).ok, true);
 });
 
 test("parseCopyBody: field wajib kosong ditolak", () => {
@@ -73,26 +125,27 @@ test("parseCopyBody: field wajib kosong ditolak", () => {
   assert.equal(parseCopyBody(copyBody({ sourceEnv: 5 })).ok, false);
 });
 
-test("parseCopyBody: expectedTargetVersions bukan objek ditolak", () => {
+test("parseCopyBody: expectedTargetVersions kosong diterima, bukan objek ditolak", () => {
+  assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ expectedTargetVersions: {} })] })).ok, true);
   for (const v of [undefined, null, "x", 1, ["a"]]) {
-    const r = parseCopyBody(copyBody({ expectedTargetVersions: v }));
+    const r = parseCopyBody(copyBody({ domains: [domainBody({ expectedTargetVersions: v })] }));
     assert.equal(r.ok, false);
     if (!r.ok) assert.match(r.error, /expectedTargetVersions/);
   }
 });
 
 test("parseCopyBody: nilai versi selain teks/null ditolak", () => {
-  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: 1 } })).ok, false);
-  assert.equal(parseCopyBody(copyBody({ expectedTargetVersions: { A: {} } })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ expectedTargetVersions: { A: 1 } })] })).ok, false);
+  assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ expectedTargetVersions: { A: {} } })] })).ok, false);
 });
 
 test("parseCopyBody: confirmedCreate/confirmedOverwrite wajib daftar teks", () => {
   for (const f of ["confirmedCreate", "confirmedOverwrite"]) {
     for (const v of [undefined, null, "A", { a: 1 }, [1], ["A", null]]) {
-      const r = parseCopyBody(copyBody({ [f]: v }));
+      const r = parseCopyBody(copyBody({ domains: [domainBody({ [f]: v })] }));
       assert.equal(r.ok, false);
       if (!r.ok) assert.match(r.error, new RegExp(f));
     }
   }
-  assert.equal(parseCopyBody(copyBody({ confirmedCreate: [], confirmedOverwrite: [] })).ok, true);
+  assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ confirmedCreate: [], confirmedOverwrite: [] })] })).ok, true);
 });

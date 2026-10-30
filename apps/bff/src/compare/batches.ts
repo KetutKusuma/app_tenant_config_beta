@@ -7,6 +7,7 @@ export type BatchStatus = "menunggu" | "berhasil" | "gagal" | "diekspor";
 
 export interface NewBatch {
   kind: BatchKind;
+  /** "tenant_config" | "workflow_pipeline", atau "semua" bila satu batch mencakup dua domain */
   domain: string;
   sourceEnv: string;
   sourceTenantId: string;
@@ -17,9 +18,11 @@ export interface NewBatch {
   targetTenantCode: string;
   mode: "timpa" | "lewati";
   configTypes: string[];
-  counts: Record<string, number>;
+  counts: Record<string, unknown>;
   status: BatchStatus;
   author: string;
+  /** Catatan (alasan) dari user; null/kosong untuk batch lama dan Export SQL */
+  note?: string | null;
   sqlText?: string;
   beforeSnapshot?: any | null;
 }
@@ -33,12 +36,12 @@ export async function createBatch(b: NewBatch): Promise<string> {
   const r = await auditDb.query(`
     INSERT INTO tenant_studio.config_change_batches
     (kind, domain, source_env, source_tenant_id, source_tenant_code, target_env, target_tenant_id, target_group_id,
-     target_tenant_code, mode, config_types, counts, status, sql_text, before_snapshot, author_name)
+     target_tenant_code, mode, config_types, counts, status, sql_text, before_snapshot, author_name, note)
     VALUES (
       ${esc(b.kind)}, ${esc(b.domain)}, ${esc(b.sourceEnv)}, ${esc(b.sourceTenantId)}, ${esc(b.sourceTenantCode)},
       ${esc(b.targetEnv)}, ${esc(b.targetTenantId)}, ${esc(b.targetGroupId)}, ${esc(b.targetTenantCode)},
       ${esc(b.mode)}, ${types}, ${jsonSql(b.counts)}, ${esc(b.status)}, ${esc(b.sqlText ?? null)},
-      ${jsonSql(b.beforeSnapshot)}, ${esc(b.author)}
+      ${jsonSql(b.beforeSnapshot)}, ${esc(b.author)}, ${esc(b.note ?? null)}
     )
     RETURNING id;
   `);
@@ -63,7 +66,7 @@ export interface BatchFilter {
 
 // Tanpa sql_text dan before_snapshot (besar); ambil lewat getBatch.
 const LIST_COLUMNS = `id, kind, domain, source_env, source_tenant_id, source_tenant_code, target_env, target_tenant_id,
-  target_group_id, target_tenant_code, mode, config_types, counts, status, error, author_name, created_at, finished_at`;
+  target_group_id, target_tenant_code, mode, config_types, counts, status, error, note, author_name, created_at, finished_at`;
 
 export async function listBatches(f: BatchFilter): Promise<any[]> {
   const where: string[] = [];

@@ -1,16 +1,21 @@
 import express from "express";
-import { domainOf } from "../domain";
+import { DOMAINS, domainOf, type ConfigDomain } from "../domain";
 import { assertWritable, poolFor } from "../envs";
 import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportFileName, resolveGroupId } from "../compare/sqlExport";
 import { createBatch, finishBatch, getBatch, listBatches } from "../compare/batches";
-import { TargetChangedError, isCommitUncertain, planCopy, planMismatch, runCopy, staleConfigTypes, writeCopyTxMulti, type CopyDeps, type CopyPart } from "../compare/copyConfigs";
+import {
+  PathConflictError, TargetChangedError, applyPathOverrides, batchShape, isCommitUncertain, overriddenSourcePaths, planCopy, runCopy,
+  selectPlan, selectionMismatch, staleConfigTypes, writeCopyTxMulti, type CopyDeps, type CopyPart,
+} from "../compare/copyConfigs";
+import { duplicateFinalPaths, finalPath, findPathConflicts } from "../compare/pathConflicts";
+import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
 // Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja),
-// Export SQL (hanya membuat teks), Salin ke Kanan (menulis ke env X-Target-Env), dan riwayat batch.
+// Export SQL (hanya membuat teks), Salin (menulis ke env X-Target-Env), dan riwayat batch.
 
 export const router = express.Router();
 
@@ -187,41 +192,83 @@ router.post("/api/compare/export-sql", async (req, res) => {
   }
 });
 
-// ---- Salin ke Kanan: tulis config tenant sumber ke tenant tujuan di env X-Target-Env (cadangkan dulu) ----
+// ---- Salin: tulis config tenant sumber ke tenant tujuan di env X-Target-Env (cadangkan dulu), satu atau dua domain ----
+
+export interface CopyDomainBody {
+  domain: ConfigDomain;
+  /** version_token (updated_at::text) tiap config tujuan saat dibandingkan; null = belum ada di tujuan */
+  expectedTargetVersions: Record<string, string | null>;
+  /** tipe config yang dipilih user sebagai "dibuat" / "ditimpa" */
+  confirmedCreate: string[];
+  confirmedOverwrite: string[];
+  /** config_type → path tujuan pengganti (hanya tenant_config) */
+  pathOverrides: Record<string, string>;
+}
 
 export interface CopyBody {
   sourceEnv: string;
   sourceTenantId: string;
   targetTenantId: string;
-  /** version_token (updated_at::text) tiap config tujuan saat dibandingkan; null = belum ada di tujuan */
-  expectedTargetVersions: Record<string, string | null>;
-  /** tipe config yang ditampilkan sebagai "dibuat" / "ditimpa" saat user mengonfirmasi */
-  confirmedCreate: string[];
-  confirmedOverwrite: string[];
+  reason: string;
+  domains: CopyDomainBody[];
 }
 
 export function parseCopyBody(body: any): { ok: true; value: CopyBody } | { ok: false; error: string } {
   const fail = (error: string) => ({ ok: false as const, error });
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  if (!body || typeof body !== "object" || Array.isArray(body)) return fail("Body permintaan tidak valid");
+  const isPlainObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  if (!isPlainObject(body)) return fail("Body permintaan tidak valid");
   const sourceEnv = str(body.sourceEnv), sourceTenantId = str(body.sourceTenantId), targetTenantId = str(body.targetTenantId);
   if (!sourceEnv || !sourceTenantId || !targetTenantId) return fail("sourceEnv, sourceTenantId, dan targetTenantId wajib diisi");
-  const ev = body.expectedTargetVersions;
-  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return fail("expectedTargetVersions wajib berupa objek { config_type: versi | null }");
-  const expectedTargetVersions: Record<string, string | null> = {};
-  for (const [k, v] of Object.entries(ev)) {
-    if (v !== null && typeof v !== "string") return fail(`expectedTargetVersions.${k} harus teks atau null`);
-    expectedTargetVersions[k] = v;
+  if (targetTenantId === "GLOBAL_DEFAULT") return fail("GLOBAL_DEFAULT tidak bisa menjadi tujuan salin");
+  if (!Array.isArray(body.domains) || body.domains.length === 0) return fail("domains wajib berisi minimal satu domain");
+
+  // Tahap 1: domain dikenal, tidak dobel, pathOverrides.
+  const seen = new Set<string>();
+  const stage: Array<{ domain: ConfigDomain; raw: Record<string, unknown>; pathOverrides: Record<string, string> }> = [];
+  for (const d of body.domains) {
+    const name = isPlainObject(d) ? d.domain : undefined;
+    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${String(name)}' tidak dikenal`);
+    if (seen.has(name)) return fail(`Domain '${name}' disebut dua kali`);
+    seen.add(name);
+    const raw = d as Record<string, unknown>;
+    const po = raw.pathOverrides;
+    const pathOverrides: Record<string, string> = {};
+    if (po !== undefined && po !== null) {
+      if (!isPlainObject(po)) return fail("pathOverrides wajib berupa objek { config_type: path }");
+      if (name === "workflow_pipeline" && Object.keys(po).length > 0) return fail("pathOverrides hanya untuk tenant_config");
+      for (const [k, v] of Object.entries(po)) {
+        if (typeof v !== "string") return fail(`pathOverrides.${k} harus teks`);
+        pathOverrides[k] = v.trim();
+      }
+    }
+    stage.push({ domain: name as ConfigDomain, raw, pathOverrides });
   }
+
+  const reason = parseReason(body.reason);
+  if (!reason.ok) return fail(reason.error);
+
+  // Tahap 2: versi tujuan yang diharapkan dan daftar yang dikonfirmasi, per domain.
   const strList = (name: string, v: unknown): string[] | string => {
     if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) return `${name} wajib berupa daftar teks`;
     return v as string[];
   };
-  const confirmedCreate = strList("confirmedCreate", body.confirmedCreate);
-  if (typeof confirmedCreate === "string") return fail(confirmedCreate);
-  const confirmedOverwrite = strList("confirmedOverwrite", body.confirmedOverwrite);
-  if (typeof confirmedOverwrite === "string") return fail(confirmedOverwrite);
-  return { ok: true, value: { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions, confirmedCreate, confirmedOverwrite } };
+  const domains: CopyDomainBody[] = [];
+  for (const { domain, raw, pathOverrides } of stage) {
+    const ev = raw.expectedTargetVersions;
+    if (!isPlainObject(ev)) return fail("expectedTargetVersions wajib berupa objek { config_type: versi | null }");
+    const expectedTargetVersions: Record<string, string | null> = {};
+    for (const [k, v] of Object.entries(ev)) {
+      if (v !== null && typeof v !== "string") return fail(`expectedTargetVersions.${k} harus teks atau null`);
+      expectedTargetVersions[k] = v;
+    }
+    const confirmedCreate = strList("confirmedCreate", raw.confirmedCreate);
+    if (typeof confirmedCreate === "string") return fail(confirmedCreate);
+    const confirmedOverwrite = strList("confirmedOverwrite", raw.confirmedOverwrite);
+    if (typeof confirmedOverwrite === "string") return fail(confirmedOverwrite);
+    domains.push({ domain, expectedTargetVersions, confirmedCreate, confirmedOverwrite, pathOverrides });
+  }
+  return { ok: true, value: { sourceEnv, sourceTenantId, targetTenantId, reason: reason.value, domains } };
 }
 
 // GLOBAL_DEFAULT boleh belum terdaftar di tenant_metadata; kodenya "GLOBAL_DEFAULT".
@@ -233,6 +280,7 @@ async function tenantMetaOrGlobal(env: string, tenantId: string) {
 
 const PLAN_CHANGED_ERROR = "Rencana salin berubah sejak dikonfirmasi (sumber atau tujuan berubah). Muat ulang perbandingan.";
 const TARGET_CHANGED_ERROR = "Config di tujuan berubah sejak dibandingkan. Muat ulang perbandingan.";
+const pathConflictError = (paths: string[]) => `Path sudah dipakai tenant lain di tujuan: ${paths.join(", ")}`;
 
 router.post("/api/compare/copy", async (req, res) => {
   let batchId: string | null = null;
@@ -244,7 +292,7 @@ router.post("/api/compare/copy", async (req, res) => {
 
     const parsed = parseCopyBody(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, targetTenantId, expectedTargetVersions, confirmedCreate, confirmedOverwrite } = parsed.value;
+    const { sourceEnv, sourceTenantId, targetTenantId, reason, domains } = parsed.value;
     if (!findProfile(sourceEnv)) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
     if (sourceEnv === targetEnv.name && sourceTenantId === targetTenantId) {
       return res.status(400).json({ error: "Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain." });
@@ -255,38 +303,61 @@ router.post("/api/compare/copy", async (req, res) => {
     const sourceMeta = await tenantMetaOrGlobal(sourceEnv, sourceTenantId);
     if (!sourceMeta) return res.status(400).json({ error: `Tenant sumber belum terdaftar di env '${sourceEnv}'` });
 
-    // Isi sumber dan tujuan dibaca ulang saat Salin ditekan.
-    const D = domainOf(req);
-    const [srcRows, tgtRows] = await Promise.all([
-      fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
-      fetchTenantRows(targetDb, D, targetTenantId),
-    ]);
-    const plan = planCopy(buildCompareEntries(srcRows, tgtRows).entries);
-    if (plan.create.length + plan.overwrite.length === 0) {
-      return res.status(400).json({ error: "Tidak ada config yang perlu disalin: semua sama, hanya ada di tujuan, atau ganda." });
+    // Isi sumber dan tujuan tiap domain dibaca ulang saat Salin ditekan (tabel menurut domain di body, bukan header).
+    // Salah satu domain berubah atau tidak cocok → batal seluruhnya, belum ada batch/cadangan yang dibuat.
+    const parts: CopyPart[] = [];
+    // `domain:config_type` → path sumber, untuk baris baru yang path akhirnya berasal dari override
+    const overriddenFrom = new Map<string, string | null>();
+    for (const d of domains) {
+      const D = DOMAINS[d.domain];
+      const [srcRows, tgtRows] = await Promise.all([
+        fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
+        fetchTenantRows(targetDb, D, targetTenantId),
+      ]);
+      const fresh = planCopy(buildCompareEntries(srcRows, tgtRows).entries);
+      // Yang dikonfirmasi user tidak lagi ada di kelompok yang sama pada rencana segar (sumber/tujuan berubah).
+      const mismatch = selectionMismatch(fresh, d.confirmedCreate, d.confirmedOverwrite);
+      if (mismatch.length) return res.status(409).json({ code: "TARGET_CHANGED", error: PLAN_CHANGED_ERROR, configTypes: mismatch });
+      const selected = selectPlan(fresh, d.confirmedCreate, d.confirmedOverwrite);
+      // Versi tujuan berbeda dari yang dilihat user, atau tipe terpilih tidak ada di expected.
+      const stale = staleConfigTypes(selected, d.expectedTargetVersions, tgtRows);
+      if (stale.length) return res.status(409).json({ code: "TARGET_CHANGED", error: TARGET_CHANGED_ERROR, configTypes: stale });
+      // writeCopyTxMulti hanya memakai finalPath(source): override harus sudah menjadi `path` baris.
+      const plan = applyPathOverrides(selected, d.pathOverrides);
+      if (D.hasPath) {
+        for (const [type, from] of overriddenSourcePaths(selected, d.pathOverrides)) overriddenFrom.set(`${d.domain}:${type}`, from);
+      }
+      parts.push({ domain: d.domain, table: { table: D.table, typeCol: D.typeCol, hasPath: D.hasPath }, plan });
     }
-    // Tujuan berubah sejak dibandingkan, atau sumber punya config yang tidak ada di ringkasan yang dikonfirmasi
-    // → batal seluruhnya, belum ada batch/cadangan yang dibuat.
-    const stale = staleConfigTypes(plan, expectedTargetVersions, tgtRows);
-    if (stale.length) return res.status(409).json({ code: "TARGET_CHANGED", error: TARGET_CHANGED_ERROR, configTypes: stale });
-    // Rencana segar (sumber ikut dibaca ulang) berbeda dari yang dikonfirmasi user → batal, sebelum batch/cadangan.
-    const mismatch = planMismatch(plan, confirmedCreate, confirmedOverwrite);
-    if (mismatch.length) return res.status(409).json({ code: "TARGET_CHANGED", error: PLAN_CHANGED_ERROR, configTypes: mismatch });
 
-    const targetTenantSql = targetTenantId === "GLOBAL_DEFAULT" ? null : targetTenantId;
-    const targetGroupId = resolveGroupId(targetTenantSql, targetMeta.groupId);
+    if (parts.reduce((n, p) => n + p.plan.create.length + p.plan.overwrite.length, 0) === 0) {
+      return res.status(400).json({ error: "Tidak ada config yang dipilih untuk disalin." });
+    }
+
+    // Path hanya ada di tenant_config. ATS mencari config lewat path tanpa filter tenant: path akhir harus unik
+    // dalam pilihan dan tidak boleh dipakai tenant lain di tujuan. (Dicek lagi di dalam transaksi.)
+    for (const part of parts.filter((p) => p.table.hasPath)) {
+      const items = [...part.plan.create, ...part.plan.overwrite.map((o) => o.source)]
+        .map((r) => ({ configType: r.config_type, path: finalPath(r) }));
+      const dupes = duplicateFinalPaths(items);
+      if (dupes.length) return res.status(400).json({ error: `Path ganda dalam pilihan: ${dupes.join(", ")}` });
+      const conflicts = await findPathConflicts(targetDb, part.table.table, items.map((i) => i.path), targetTenantId);
+      if (conflicts.size) {
+        const paths = [...conflicts.keys()].sort();
+        return res.status(409).json({ code: "PATH_CONFLICT", error: pathConflictError(paths), paths });
+      }
+    }
+
+    const targetGroupId = resolveGroupId(targetTenantId, targetMeta.groupId);
     const author = actorName(req);
     const from = `${sourceEnv} · ${sourceMeta.code}`;
-    const created = plan.create.map((r) => r.config_type);
-    const overwritten = plan.overwrite.map((o) => o.source.config_type);
-    // Mesin salin sudah multi-tabel; route lama ini tetap satu tabel (satu part) sampai ditulis ulang.
-    const parts: CopyPart[] = [{ domain: D.key, table: { table: D.table, typeCol: D.typeCol, hasPath: D.hasPath }, plan }];
+    const shape = batchShape(parts);
 
     const deps: CopyDeps = {
       createBatch: async () => {
         batchId = await createBatch({
           kind: "salin",
-          domain: D.key,
+          domain: shape.domain,
           sourceEnv,
           sourceTenantId,
           sourceTenantCode: sourceMeta.code,
@@ -295,26 +366,26 @@ router.post("/api/compare/copy", async (req, res) => {
           targetGroupId,
           targetTenantCode: targetMeta.code,
           mode: "timpa",
-          configTypes: [...created, ...overwritten].sort(),
-          counts: {
-            dibuat: plan.create.length,
-            ditimpa: plan.overwrite.length,
-            sama: plan.same.length,
-            hanyaTujuan: plan.targetOnly.length,
-            ganda: plan.duplicates.length,
-          },
+          configTypes: shape.configTypes,
+          counts: shape.counts,
           status: "menunggu",
           author,
+          note: reason,
         });
         return batchId;
       },
-      backupOld: async (o, _part, id) => {
-        await snapshotBeforeChange(o.target, `Sebelum disalin dari ${from}`, author, targetEnv.name, id);
+      backupOld: async (o, part, id) => {
+        const pathChange = part.table.hasPath ? { from: o.target.path, to: o.source.path } : undefined;
+        const note = composeNote(reason, `Sebelum disalin dari ${from}`, autoSummary(o.target.value, o.source.value, pathChange));
+        await snapshotBeforeChange(o.target, note, author, targetEnv.name, id);
       },
       discardBatchBackups: discardBatchSnapshots,
-      writeTarget: (ps) => writeCopyTxMulti(() => targetDb.connect(), ps, { tenantId: targetTenantSql, groupId: targetGroupId }),
+      writeTarget: (ps) => writeCopyTxMulti(() => targetDb.connect(), ps, { tenantId: targetTenantId, groupId: targetGroupId }),
       recordCreated: async (row, id) => {
-        await snapshotBeforeChange(row, `Disalin dari ${from}`, author, targetEnv.name, id);
+        const key = `${row.domain}:${row.config_type}`;
+        const pathPart = overriddenFrom.has(key) ? `path: ${overriddenFrom.get(key) ?? "(kosong)"} → ${row.path}` : null;
+        const note = composeNote(reason, `Disalin dari ${from}`, "Config baru", pathPart);
+        await snapshotBeforeChange(row, note, author, targetEnv.name, id);
       },
       finishBatch,
     };
@@ -323,14 +394,19 @@ router.post("/api/compare/copy", async (req, res) => {
     res.json({
       data: {
         batchId: result.batchId,
-        created,
-        overwritten,
-        skipped: { same: plan.same, targetOnly: plan.targetOnly, duplicates: plan.duplicates },
+        domains: parts.map(({ domain, plan }) => ({
+          domain,
+          created: plan.create.map((r) => r.config_type),
+          overwritten: plan.overwrite.map((o) => o.source.config_type),
+          skipped: { same: plan.same, targetOnly: plan.targetOnly, duplicates: plan.duplicates, unselected: plan.unselected },
+        })),
         warnings: result.warnings,
       },
     });
   } catch (err: any) {
     const body: Record<string, unknown> = { error: err?.message ?? String(err), batchId };
+    // Path bentrok terdeteksi di dalam transaksi (sudah di-ROLLBACK, tidak ada yang ditulis): UI memuat ulang pratinjau.
+    if (err instanceof PathConflictError) return res.status(409).json({ ...body, code: err.code, paths: err.paths });
     // Tujuan berubah di tengah tulis (sudah di-ROLLBACK): UI bisa menawarkan muat ulang.
     if (err instanceof TargetChangedError) Object.assign(body, { code: err.code, configTypes: [err.configType] });
     // COMMIT mungkin sudah masuk: cadangan isi lama tetap disimpan, user perlu memeriksa tujuan.

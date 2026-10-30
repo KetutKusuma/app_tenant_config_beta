@@ -48,21 +48,6 @@ export function staleConfigTypes(plan: CopyPlan, expected: Record<string, string
   return [...stale].sort();
 }
 
-/** Sementara dipakai route salin lama; digantikan `selectionMismatch` dan dihapus di Task 5. Himpunan tipe dibuat/ditimpa harus sama (urutan bebas). */
-export function planMismatch(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): string[] {
-  const diff = (actual: string[], confirmed: string[]) => {
-    const a = new Set(actual), c = new Set(confirmed);
-    return [...a].filter((t) => !c.has(t)).concat([...c].filter((t) => !a.has(t)));
-  };
-  return [...new Set([
-    ...diff(plan.create.map((r) => r.config_type), confirmedCreate),
-    ...diff(plan.overwrite.map((o) => o.source.config_type), confirmedOverwrite),
-    // tipe yang berpindah kelompok (mis. dibuat → ditimpa) juga dianggap berbeda
-    ...plan.create.map((r) => r.config_type).filter((t) => confirmedOverwrite.includes(t)),
-    ...plan.overwrite.map((o) => o.source.config_type).filter((t) => confirmedCreate.includes(t)),
-  ])].sort();
-}
-
 /** Hanya create/overwrite yang dikonfirmasi user yang dipertahankan; sisanya pindah ke `unselected` (terurut). */
 export function selectPlan(plan: CopyPlan, confirmedCreate: string[], confirmedOverwrite: string[]): CopyPlan {
   const create = new Set(confirmedCreate), overwrite = new Set(confirmedOverwrite);
@@ -103,6 +88,49 @@ export function applyPathOverrides(plan: CopyPlan, overrides: Record<string, str
     ...plan,
     create: plan.create.map(withPath),
     overwrite: plan.overwrite.map((o) => ({ source: withPath(o.source), target: o.target })),
+  };
+}
+
+/**
+ * Baris yang akan dibuat dan path akhirnya berasal dari override (bukan path sumber) → path sumbernya (null = kosong).
+ * Dipakai untuk bagian "path: <sumber> → <akhir>" di catatan versi 1. Override kosong atau sama dengan path sumber diabaikan.
+ * Pakai plan sebelum `applyPathOverrides`.
+ */
+export function overriddenSourcePaths(selected: CopyPlan, overrides: Record<string, string>): Map<string, string | null> {
+  const out = new Map<string, string | null>();
+  for (const r of selected.create) {
+    const o = Object.prototype.hasOwnProperty.call(overrides, r.config_type) ? overrides[r.config_type].trim() : "";
+    if (o && o !== r.path) out.set(r.config_type, r.path);
+  }
+  return out;
+}
+
+const countsOf = (plan: CopyPlan) => ({
+  dibuat: plan.create.length,
+  ditimpa: plan.overwrite.length,
+  sama: plan.same.length,
+  hanyaTujuan: plan.targetOnly.length,
+  ganda: plan.duplicates.length,
+  tidakDipilih: plan.unselected.length,
+});
+
+/**
+ * Bentuk baris batch riwayat dari part yang akan ditulis: satu domain → kuncinya; dua domain → "semua", tipe
+ * berawalan `domain:` (terurut), dan counts datar (total) ditambah `perDomain`.
+ */
+export function batchShape(parts: CopyPart[]): { domain: string; configTypes: string[]; counts: Record<string, unknown> } {
+  const multi = parts.length > 1;
+  const configTypes = parts.flatMap(({ domain, plan }) =>
+    [...plan.create.map((r) => r.config_type), ...plan.overwrite.map((o) => o.source.config_type)]
+      .map((t) => (multi ? `${domain}:${t}` : t)),
+  ).sort();
+  const per = parts.map(({ domain, plan }) => [domain, countsOf(plan)] as const);
+  const total = { dibuat: 0, ditimpa: 0, sama: 0, hanyaTujuan: 0, ganda: 0, tidakDipilih: 0 };
+  for (const [, c] of per) for (const k of Object.keys(total) as Array<keyof typeof total>) total[k] += c[k];
+  return {
+    domain: multi ? "semua" : parts[0].domain,
+    configTypes,
+    counts: multi ? { ...total, perDomain: Object.fromEntries(per) } : total,
   };
 }
 
@@ -307,19 +335,4 @@ export async function writeCopyTxMulti(
   } finally {
     client.release(broken);
   }
-}
-
-/**
- * Pembungkus sementara untuk route salin lama (satu tabel); dihapus bersama `planMismatch` saat route ditulis ulang (Task 5).
- */
-export async function writeCopyTx(
-  connect: () => Promise<TxClient>,
-  t: CopyTable,
-  plan: CopyPlan,
-  target: CopyTarget,
-  newId: () => string = randomUUID
-): Promise<ConfigRow[]> {
-  const domain: ConfigDomain = t.hasPath ? "tenant_config" : "workflow_pipeline";
-  const created = await writeCopyTxMulti(connect, [{ domain, table: t, plan }], target, newId);
-  return created.map(({ domain: _domain, ...row }) => row);
 }
