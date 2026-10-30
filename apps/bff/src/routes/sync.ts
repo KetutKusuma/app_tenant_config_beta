@@ -7,6 +7,7 @@ import { auditDb, esc } from "../db";
 import { domainOf, presetDirFor } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
+import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { isSafePresetPath, normalizeName, sameJson, scanJsonFiles, setPresetBase, snapshotBeforeChange, discardSnapshot, upsertPresetLink, writeJsonFileWithBackup } from "../presetSync";
 
 // Route: Sync Center (status, tautan file, apply push/pull) dan tulis file preset lokal.
@@ -152,7 +153,7 @@ router.put("/api/sync/link", async (req, res) => {
 // Terapkan sinkronisasi HANYA untuk item yang dipilih eksplisit (push: file->DB, pull: DB->file)
 router.post("/api/sync/apply", async (req, res) => {
   try {
-    const { tenantId, direction, items, createIfMissing = false, groupId } = req.body;
+    const { tenantId, direction, items, createIfMissing = false, groupId, reason: rawReason } = req.body;
     const authorName = `${actorName(req, "Preset Sync")} (Sync Center)`;
     if (direction !== "push" && direction !== "pull") {
       return res.status(400).json({ error: "direction harus 'push' atau 'pull'" });
@@ -162,6 +163,13 @@ router.post("/api/sync/apply", async (req, res) => {
     }
     // Pull hanya menulis file lokal; push menulis ke ats_db sehingga tunduk pada aturan env
     if (direction === "push" && !assertWritable(req, res)) return;
+    // Push menulis history untuk tiap item, jadi alasan wajib dan dicek sebelum loop. Pull mengabaikan reason.
+    let reason = "";
+    if (direction === "push") {
+      const parsedReason = parseReason(rawReason);
+      if (!parsedReason.ok) return res.status(400).json({ error: parsedReason.error });
+      reason = parsedReason.value;
+    }
     const isGlobal = tenantId === "GLOBAL_DEFAULT";
     const D = domainOf(req);
     const results: Array<{ configType: string; filePath: string; action: string; error?: string }> = [];
@@ -255,7 +263,12 @@ router.post("/api/sync/apply", async (req, res) => {
           try {
             outcome = await backupThenWrite({
               backup: async () => {
-                const snap = await snapshotBeforeChange(row, `Push dari file: ${path.basename(filePath)}`, authorName, req.targetEnv!.name);
+                const snap = await snapshotBeforeChange(
+                  row,
+                  composeNote(reason, `Push dari file ${path.basename(filePath)}`, autoSummary(row.value, parsed)),
+                  authorName,
+                  req.targetEnv!.name
+                );
                 backedUp = true;
                 return snap.historyId;
               },
@@ -303,7 +316,7 @@ router.post("/api/sync/apply", async (req, res) => {
           `);
           await snapshotBeforeChange(
             { id: newId, tenant_id: isGlobal ? null : tenantId, group_id: cleanGroup, config_type: configType, value: parsed },
-            `Dibuat dari file: ${path.basename(filePath)}`,
+            composeNote(reason, `Dibuat dari file ${path.basename(filePath)}`, "Config baru"),
             authorName,
             req.targetEnv!.name
           );

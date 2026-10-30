@@ -6,6 +6,7 @@ import { domainOf, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
 import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
+import { autoSummary, composeNote, parseReason } from "../changeSummary";
 
 // Route: CRUD konfigurasi (detail, buat, update + optimistic locking, hapus) dan riwayat.
 
@@ -105,6 +106,9 @@ router.put("/api/configs/:configId", async (req, res) => {
   if (!value || typeof value !== "object") {
     return res.status(400).json({ error: "Value must be a valid JSON object" });
   }
+  // changeSummary dari klien diperlakukan sebagai alasan perubahan (wajib)
+  const reason = parseReason(changeSummary);
+  if (!reason.ok) return res.status(400).json({ error: reason.error });
   if (!assertWritable(req, res)) return;
 
   try {
@@ -129,7 +133,7 @@ router.put("/api/configs/:configId", async (req, res) => {
       backup: async () => {
         const snap = await snapshotBeforeChange(
           currentConfig,
-          changeSummary || ((v: number) => `Snapshot sebelum perubahan v${v}`),
+          composeNote(reason.value, autoSummary(currentConfig.value, value)),
           authorName,
           req.targetEnv!.name
         );
@@ -164,6 +168,15 @@ router.put("/api/configs/:configId", async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// 5a. Ringkasan otomatis beda dua nilai config (hanya membaca, tidak menulis apa pun)
+router.post("/api/change-summary", (req, res) => {
+  const { before, after } = req.body;
+  if (after === undefined) {
+    return res.status(400).json({ error: "after wajib diisi" });
+  }
+  res.json({ data: { summary: autoSummary(before ?? null, after) } });
 });
 
 // 5b. Delete Configuration with Safety Confirmation & Audit Snapshot

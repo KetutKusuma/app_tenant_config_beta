@@ -7,6 +7,7 @@ import { domainOf, presetDirFor, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
 import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
+import { autoSummary, composeNote, parseReason } from "../changeSummary";
 
 // Route: file preset lokal (katalog, baca, simpan, ekspor massal, ekspor skill, sync 1 file).
 
@@ -324,7 +325,7 @@ router.post("/api/references/export-skill", (req, res) => {
 // 10. Sync Single Preset File to Active DB Configuration
 router.post("/api/references/sync-single", async (req, res) => {
   try {
-    const { configId, content, sourceFilename, expectedVersion } = req.body;
+    const { configId, content, sourceFilename, expectedVersion, reason: rawReason } = req.body;
     const authorName = actorName(req, "Preset Sync");
     if (!assertWritable(req, res)) return;
     const D = domainOf(req);
@@ -334,6 +335,8 @@ router.post("/api/references/sync-single", async (req, res) => {
     if (!content) {
       return res.status(400).json({ error: "Konten preset tidak boleh kosong!" });
     }
+    const reason = parseReason(rawReason);
+    if (!reason.ok) return res.status(400).json({ error: reason.error });
 
     const currRes = await req.targetDb!.query(`
       SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, value, updated_at::text AS version_token
@@ -356,7 +359,11 @@ router.post("/api/references/sync-single", async (req, res) => {
       backup: async () => {
         const snap = await snapshotBeforeChange(
           currentConfig,
-          `Synchronized from preset file: ${sourceFilename || "local file"}`,
+          composeNote(
+            reason.value,
+            `Sync dari preset ${sourceFilename || "file lokal"}`,
+            autoSummary(currentConfig.value, jsonParsed)
+          ),
           authorName,
           req.targetEnv!.name
         );
