@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseCopyBody, parseExportBody } from "./compare.js";
+import { parseCopyBody, parseExportBody, parsePathCheckQuery, parsePreviewQuery } from "./compare.js";
 
 const profileBody = (over: any = {}) => ({
   sourceEnv: "development", sourceTenantId: "t-1", configTypes: ["A"], mode: "timpa",
@@ -148,4 +148,68 @@ test("parseCopyBody: confirmedCreate/confirmedOverwrite wajib daftar teks", () =
     }
   }
   assert.equal(parseCopyBody(copyBody({ domains: [domainBody({ confirmedCreate: [], confirmedOverwrite: [] })] })).ok, true);
+});
+
+const previewQuery = (over: any = {}) => ({
+  sourceEnv: "development", sourceTenantId: "t-1", targetEnv: "staging", targetTenantId: "t-2", domains: "tenant_config,workflow_pipeline", ...over,
+});
+
+test("parsePreviewQuery: query valid diterima, domains dipisah koma dan di-trim", () => {
+  assert.deepEqual(parsePreviewQuery(previewQuery({ domains: " tenant_config , workflow_pipeline " })), {
+    ok: true,
+    value: { sourceEnv: "development", sourceTenantId: "t-1", targetEnv: "staging", targetTenantId: "t-2", domains: ["tenant_config", "workflow_pipeline"] },
+  });
+  const one = parsePreviewQuery(previewQuery({ domains: "workflow_pipeline" }));
+  assert.ok(one.ok && one.value.domains.length === 1);
+});
+
+test("parsePreviewQuery: domains hilang, kosong, atau bukan teks ditolak", () => {
+  for (const v of [undefined, "", "  ", ",", ["tenant_config"], 1]) {
+    const r = parsePreviewQuery(previewQuery({ domains: v }));
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.error, /domains/);
+  }
+});
+
+test("parsePreviewQuery: domain tidak dikenal ditolak, termasuk nama prototype", () => {
+  for (const x of ["bogus", "constructor", "__proto__"]) {
+    assert.deepEqual(parsePreviewQuery(previewQuery({ domains: `tenant_config,${x}` })), { ok: false, error: `Domain '${x}' tidak dikenal` });
+  }
+});
+
+test("parsePreviewQuery: domain yang sama disebut dua kali hanya dihitung sekali", () => {
+  const r = parsePreviewQuery(previewQuery({ domains: "tenant_config,tenant_config" }));
+  assert.ok(r.ok && r.value.domains.length === 1);
+});
+
+test("parsePreviewQuery: parameter wajib kosong ditolak, GLOBAL_DEFAULT bukan tujuan", () => {
+  for (const f of ["sourceEnv", "sourceTenantId", "targetEnv", "targetTenantId"]) {
+    assert.equal(parsePreviewQuery(previewQuery({ [f]: "" })).ok, false);
+    assert.equal(parsePreviewQuery(previewQuery({ [f]: undefined })).ok, false);
+  }
+  assert.deepEqual(parsePreviewQuery(previewQuery({ targetTenantId: "GLOBAL_DEFAULT" })), { ok: false, error: "GLOBAL_DEFAULT tidak bisa menjadi tujuan salin" });
+  // GLOBAL_DEFAULT boleh menjadi sumber
+  assert.equal(parsePreviewQuery(previewQuery({ sourceTenantId: "GLOBAL_DEFAULT" })).ok, true);
+  // production-manual boleh sebagai env tujuan (tujuan tidak dibaca)
+  assert.equal(parsePreviewQuery(previewQuery({ targetEnv: "production-manual" })).ok, true);
+});
+
+test("parsePathCheckQuery: valid diterima, path di-trim", () => {
+  assert.deepEqual(parsePathCheckQuery({ targetEnv: "staging", targetTenantId: "t-2", path: "  /ats/idm/x " }), {
+    ok: true, value: { targetEnv: "staging", targetTenantId: "t-2", path: "/ats/idm/x" },
+  });
+});
+
+test("parsePathCheckQuery: parameter kosong, production-manual, dan GLOBAL_DEFAULT ditolak", () => {
+  const q = (over: any = {}) => ({ targetEnv: "staging", targetTenantId: "t-2", path: "/ats/x", ...over });
+  for (const f of ["targetEnv", "targetTenantId", "path"]) {
+    assert.equal(parsePathCheckQuery(q({ [f]: "" })).ok, false);
+    assert.equal(parsePathCheckQuery(q({ [f]: "   " })).ok, false);
+    assert.equal(parsePathCheckQuery(q({ [f]: undefined })).ok, false);
+  }
+  assert.equal(parsePathCheckQuery(q({ path: ["/a", "/b"] })).ok, false);
+  const pm = parsePathCheckQuery(q({ targetEnv: "production-manual" }));
+  assert.equal(pm.ok, false);
+  if (!pm.ok) assert.match(pm.error, /Production \(isi manual\)/);
+  assert.equal(parsePathCheckQuery(q({ targetTenantId: "GLOBAL_DEFAULT" })).ok, false);
 });

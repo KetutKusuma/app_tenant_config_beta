@@ -9,13 +9,15 @@ import {
   PathConflictError, TargetChangedError, applyPathOverrides, batchShape, isCommitUncertain, overriddenSourcePaths, planCopy, runCopy,
   selectPlan, selectionMismatch, staleConfigTypes, writeCopyTxMulti, type CopyDeps, type CopyPart,
 } from "../compare/copyConfigs";
-import { duplicateFinalPaths, finalPath, findPathConflicts } from "../compare/pathConflicts";
+import { duplicateFinalPaths, finalPath, findPathConflicts, takenPathsWithPrefix, tenantCodeSlug } from "../compare/pathConflicts";
+import { attachConflicts, previewItems, previewSourceOnly, type CopyPreview, type PreviewItem } from "../compare/copyPreview";
 import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
 import { actorName } from "../auth";
 
 // Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja),
-// Export SQL (hanya membuat teks), Salin (menulis ke env X-Target-Env), dan riwayat batch.
+// pratinjau salin dan cek path (baca saja), Export SQL (hanya membuat teks),
+// Salin (menulis ke env X-Target-Env), dan riwayat batch.
 
 export const router = express.Router();
 
@@ -38,6 +40,121 @@ router.get("/api/compare", async (req, res) => {
     );
     if (!loaded.ok) return res.status(502).json({ error: loaded.error, side: loaded.side });
     res.json({ data: buildCompareEntries(loaded.left, loaded.right) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- Pratinjau salin dan cek path langsung (baca saja; tidak pernah menulis ke DB mana pun) ----
+
+/** Env tujuan khusus: production diisi manual lewat Export SQL, tidak bisa dibaca dari sini. */
+const PRODUCTION_MANUAL = "production-manual";
+const PRODUCTION_MANUAL_LABEL = "Production (isi manual)";
+
+const queryText = (q: Record<string, unknown>, k: string) => (typeof q[k] === "string" ? (q[k] as string).trim() : "");
+
+export interface PreviewQuery {
+  sourceEnv: string;
+  sourceTenantId: string;
+  targetEnv: string;
+  targetTenantId: string;
+  domains: ConfigDomain[];
+}
+
+export function parsePreviewQuery(q: Record<string, unknown>): { ok: true; value: PreviewQuery } | { ok: false; error: string } {
+  const fail = (error: string) => ({ ok: false as const, error });
+  const sourceEnv = queryText(q, "sourceEnv"), sourceTenantId = queryText(q, "sourceTenantId");
+  const targetEnv = queryText(q, "targetEnv"), targetTenantId = queryText(q, "targetTenantId");
+  if (!sourceEnv || !sourceTenantId || !targetEnv || !targetTenantId) {
+    return fail("Parameter sourceEnv, sourceTenantId, targetEnv, dan targetTenantId wajib diisi");
+  }
+  if (targetTenantId === "GLOBAL_DEFAULT") return fail("GLOBAL_DEFAULT tidak bisa menjadi tujuan salin");
+  const names = queryText(q, "domains").split(",").map((d) => d.trim()).filter(Boolean);
+  if (names.length === 0) return fail("Parameter domains wajib diisi (pisahkan dengan koma)");
+  const domains: ConfigDomain[] = [];
+  for (const name of names) {
+    if (!Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${name}' tidak dikenal`);
+    if (!domains.includes(name as ConfigDomain)) domains.push(name as ConfigDomain);
+  }
+  return { ok: true, value: { sourceEnv, sourceTenantId, targetEnv, targetTenantId, domains } };
+}
+
+export interface PathCheckQuery { targetEnv: string; targetTenantId: string; path: string }
+
+export function parsePathCheckQuery(q: Record<string, unknown>): { ok: true; value: PathCheckQuery } | { ok: false; error: string } {
+  const fail = (error: string) => ({ ok: false as const, error });
+  const targetEnv = queryText(q, "targetEnv"), targetTenantId = queryText(q, "targetTenantId"), path = queryText(q, "path");
+  if (!targetEnv || !targetTenantId || !path) return fail("Parameter targetEnv, targetTenantId, dan path wajib diisi");
+  if (targetEnv === PRODUCTION_MANUAL) return fail(`Path tidak bisa dicek untuk ${PRODUCTION_MANUAL_LABEL}`);
+  if (targetTenantId === "GLOBAL_DEFAULT") return fail("GLOBAL_DEFAULT tidak bisa menjadi tujuan salin");
+  return { ok: true, value: { targetEnv, targetTenantId, path } };
+}
+
+// Status tiap config bila disalin, ringkasan otomatis, path akhir, dan path yang bentrok dengan tenant lain di tujuan.
+router.get("/api/compare/copy-preview", async (req, res) => {
+  try {
+    const parsed = parsePreviewQuery(req.query);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    const { sourceEnv, sourceTenantId, targetEnv, targetTenantId, domains } = parsed.value;
+    const sp = findProfile(sourceEnv);
+    if (!sp) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
+    const targetReadable = targetEnv !== PRODUCTION_MANUAL;
+    const tp = targetReadable ? findProfile(targetEnv) : undefined;
+    if (targetReadable && !tp) return res.status(400).json({ error: `Env '${targetEnv}' tidak dikenal` });
+
+    let targetTenantCode: string | null = null;
+    if (targetReadable) {
+      const tm = await fetchTenantMeta(targetEnv, targetTenantId);
+      if (!tm) return res.status(400).json({ error: `Tenant tujuan belum terdaftar di env '${targetEnv}'` });
+      targetTenantCode = tm.code;
+    }
+
+    const labels = { kiri: sp.label, kanan: tp?.label ?? PRODUCTION_MANUAL_LABEL };
+    const out: CopyPreview["domains"] = [];
+    for (const domain of domains) {
+      const D = DOMAINS[domain];
+      const loaded = await loadSides(
+        async () => fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
+        async () => (targetReadable ? fetchTenantRows(poolFor(targetEnv), D, targetTenantId) : []),
+        labels
+      );
+      if (!loaded.ok) return res.status(502).json({ error: loaded.error, side: loaded.side });
+
+      let items: PreviewItem[];
+      if (!targetReadable) {
+        items = previewSourceOnly(loaded.left, D.hasPath);
+      } else {
+        items = previewItems(buildCompareEntries(loaded.left, loaded.right).entries, D.hasPath);
+        // Path hanya ada di tenant_config; workflow_pipeline tidak punya kolom path, jadi tanpa SQL path.
+        if (D.hasPath && targetTenantCode !== null) {
+          const db = poolFor(targetEnv);
+          const paths = items.filter((i) => (i.status === "baru" || i.status === "timpa") && i.path !== null).map((i) => i.path as string);
+          const conflicts = await findPathConflicts(db, D.table, paths, targetTenantId);
+          if (conflicts.size) {
+            const taken = await takenPathsWithPrefix(db, D.table, targetTenantId, tenantCodeSlug(targetTenantCode));
+            items = attachConflicts(items, conflicts, targetTenantCode, taken);
+          }
+        }
+      }
+      out.push({ domain, items });
+    }
+    const data: CopyPreview = { targetReadable, targetTenantCode, domains: out };
+    res.json({ data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Apakah path ini masih bebas di tujuan (tidak dipakai tenant lain)? Hanya tenant_config yang punya path.
+router.get("/api/compare/path-check", async (req, res) => {
+  try {
+    const parsed = parsePathCheckQuery(req.query);
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    const { targetEnv, targetTenantId, path } = parsed.value;
+    if (!findProfile(targetEnv)) return res.status(400).json({ error: `Env '${targetEnv}' tidak dikenal` });
+    const conflicts = await findPathConflicts(poolFor(targetEnv), DOMAINS.tenant_config.table, [path], targetTenantId);
+    const owner = conflicts.get(path);
+    res.json({ data: owner ? { available: false, ownerTenantId: owner.tenantId, ownerConfigType: owner.configType } : { available: true } });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
