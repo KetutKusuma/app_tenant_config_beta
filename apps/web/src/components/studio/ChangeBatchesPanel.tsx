@@ -1,14 +1,17 @@
 import { X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../lib/api";
-import type { ChangeBatch, CompareSide } from "../../types";
+import { DOMAIN_LABEL, type ChangeBatch, type CompareSide, type ConfigDomain } from "../../types";
 import { useDialogEsc } from "./useDialogEsc";
 
 const GHOST = "px-2 py-1 rounded-md text-[11px] text-slate-300 hover:bg-slate-800 transition disabled:opacity-40";
 const TABLE: Record<string, string> = {
   tenant_config: "tenant_configurations",
-  workflow_pipeline: "pipeline_workflow_configurations"
+  workflow_pipeline: "pipeline_workflow_configurations",
+  semua: "semua"
 };
+const COUNT_LABEL: Record<string, string> = { hanyaTujuan: "hanya tujuan", tidakDipilih: "tidak dipilih" };
+const TYPE_PREFIX = /^(tenant_config|workflow_pipeline):(.+)$/;
 const STATUS_CLS: Record<string, string> = {
   berhasil: "bg-emerald-500/15 text-emerald-300",
   diekspor: "bg-sky-500/15 text-sky-300",
@@ -34,9 +37,32 @@ function saveBlob(content: string, type: string, name: string) {
   URL.revokeObjectURL(url);
 }
 
-function countsText(c: ChangeBatch["counts"]): string {
-  const e = Object.entries(c ?? {});
-  return e.length ? e.map(([k, v]) => `${k} ${v}`).join(" · ") : "-";
+const domainLabel = (d: string) => (d === "semua" ? "Semua" : DOMAIN_LABEL[d as ConfigDomain] ?? d);
+
+/** Angka datar: salin (dibuat, ditimpa, …) atau export (total). `perDomain` (batch dua domain) ditampilkan terpisah. */
+function countsText(c: Record<string, unknown> | null | undefined): string {
+  const e = Object.entries(c ?? {}).filter((x): x is [string, number] => typeof x[1] === "number");
+  return e.length ? e.map(([k, v]) => `${COUNT_LABEL[k] ?? k} ${v}`).join(" · ") : "-";
+}
+
+/** Satu baris per domain untuk batch dua domain; kosong bila bukan batch dua domain. */
+function perDomainLines(c: ChangeBatch["counts"]): string[] {
+  const per = c?.perDomain;
+  if (!per || typeof per !== "object") return [];
+  return Object.entries(per).map(([d, counts]) => `${domainLabel(d)}: ${countsText(counts)}`);
+}
+
+/** config_types per domain; batch "semua" memuat tipe berawalan `domain:` yang ditampilkan tanpa awalan. */
+function typeGroups(b: ChangeBatch): Array<{ label: string | null; types: string[] }> {
+  if (b.config_types.length === 0) return [];
+  if (b.domain !== "semua") return [{ label: null, types: b.config_types }];
+  const by = new Map<string, string[]>();
+  for (const t of b.config_types) {
+    const m = TYPE_PREFIX.exec(t);
+    const key = m ? m[1] : "";
+    by.set(key, [...(by.get(key) ?? []), m ? m[2] : t]);
+  }
+  return [...by.entries()].map(([d, types]) => ({ label: d ? domainLabel(d) : "Lainnya", types }));
 }
 
 export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide; right: CompareSide; onClose(): void }) {
@@ -138,10 +164,12 @@ export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide
             <div key={b.id} className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs space-y-1.5">
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-slate-200">{b.kind === "salin" ? "Salin" : "Export SQL"}</span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">{domainLabel(b.domain)}</span>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] ${STATUS_CLS[b.status] ?? "bg-slate-800 text-slate-300"}`}>{b.status}</span>
                 <span className="flex-1" />
                 <span className="text-[10px] text-slate-500 tabular-nums">{new Date(b.created_at).toLocaleString()}</span>
               </div>
+              {b.note && <div className="text-[11px] text-slate-300 break-words line-clamp-3" title={b.note}>{b.note}</div>}
               <div
                 className="text-slate-300 font-mono text-[11px] truncate"
                 title={`${b.source_env} · ${b.source_tenant_code ?? b.source_tenant_id} → ${b.target_env} · ${b.target_tenant_code ?? b.target_tenant_id ?? "-"}`}
@@ -149,6 +177,24 @@ export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide
                 {`${b.source_env} · ${b.source_tenant_code ?? b.source_tenant_id} → ${b.target_env} · ${b.target_tenant_code ?? b.target_tenant_id ?? "-"}`}
               </div>
               <div className="text-[11px] text-slate-400 truncate" title={countsText(b.counts)}>{countsText(b.counts)}</div>
+              {perDomainLines(b.counts).map((line) => (
+                <div key={line} className="text-[11px] text-slate-500 truncate" title={line}>{line}</div>
+              ))}
+              {b.config_types.length > 0 && (
+                <details className="text-[11px] text-slate-400">
+                  <summary className="cursor-pointer select-none">{`${b.config_types.length} config`}</summary>
+                  <div className="mt-1 max-h-32 overflow-y-auto space-y-1.5">
+                    {typeGroups(b).map((g) => (
+                      <div key={g.label ?? ""}>
+                        {g.label && <div className="text-[10px] font-semibold text-slate-500">{g.label}</div>}
+                        <ul className="space-y-0.5">
+                          {g.types.map((t) => <li key={t} className="font-mono text-[11px] text-slate-400 truncate" title={t}>{t}</li>)}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {b.error && <div className="text-[11px] text-rose-300 truncate" title={b.error}>{b.error}</div>}
               <div className="flex items-center gap-1 text-[10px] text-slate-500">
                 <span className="truncate flex-1" title={b.author_name ?? ""}>{b.author_name ?? "-"}</span>

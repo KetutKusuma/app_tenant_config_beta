@@ -48,10 +48,14 @@ export interface HistoryItem {
   batch_source_tenant_code?: string | null;
 }
 
+/** Hitungan batch: angka datar (salin: dibuat, ditimpa, …; export: total), plus `perDomain` bila batch dua domain */
+export type BatchCounts = Record<string, number | Record<string, Record<string, number>>>;
+
 export interface ChangeBatch {
   id: string;
   kind: "salin" | "export_sql";
-  domain: string;
+  /** "semua" = satu batch dua domain; `config_types`-nya berawalan `domain:` */
+  domain: ConfigDomain | "semua";
   source_env: string;
   source_tenant_id: string;
   source_tenant_code: string | null;
@@ -61,9 +65,11 @@ export interface ChangeBatch {
   target_tenant_code: string | null;
   mode: string | null;
   config_types: string[];
-  counts: Record<string, number> | null;
+  counts: BatchCounts | null;
   status: "menunggu" | "berhasil" | "gagal" | "diekspor";
   error: string | null;
+  /** alasan yang diisi user (+ bagian otomatis); null untuk batch lama */
+  note: string | null;
   sql_text?: string | null;
   before_snapshot?: unknown;
   author_name: string | null;

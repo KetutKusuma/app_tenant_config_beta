@@ -1,13 +1,15 @@
 import Editor from "@monaco-editor/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
-import type { CompareSide, ExportSqlResult, Tenant } from "../../types";
+import { MAX_REASON } from "../../studio/useCopyDialog";
+import { MANUAL_ENV, type CompareSide, type CopyPreview, type ExportSqlResult, type PathStatus, type PreviewItem, type Tenant } from "../../types";
+import { PathOverrideField } from "./PathOverrideField";
 import { useDialogEsc } from "./useDialogEsc";
 
-const MANUAL = "__manual__";
-const INPUT = "bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INPUT = "bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-indigo-500 disabled:opacity-50";
 const GHOST = "px-3 py-1.5 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40";
 const PRIMARY = "px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white transition disabled:opacity-40";
 
@@ -28,6 +30,19 @@ function Segment<T extends string>({ value, options, onChange, disabled }: {
   );
 }
 
+/** Satu config tenant_config yang tercentang beserta keadaan path-nya (path sumber atau penggantinya). */
+interface PathRow {
+  configType: string;
+  item: PreviewItem;
+  /** path akhir (override menang) */
+  path: string | null;
+  /** path pengganti sudah beres: tersedia, atau tidak diganti dan tidak bentrok */
+  pathOk: boolean;
+  /** path akhirnya sama dengan config lain yang tercentang */
+  dup: boolean;
+  showField: boolean;
+}
+
 export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTenants, onClose }: {
   left: CompareSide;
   right: CompareSide;
@@ -36,10 +51,10 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
   loadTenants(env: string): Promise<Tenant[]>;
   onClose(): void;
 }) {
-  const { targetEnvs, setStatusMessage } = useStudio();
+  const { targetEnvs, setStatusMessage, configDomain } = useStudio();
   const [source, setSource] = useState<"kiri" | "kanan">("kiri");
   const [mode, setMode] = useState<"timpa" | "lewati">("timpa");
-  const [targetEnv, setTargetEnv] = useState<string>(() => targetEnvs.find((e) => e.name === right.env)?.name ?? targetEnvs[0]?.name ?? MANUAL);
+  const [targetEnv, setTargetEnv] = useState<string>(() => targetEnvs.find((e) => e.name === right.env)?.name ?? targetEnvs[0]?.name ?? MANUAL_ENV);
   const [targetTenantId, setTargetTenantId] = useState("");
   const [manualTenant, setManualTenant] = useState("");
   const [manualGroup, setManualGroup] = useState("");
@@ -48,10 +63,21 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ExportSqlResult | null>(null);
+  const [reason, setReason] = useState("");
+  // Path tenant_config: pratinjau salin (path akhir + bentrok), path pengganti per config_type, dan hasil cek path-nya
+  const [preview, setPreview] = useState<CopyPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [reloadTick, setReloadTick] = useState(0);
+  const [overrides, setOverrides] = useState<Record<string, string>>({});
+  const [overrideStatus, setOverrideStatus] = useState<Record<string, PathStatus>>({});
+  const reqId = useRef(0);
+  // Muat ulang setelah 409 PATH_CONFLICT: path yang baru ketahuan dipakai tenant lain (null = muat ulang biasa)
+  const takenRef = useRef<string[] | null>(null);
 
   useDialogEsc(() => { if (!busy) onClose(); });
 
-  const isManual = targetEnv === MANUAL;
+  const isManual = targetEnv === MANUAL_ENV;
   const targetInfo = targetEnvs.find((e) => e.name === targetEnv);
   const srcSide = source === "kiri" ? left : right;
   const srcEnv = targetEnvs.find((e) => e.name === srcSide.env);
@@ -81,9 +107,105 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
 
   const resetResult = () => { setResult(null); setError(""); };
 
-  const targetOk = isManual ? manualTenant.trim() !== "" : targetTenantId !== "";
+  const effTenantId = isManual ? manualTenant.trim() : targetTenantId;
+  // Server menerima tujuan manual hanya berupa UUID atau GLOBAL_DEFAULT
+  const manualTenantOk = effTenantId === "GLOBAL_DEFAULT" || UUID_RE.test(effTenantId);
+  const targetOk = isManual ? manualTenantOk : targetTenantId !== "";
   const sameAsSource = !isManual && targetTenantId !== "" && targetEnv === srcSide.env && targetTenantId === srcSide.tenantId;
-  const canBuild = !busy && checkedTypes.length > 0 && targetOk && !sameAsSource;
+
+  // Hanya tenant_config yang punya path. Tujuan GLOBAL_DEFAULT (tenant_id NULL) tidak punya tenant lain yang bisa bentrok.
+  const wantsPreview = configDomain === "tenant_config" && targetOk && !sameAsSource && effTenantId !== "GLOBAL_DEFAULT";
+
+  useEffect(() => {
+    const id = ++reqId.current;
+    const takenPaths = takenRef.current;
+    takenRef.current = null;
+    setOverrideStatus({});
+    setPreview(null);
+    setPreviewError("");
+    if (!wantsPreview) { setPreviewLoading(false); setOverrides({}); return; }
+    setPreviewLoading(true);
+    (async () => {
+      try {
+        const qs = new URLSearchParams({
+          sourceEnv: srcSide.env, sourceTenantId: srcSide.tenantId, targetEnv, targetTenantId: effTenantId, domains: "tenant_config"
+        });
+        const res = await api(`/api/compare/copy-preview?${qs}`);
+        const json = await res.json().catch(() => ({}));
+        if (id !== reqId.current) return;
+        if (!res.ok) { setPreviewError(json.error || `HTTP ${res.status}`); return; }
+        const data: CopyPreview = json.data;
+        // Saran path awal untuk baris bentrok. Setelah 409: path pengganti lama dipertahankan, kecuali yang baru ketahuan
+        // dipakai tenant lain pada baris yang kini bentrok (diberi saran baru).
+        setOverrides((prev) => {
+          const next: Record<string, string> = {};
+          for (const it of data.domains.find((d) => d.domain === "tenant_config")?.items ?? []) {
+            const old = takenPaths ? prev[it.configType] : undefined;
+            const taken = old !== undefined && takenPaths!.includes(old.trim());
+            if (old !== undefined && !(taken && it.pathConflict)) next[it.configType] = old;
+            else if (it.pathConflict) next[it.configType] = it.pathConflict.suggestion;
+          }
+          return next;
+        });
+        setPreview(data);
+      } catch (e: any) {
+        if (id === reqId.current) setPreviewError(e?.message || "Gagal memuat daftar path");
+      } finally {
+        if (id === reqId.current) setPreviewLoading(false);
+      }
+    })();
+  }, [wantsPreview, srcSide.env, srcSide.tenantId, targetEnv, effTenantId, reloadTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Path config tercentang ----
+  const previewItems = new Map((preview?.domains.find((d) => d.domain === "tenant_config")?.items ?? []).map((i) => [i.configType, i]));
+  const pathRows: PathRow[] = checkedTypes.flatMap((configType) => {
+    const item = previewItems.get(configType);
+    if (!item) return [];
+    const override = (overrides[configType] ?? "").trim();
+    const st = overrideStatus[configType] ?? "memeriksa";
+    // Bentrok: wajib punya path pengganti yang tersedia. Bukan bentrok: override (bila diisi) harus tersedia.
+    const pathOk = item.pathConflict ? override !== "" && st === "tersedia" : override === "" || st === "tersedia";
+    return [{ configType, item, path: override || item.path, pathOk, dup: false, showField: false }];
+  });
+  // Path akhir sama di antara config tercentang (ATS mencari config lewat path tanpa filter tenant)
+  const byPath = new Map<string, PathRow[]>();
+  for (const r of pathRows) if (r.path) byPath.set(r.path, [...(byPath.get(r.path) ?? []), r]);
+  for (const g of byPath.values()) if (g.length > 1) g.forEach((r) => { r.dup = true; });
+  // Tujuan manual tidak bisa dibaca (tidak ada pathConflict dari server): path tiap config tetap bisa diubah, SQL yang memeriksa sendiri.
+  // Kolom tetap tampil begitu ada override, supaya tidak hilang saat user mengetik.
+  for (const r of pathRows) r.showField = isManual || r.item.pathConflict !== null || overrides[r.configType] !== undefined || r.dup;
+  const shownRows = pathRows.filter((r) => r.showField);
+  const pending = pathRows.filter((r) => !r.pathOk);
+  const pendingChecking = pending.some((r) => (overrideStatus[r.configType] ?? "memeriksa") === "memeriksa");
+  const pendingFailed = pending.some((r) => overrideStatus[r.configType] === "gagal");
+  const dupPaths = [...new Set(pathRows.filter((r) => r.dup).map((r) => r.path as string))].sort();
+
+  const reasonText = reason.trim();
+  const blockReason = (() => {
+    if (sameAsSource) return ""; // sudah dijelaskan peringatan di bawah
+    if (!targetOk) return isManual ? "Isi tenant_id tujuan (UUID atau GLOBAL_DEFAULT) dulu." : "Pilih tenant tujuan dulu.";
+    if (checkedTypes.length === 0) return "Centang minimal satu config.";
+    if (wantsPreview) {
+      if (previewLoading) return "Memuat daftar path…";
+      if (previewError || !preview) return "Daftar path belum berhasil dimuat.";
+      if (pending.length > 0) {
+        if (pendingFailed) return "Cek path gagal; coba lagi.";
+        return pendingChecking ? "Path pengganti masih diperiksa." : "Path pengganti sudah dipakai atau kosong; ubah path-nya.";
+      }
+      if (dupPaths.length > 0) return `Path ganda dalam pilihan: ${dupPaths.join(", ")}. Ubah path salah satunya.`;
+    }
+    if (reasonText === "") return "Isi catatan alasan dulu.";
+    if (reasonText.length > MAX_REASON) return `Catatan maksimal ${MAX_REASON} karakter.`;
+    return "";
+  })();
+  const canBuild = !busy && !sameAsSource && blockReason === "";
+
+  /** 409 PATH_CONFLICT: tidak ada SQL yang dibuat; muat ulang daftar path supaya baris yang bentrok ditandai. */
+  const onPathConflict = (json: any) => {
+    setError(`${json.error || "Path sudah dipakai tenant lain di tujuan."}\nDaftar path dimuat ulang; baris yang path-nya bentrok ditandai.`);
+    takenRef.current = Array.isArray(json.paths) ? json.paths : [];
+    setReloadTick((n) => n + 1);
+  };
 
   const build = async () => {
     setBusy(true); setError(""); setResult(null);
@@ -91,12 +213,22 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
       const target = isManual
         ? { kind: "manual", tenantId: manualTenant.trim(), ...(manualGroup.trim() ? { groupId: manualGroup.trim() } : {}) }
         : { kind: "profile", env: targetEnv, tenantId: targetTenantId };
+      // Path pengganti hanya untuk tenant_config; yang sama dengan path sumbernya tidak perlu dikirim
+      const pathOverrides: Record<string, string> = {};
+      for (const r of pathRows) {
+        const o = (overrides[r.configType] ?? "").trim();
+        if (o && o !== r.item.path) pathOverrides[r.configType] = o;
+      }
       const res = await api("/api/compare/export-sql", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceEnv: srcSide.env, sourceTenantId: srcSide.tenantId, configTypes: checkedTypes, mode, target })
+        body: JSON.stringify({
+          sourceEnv: srcSide.env, sourceTenantId: srcSide.tenantId, mode, reason: reasonText, target,
+          domains: [{ domain: configDomain, configTypes: checkedTypes, pathOverrides }]
+        })
       });
       const json = await res.json().catch(() => ({}));
+      if (json.code === "PATH_CONFLICT") { onPathConflict(json); return; }
       if (!res.ok) { setError(json.error || `HTTP ${res.status}`); return; }
       setResult(json.data);
     } catch (e: any) {
@@ -172,16 +304,19 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
           <select className={`${INPUT} max-w-xs`} value={targetEnv} disabled={busy}
             onChange={(e) => { setTargetEnv(e.target.value); setTargetTenantId(""); setShowNew(false); resetResult(); }}>
             {targetEnvs.map((e) => <option key={e.name} value={e.name}>{e.label}</option>)}
-            <option value={MANUAL}>Production (isi manual)</option>
+            <option value={MANUAL_ENV}>Production (isi manual)</option>
           </select>
 
           <span>Tenant tujuan</span>
           {isManual ? (
-            <div className="flex gap-2 min-w-0">
-              <input className={`${INPUT} flex-1 min-w-0 font-mono`} placeholder="tenant_id (UUID atau GLOBAL_DEFAULT)" value={manualTenant} disabled={busy}
-                onChange={(e) => { setManualTenant(e.target.value); resetResult(); }} />
-              <input className={`${INPUT} flex-1 min-w-0 font-mono`} placeholder="group_id (kosong = sama dengan tenant_id)" value={manualGroup} disabled={busy}
-                onChange={(e) => { setManualGroup(e.target.value); resetResult(); }} />
+            <div className="space-y-1 min-w-0">
+              <div className="flex gap-2 min-w-0">
+                <input className={`${INPUT} flex-1 min-w-0 font-mono`} placeholder="tenant_id (UUID atau GLOBAL_DEFAULT)" value={manualTenant} disabled={busy}
+                  onChange={(e) => { setManualTenant(e.target.value); resetResult(); }} />
+                <input className={`${INPUT} flex-1 min-w-0 font-mono`} placeholder="group_id (kosong = sama dengan tenant_id)" value={manualGroup} disabled={busy}
+                  onChange={(e) => { setManualGroup(e.target.value); resetResult(); }} />
+              </div>
+              {manualTenant.trim() !== "" && !manualTenantOk && <div className="text-[11px] text-rose-300">tenant_id harus berupa UUID atau GLOBAL_DEFAULT.</div>}
             </div>
           ) : (
             <div className="flex items-center gap-2 min-w-0">
@@ -225,7 +360,63 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
           <div className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded-md px-3 py-2">Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain.</div>
         )}
 
-        {error && <div className="text-xs text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md px-3 py-2">{error}</div>}
+        {wantsPreview && previewLoading && (
+          <div className="text-xs text-slate-400 rounded-md border border-slate-800 px-3 py-2">Memuat daftar path…</div>
+        )}
+        {wantsPreview && previewError && (
+          <div className="flex items-center gap-2 text-xs text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md px-3 py-2">
+            <span className="flex-1 min-w-0">{`Gagal memuat daftar path: ${previewError}`}</span>
+            <button type="button" className={GHOST} disabled={busy} onClick={() => setReloadTick((n) => n + 1)}>Coba lagi</button>
+          </div>
+        )}
+        {shownRows.length > 0 && (
+          <section className="rounded-md border border-slate-800">
+            <header className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/40 border-b border-slate-800">
+              <span className="text-xs font-semibold text-slate-200">Path config</span>
+              <span className="text-[10px] text-slate-500">
+                {isManual ? "Path tiap config bisa diubah." : "ATS mencari config lewat path tanpa filter tenant, jadi path tujuan harus unik."}
+              </span>
+            </header>
+            <ul className="max-h-60 overflow-y-auto divide-y divide-slate-800/60">
+              {shownRows.map((r) => (
+                <li key={r.configType} className="px-3 py-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-[11px] text-slate-200 break-all">{r.configType}</span>
+                    {(r.item.pathConflict || r.dup) && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-300">Path bentrok</span>}
+                  </div>
+                  {r.item.pathConflict && (
+                    <div className="mt-1 text-[11px] text-amber-200">
+                      {`Path ${r.item.path} sudah dipakai tenant lain di tujuan (${r.item.pathConflict.ownerConfigType}). Ganti dengan path yang unik.`}
+                    </div>
+                  )}
+                  {r.dup && !r.item.pathConflict && (
+                    <div className="mt-1 text-[11px] text-amber-200">{`Path ${r.path} juga dipakai config lain yang dipilih. Ganti path salah satunya.`}</div>
+                  )}
+                  <div className="mt-1.5">
+                    <PathOverrideField
+                      value={overrides[r.configType] ?? r.item.path ?? ""} targetEnv={targetEnv} targetTenantId={effTenantId}
+                      onChange={(v) => { setOverrides((p) => ({ ...p, [r.configType]: v })); resetResult(); }}
+                      onStatus={(st) => setOverrideStatus((p) => (p[r.configType] === st ? p : { ...p, [r.configType]: st }))}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {isManual && <p className="px-3 py-2 border-t border-slate-800 text-[11px] text-slate-400">SQL akan batal sendiri bila path sudah dipakai tenant lain.</p>}
+          </section>
+        )}
+
+        <label className="block text-xs text-slate-400">
+          Catatan (alasan)
+          <textarea
+            className={`${INPUT} mt-1 w-full h-16 resize-none`} maxLength={MAX_REASON} value={reason} disabled={busy}
+            placeholder="Kenapa SQL ini dibuat? Tercatat di Riwayat."
+            onChange={(e) => { setReason(e.target.value); resetResult(); }}
+          />
+          <span className="block text-right text-[10px] text-slate-500">{`${reason.length}/${MAX_REASON}`}</span>
+        </label>
+
+        {error && <div className="text-xs whitespace-pre-line text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md px-3 py-2">{error}</div>}
 
         {result && (
           <div className="space-y-2">
@@ -245,7 +436,8 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
           </div>
         )}
 
-        <div className="flex justify-end gap-2">
+        <div className="flex items-center justify-end gap-2">
+          {!result && blockReason && !busy && <p className="flex-1 min-w-0 text-[11px] text-amber-200">{blockReason}</p>}
           <button type="button" className={GHOST} onClick={onClose} disabled={busy}>Tutup</button>
           {result && <button type="button" className={GHOST} onClick={copy}>Salin</button>}
           {result ? (
