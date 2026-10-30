@@ -6,7 +6,7 @@ import type { CoreActions } from "./useCoreActions";
 // Aksi perbandingan antar tenant (split kanan = tenant pembanding).
 export function useCompareActions(ctx: StudioState & CoreActions) {
   const {
-    activeConfigType, askSummary, compareConfigId, compareConfigType, compareConfigVersion, compareConfigs,
+    activeConfigType, askReason, compareConfigId, compareConfigType, compareConfigVersion, compareConfigs,
     compareModalConfigType, compareModalMode, compareModalTenantId, compareTenant,
     compareTenantOriginalContent, configVersion, jsonContent, originalContent, selectedConfigId,
     selectedTenant, setActiveConfigType, setCompareConfigId, setCompareConfigType, setCompareConfigVersion,
@@ -212,11 +212,18 @@ export function useCompareActions(ctx: StudioState & CoreActions) {
     try {
       const parsed = JSON.parse(splitJsonContent);
       setIsSavingCompareTenant(true);
-      const summary = await askSummary(
-        `Simpan ke ${compareTenant.name}`,
-        "Update via Cross-Tenant Split Studio",
-        `${compareConfigType} · tenant pembanding (window kanan).`
-      );
+      // Ringkasan otomatis hanya bila isi asli sisi kanan bisa dibaca; tanpa itu dialog hanya meminta alasan
+      let before: any;
+      try {
+        before = JSON.parse(compareTenantOriginalContent);
+      } catch {
+        before = undefined;
+      }
+      const summary = await askReason({
+        title: `Simpan ke ${compareTenant.name}`,
+        description: `${compareConfigType} · tenant pembanding (window kanan).`,
+        ...(before !== undefined ? { before, after: parsed } : {})
+      });
       if (summary === null) {
         setIsSavingCompareTenant(false);
         return;

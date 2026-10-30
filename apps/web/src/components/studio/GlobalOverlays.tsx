@@ -79,8 +79,9 @@ export function GlobalOverlays() {
         <PromptDialog
           title={promptDialog.title}
           description={promptDialog.description}
-          label="Catatan perubahan (commit summary)"
-          defaultValue={promptDialog.defaultValue}
+          label="Catatan (alasan)"
+          before={promptDialog.before}
+          after={promptDialog.after}
           onConfirm={(v) => {
             promptDialog.resolve(v);
             setPromptDialog(null);

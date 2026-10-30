@@ -8,7 +8,7 @@ import type { CoreActions } from "./useCoreActions";
 // Aksi split pane: preset lokal, riwayat, salin views, dan JSON Delta.
 export function useEditorActions(ctx: StudioState & CoreActions) {
   const {
-    activeConfigType, compareConfigType, compareTenant, configVersion, fetchHistories, fetchReferences,
+    activeConfigType, askReason, compareConfigType, compareTenant, configVersion, fetchHistories, fetchReferences,
     handleStaleConfig, isSplitScreen, jsonContent, jsonDeltaDirection, jsonDeltaFormat,
     localFileOriginalContent, localFilePath, originalContent, presetDirPath, selectedConfigId,
     selectedTenant, setCompareConfigId, setCompareTenant, setConfigVersion, setCopiedNotification,
@@ -45,11 +45,15 @@ export function useEditorActions(ctx: StudioState & CoreActions) {
       return;
     }
 
-    if (!confirm(`Apakah Anda yakin ingin menyinkronkan file preset '${splitTitle}' langsung ke database untuk ${activeConfigType}? Versi sebelumnya akan otomatis diarsipkan ke history.`)) {
-      return;
-    }
-
     try {
+      const reason = await askReason({
+        title: `Sync preset ke ${activeConfigType}`,
+        description: "Versi sebelumnya otomatis diarsipkan ke History.",
+        before: JSON.parse(originalContent),
+        after: parsed
+      });
+      if (reason === null) return;
+
       const res = await api("/api/references/sync-single", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -57,7 +61,8 @@ export function useEditorActions(ctx: StudioState & CoreActions) {
           configId: selectedConfigId,
           content: parsed,
           sourceFilename: splitTitle,
-          expectedVersion: configVersion
+          expectedVersion: configVersion,
+          reason
         })
       });
       const data = await res.json();

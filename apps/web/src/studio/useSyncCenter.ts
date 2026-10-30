@@ -36,11 +36,14 @@ export function useSyncCenter(ctx: StudioState & CoreActions) {
     error?: string;
   }>>([]);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // Catatan (alasan) wajib untuk push; pull tidak memakainya
+  const [syncReason, setSyncReason] = useState("");
 
   const openSyncCenter = () => {
     setShowSyncTenantModal(true);
     setSyncStep(1);
     setSyncDirection(null);
+    setSyncReason("");
     setSyncResult(null);
     setSyncError(null);
     fetchSyncStatus();
@@ -169,6 +172,12 @@ export function useSyncCenter(ctx: StudioState & CoreActions) {
       return;
     }
 
+    const reason = syncReason.trim();
+    if (direction === "push" && !reason) {
+      alert("Catatan (alasan) wajib diisi untuk push.");
+      return;
+    }
+
     // Konfirmasi sudah dilakukan lewat langkah Pratinjau di wizard
     setSyncBusy(true);
     setSyncResult(null);
@@ -181,12 +190,14 @@ export function useSyncCenter(ctx: StudioState & CoreActions) {
           direction,
           items: targetItems,
           groupId: currentGroupId || selectedTenant.groupId,
-          authorName: "Sync Center"
+          authorName: "Sync Center",
+          ...(direction === "push" ? { reason } : {})
         })
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Gagal melakukan sinkronisasi");
       setSyncResult(json);
+      if (direction === "push") setSyncReason("");
       setStatusMessage(`⚡ Sync ${direction === "push" ? "Push" : "Pull"} selesai: ${json.updated} diupdate, ${json.skipped} sama, ${json.failed} gagal`);
       setTimeout(() => setStatusMessage(null), 4000);
       await fetchSyncStatus();
@@ -209,7 +220,7 @@ export function useSyncCenter(ctx: StudioState & CoreActions) {
     showSyncTenantModal, setShowSyncTenantModal, syncRows, setSyncRows, syncUnlinked, setSyncUnlinked,
     syncSelected, setSyncSelected, syncLoading, setSyncLoading, syncBusy, setSyncBusy, syncResult,
     setSyncResult, syncStep, setSyncStep, syncDirection, setSyncDirection, syncPreviewLoading,
-    setSyncPreviewLoading, syncPreview, setSyncPreview, syncError, setSyncError, openSyncCenter,
+    setSyncPreviewLoading, syncPreview, setSyncPreview, syncError, setSyncError, syncReason, setSyncReason, openSyncCenter,
     fetchSyncStatus, toggleSyncSelected, handleSyncLink, handleSyncCompare, goSyncPreview, runSyncApply
   };
 }

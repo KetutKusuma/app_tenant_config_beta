@@ -6,9 +6,9 @@ import { useStudio } from "../../studio/StudioContext";
 export function SyncCenterModal() {
   const {
     fetchSyncStatus, goSyncPreview, handleSyncCompare, handleSyncLink, presetDirPath, references,
-    runSyncApply, selectedTenant, setShowSyncTenantModal, setSyncSelected, setSyncStep, showSyncTenantModal,
-    syncBusy, syncDirection, syncError, syncLoading, syncPreview, syncPreviewLoading, syncResult, syncRows,
-    syncSelected, syncStep, syncUnlinked, toggleSyncSelected
+    runSyncApply, selectedTenant, setShowSyncTenantModal, setSyncReason, setSyncSelected, setSyncStep,
+    showSyncTenantModal, syncBusy, syncDirection, syncError, syncLoading, syncPreview, syncPreviewLoading,
+    syncReason, syncResult, syncRows, syncSelected, syncStep, syncUnlinked, toggleSyncSelected
   } = useStudio();
   return (
     <>
@@ -224,6 +224,20 @@ export function SyncCenterModal() {
               </div>
             )}
 
+            {syncStep === 2 && syncDirection === "push" && (
+              <div className="px-4 py-3 border-t border-slate-800 shrink-0">
+                <label className="block text-[11px] text-slate-400">
+                  Catatan (alasan)
+                  <input
+                    value={syncReason}
+                    maxLength={500}
+                    onChange={(e) => setSyncReason(e.target.value)}
+                    className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                </label>
+              </div>
+            )}
+
             {syncStep === 3 && (
               <div className="flex-1 overflow-y-auto min-h-[200px] p-4">
                 {syncBusy && <p className="text-xs text-slate-500 py-6 text-center">Memproses sinkronisasi…</p>}
@@ -285,7 +299,8 @@ export function SyncCenterModal() {
                           setSyncStep(3);
                           runSyncApply(syncDirection);
                         }}
-                        disabled={syncPreviewLoading || syncBusy}
+                        disabled={syncPreviewLoading || syncBusy || (syncDirection === "push" && !syncReason.trim())}
+                        title={syncDirection === "push" && !syncReason.trim() ? "Isi Catatan (alasan) dulu" : undefined}
                         className={`px-3 py-1.5 rounded-lg text-white font-medium shadow-sm transition flex items-center gap-1.5 disabled:opacity-40 ${
                           syncDirection === "push" ? "bg-emerald-600 hover:bg-emerald-500" : "bg-amber-600 hover:bg-amber-500"
                         }`}

@@ -35,15 +35,17 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
   });
   const [envConfirm, setEnvConfirm] = useState<null | { env: string; resolve: (ok: boolean) => void }>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
-  // Dialog catatan commit (pengganti window.prompt); resolve(null) = batal
+  // Dialog alasan perubahan (pengganti window.prompt); resolve(null) = batal.
+  // before & after (opsional, keduanya) memunculkan ringkasan otomatis sebagai pratinjau.
   const [promptDialog, setPromptDialog] = useState<null | {
     title: string;
     description?: string;
-    defaultValue: string;
+    before?: any;
+    after?: any;
     resolve: (value: string | null) => void;
   }>(null);
-  const askSummary = (title: string, defaultValue: string, description?: string) =>
-    new Promise<string | null>((resolve) => setPromptDialog({ title, description, defaultValue, resolve }));
+  const askReason = (opts: { title: string; description?: string; before?: any; after?: any }) =>
+    new Promise<string | null>((resolve) => setPromptDialog({ ...opts, resolve }));
   // Snapshot DB terbaru yang sedang dibandingkan (split "db") dan penanda DB sudah lebih baru dari editor
   const [dbSnapshotVersion, setDbSnapshotVersion] = useState<string | null>(null);
   const [isDbNewer, setIsDbNewer] = useState(false);
@@ -149,7 +151,7 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     setActiveConfigType, currentGroupId, setCurrentGroupId, jsonContent, setJsonContent, originalContent,
     setOriginalContent, configVersion, setConfigVersion, configDomain, setConfigDomain, targetEnvs,
     setTargetEnvs, targetEnvName, setTargetEnvName, envConfirm, setEnvConfirm, ctxMenu, setCtxMenu,
-    promptDialog, setPromptDialog, askSummary, dbSnapshotVersion, setDbSnapshotVersion, isDbNewer,
+    promptDialog, setPromptDialog, askReason, dbSnapshotVersion, setDbSnapshotVersion, isDbNewer,
     setIsDbNewer, isLoadingConfig, setIsLoadingConfig, isSaving, setIsSaving, isSplitScreen,
     setIsSplitScreen, splitMode, setSplitMode, splitSourceType, setSplitSourceType, splitJsonContent,
     setSplitJsonContent, splitTitle, setSplitTitle, localFilePath, setLocalFilePath,

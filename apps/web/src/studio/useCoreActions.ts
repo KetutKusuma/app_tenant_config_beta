@@ -7,7 +7,7 @@ import type { StudioState } from "./useStudioState";
 // Aksi inti: muat tenant/config, ganti env/domain, validasi, simpan, shortcut & guard perubahan.
 export function useCoreActions(s: StudioState) {
   const {
-    activeConfigType, askSummary, configDomain, configVersion, currentGroupId, dbSnapshotVersion,
+    activeConfigType, askReason, configDomain, configVersion, currentGroupId, dbSnapshotVersion,
     isCompareTenantDirty, isLocalDirty, isSaving, jsonContent, originalContent, presetDirPath,
     presetInputPath, searchQuery, selectedConfigId, selectedTenant, setActiveConfigType, setCompareConfigId,
     setCompareTenant, setConfigDomain, setConfigVersion, setConfigs, setCopiedTenantId, setCurrentGroupId,
@@ -404,11 +404,12 @@ export function useCoreActions(s: StudioState) {
       setIsSaving(true);
       const summary = quick
         ? "Update via Tenant Studio"
-        : await askSummary(
-            `Simpan ${activeConfigType}`,
-            "Update via Tenant Studio",
-            `${DOMAIN_LABEL[configDomain]} · ${selectedTenant?.name || ""}. Versi sebelumnya otomatis diarsipkan ke History.`
-          );
+        : await askReason({
+            title: `Simpan ${activeConfigType}`,
+            description: `${DOMAIN_LABEL[configDomain]} · ${selectedTenant?.name || ""}. Versi sebelumnya otomatis diarsipkan ke History.`,
+            before: JSON.parse(originalContent),
+            after: parsed
+          });
       if (summary === null) {
         setIsSaving(false);
         return;

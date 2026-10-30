@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, X } from "lucide-react";
+import { api } from "../lib/api";
 
 // Komponen UI kecil yang dipakai header & toolbar Tenant Studio:
-// MenuButton (dropdown), SplitButton (aksi utama + dropdown), Chip (status), PromptDialog (pengganti prompt()).
+// MenuButton (dropdown), SplitButton (aksi utama + dropdown), Chip (status), PromptDialog (catatan alasan wajib).
 
 export interface MenuItem {
   key: string;
@@ -181,12 +182,19 @@ export function Chip({
   );
 }
 
-// Dialog input teks (pengganti window.prompt) — dipakai untuk catatan commit saat Save
+// Alasan wajib tiap penimpaan config (Simpan, Sync preset, dll). Batas sama dengan validasi BFF.
+const REASON_MAX = 500;
+
+type AutoSummary = { state: "loading" } | { state: "ok"; text: string } | { state: "error" };
+
+// Dialog alasan perubahan (pengganti window.prompt): kolom mulai kosong dan wajib diisi.
+// Bila before & after diberikan, tampil ringkasan otomatis dari POST /api/change-summary sebagai pratinjau.
 export function PromptDialog({
   title,
   description,
   label,
-  defaultValue,
+  before,
+  after,
   confirmLabel = "Simpan",
   onConfirm,
   onCancel
@@ -194,16 +202,39 @@ export function PromptDialog({
   title: string;
   description?: ReactNode;
   label: string;
-  defaultValue: string;
+  before?: unknown;
+  after?: unknown;
   confirmLabel?: string;
   onConfirm: (value: string) => void;
   onCancel: () => void;
 }) {
-  const [value, setValue] = useState(defaultValue);
+  const [value, setValue] = useState("");
+  const [auto, setAuto] = useState<AutoSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wantsSummary = before !== undefined && after !== undefined;
   useEffect(() => {
-    inputRef.current?.select();
+    inputRef.current?.focus();
   }, []);
+  useEffect(() => {
+    if (!wantsSummary) return;
+    let cancelled = false;
+    setAuto({ state: "loading" });
+    api("/api/change-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before, after })
+    })
+      .then(async (res) => {
+        const json = await res.json();
+        if (!res.ok || typeof json?.data?.summary !== "string") throw new Error("ringkasan tidak tersedia");
+        return json.data.summary as string;
+      })
+      .then((text) => !cancelled && setAuto({ state: "ok", text }))
+      .catch(() => !cancelled && setAuto({ state: "error" }));
+    return () => {
+      cancelled = true;
+    };
+  }, [wantsSummary, before, after]);
   return (
     <div
       className="fixed inset-0 z-[60] bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4"
@@ -226,11 +257,23 @@ export function PromptDialog({
             <X className="w-4 h-4" />
           </button>
         </div>
+        {auto && (
+          <p className="text-[11px] text-slate-400 break-words">
+            {auto.state === "loading" && "Menghitung…"}
+            {auto.state === "error" && "Ringkasan otomatis tidak tersedia"}
+            {auto.state === "ok" && (
+              <>
+                Yang berubah (otomatis): <span className="text-slate-200">{auto.text}</span>
+              </>
+            )}
+          </p>
+        )}
         <label className="block text-[11px] text-slate-400">
           {label}
           <input
             ref={inputRef}
             value={value}
+            maxLength={REASON_MAX}
             onChange={(e) => setValue(e.target.value)}
             className="mt-1 w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
           />
