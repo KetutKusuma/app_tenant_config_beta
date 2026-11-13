@@ -1,10 +1,11 @@
+import { getActiveService } from "../../lib/api";
 import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { useEnvCompare } from "../../studio/useEnvCompare";
-import { ENV_DOT, type CompareSide, type CompareStatus, type CopyDialogRequest, type TargetEnvInfo } from "../../types";
+import { ENV_DOT, type CompareSide, type CompareStatus, type CopyDialogRequest, type TargetEnvInfo, envOptionProps } from "../../types";
 import { ChangeBatchesPanel } from "./ChangeBatchesPanel";
 import { CopyConfigDialog } from "./CopyConfigDialog";
 import { ExportSqlDialog } from "./ExportSqlDialog";
@@ -64,7 +65,7 @@ function SidePicker({
       <span className="text-slate-500 text-xs">{label}</span>
       <span className={`w-2 h-2 rounded-full shrink-0 ${ENV_DOT[env?.color ?? ""] ?? "bg-slate-400"}`} />
       <select className={SELECT_CLS} value={side.env} onChange={(e) => onEnv(e.target.value)} title="Env">
-        {envs.map((e) => <option key={e.name} value={e.name}>{e.label}</option>)}
+        {envs.map((e) => { const o = envOptionProps(e, getActiveService()); return <option key={e.name} value={e.name} disabled={o.disabled}>{o.label}</option>; })}
       </select>
       <select
         className={`${SELECT_CLS} ${errorMsg || tenantError ? "border-rose-500/60" : ""}`}

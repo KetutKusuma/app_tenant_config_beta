@@ -2,7 +2,7 @@ import {
   AlertTriangle, ArrowLeftRight, Building2, Check, Copy, CopyPlus, Database, Download, Edit2, FileCode, FilePlus,
   Layers, Plus, RefreshCw, Search, Trash2, Users, Workflow
 } from "lucide-react";
-import { DOMAIN_LABEL, ENV_DOT } from "../../types";
+import { DOMAIN_LABEL, ENV_DOT, serviceInEnv } from "../../types";
 import { useStudio } from "../../studio/StudioContext";
 
 export function Sidebar() {
@@ -12,21 +12,25 @@ export function Sidebar() {
     openAddTenantModal, openCompareTenantModal, openConfig, openDeleteConfigModal, openEditTenantModal,
     openSavePresetModal, openTenant, searchInputRef, searchQuery, selectedConfigId, selectedTenant, setCopyDialog,
     setCtxMenu, setSearchQuery, setShowAddConfigModal, setTenantToDelete, targetEnvName, targetEnvs, tenants,
-    tenantSuggestions, tenantsWarning
+    tenantSuggestions, tenantsWarning, targetServiceKey
   } = useStudio();
   // Daftar tenant milik target env aktif saja (tenant_id berbeda di dev / staging / production)
   const activeEnv = targetEnvs.find(e => e.name === targetEnvName);
   const envLabel = activeEnv?.label || targetEnvName;
+  // Pengalih domain hanya untuk layanan yang punya tabel workflow (ATS, HRIS)
+  const service = serviceInEnv(activeEnv, targetServiceKey);
+  const hasWorkflow = service ? service.hasWorkflow : true;
+  const dbName = service?.dbName || "ats_db";
   return (
     <>
       {/* Left Sidebar: Tenant Directory */}
       <aside className="w-72 border-r border-slate-800 flex flex-col bg-slate-900/40 shrink-0">
         {/* Domain switch: menentukan isi daftar tenant & config di bawahnya */}
-        <div className="p-2 border-b border-slate-800">
+        {hasWorkflow && <div className="p-2 border-b border-slate-800">
           <div role="tablist" aria-label="Domain konfigurasi" className="grid grid-cols-2 gap-0.5 p-0.5 rounded-lg bg-slate-950/80 ring-1 ring-inset ring-slate-800">
             {([
-              { key: "tenant_config", icon: <Layers className="w-3.5 h-3.5" />, title: "public.tenant_configurations (ats_db)" },
-              { key: "workflow_pipeline", icon: <Workflow className="w-3.5 h-3.5" />, title: "public.pipeline_workflow_configurations (ats_db)" }
+              { key: "tenant_config", icon: <Layers className="w-3.5 h-3.5" />, title: `tenant_configurations (${dbName})` },
+              { key: "workflow_pipeline", icon: <Workflow className="w-3.5 h-3.5" />, title: `workflow (${dbName})` }
             ] as const).map(d => {
               const active = configDomain === d.key;
               return (
@@ -50,7 +54,7 @@ export function Sidebar() {
               );
             })}
           </div>
-        </div>
+        </div>}
 
         {/* Tenant Search & Header */}
         <div className="p-2 border-b border-slate-800 space-y-1.5">

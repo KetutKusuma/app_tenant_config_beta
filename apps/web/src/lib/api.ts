@@ -1,10 +1,12 @@
 import { UNAUTHORIZED_EVENT } from "../components/AuthGate";
-import type { ConfigDomain } from "../types";
+import type { ConfigDomain, ServiceKey } from "../types";
 
 // Domain konfigurasi aktif: menentukan tabel DB yang dipakai BFF (lewat header X-Config-Domain)
 let activeDomain: ConfigDomain = "tenant_config";
 // Target env (ats_db) aktif; kosong = BFF memakai preferensi user / default server
 let activeTargetEnv = "";
+// Layanan aktif (ats_db, hris_db, ...); selalu dikirim karena BFF menolak operasi tulis tanpa header ini
+let activeService: ServiceKey = "ats";
 // Dipasang oleh App: minta user mengetik nama env yang dilindungi sebelum operasi tulis
 let envConfirmHandler: ((env: string) => Promise<boolean>) | null = null;
 
@@ -15,6 +17,10 @@ export const setActiveDomain = (domain: ConfigDomain) => {
 export const getActiveTargetEnv = () => activeTargetEnv;
 export const setActiveTargetEnv = (env: string) => {
   activeTargetEnv = env;
+};
+export const getActiveService = () => activeService;
+export const setActiveService = (service: ServiceKey) => {
+  activeService = service;
 };
 export const setEnvConfirmHandler = (handler: typeof envConfirmHandler) => {
   envConfirmHandler = handler;
@@ -27,6 +33,7 @@ export const api = async (input: string, init: RequestInit = {}, confirmEnv?: st
   };
   // Header X-Target-Env yang diisi pemanggil (mis. layar Bandingkan antar env) tidak boleh ditimpa env aktif
   if (activeTargetEnv && !headers["X-Target-Env"]) headers["X-Target-Env"] = activeTargetEnv;
+  if (!headers["X-Target-Service"]) headers["X-Target-Service"] = activeService;
   if (confirmEnv) headers["X-Confirm-Env"] = confirmEnv;
   const res = await fetch(input, { ...init, credentials: "same-origin", headers });
   // Sesi habis/di-logout di tab lain: kembalikan ke layar login

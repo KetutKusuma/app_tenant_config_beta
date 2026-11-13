@@ -1,8 +1,9 @@
+import { getActiveService } from "../../lib/api";
 import { useEffect, useRef, type ReactNode } from "react";
 import {
   DOMAIN_TITLE, MANUAL_LABEL, MAX_REASON, downloadSql, useCopyDialog, type CopyRow
 } from "../../studio/useCopyDialog";
-import { MANUAL_ENV, type CopyBatchResult, type CopyDialogDone, type CopyDialogRequest, type PreviewStatus } from "../../types";
+import { MANUAL_ENV, type CopyBatchResult, type CopyDialogDone, type CopyDialogRequest, type PreviewStatus, envOptionProps } from "../../types";
 import { TypeToConfirmDialog } from "../ui";
 import { ChangeBatchesPanel } from "./ChangeBatchesPanel";
 import { PathOverrideField } from "./PathOverrideField";
@@ -164,7 +165,7 @@ export function CopyConfigDialog({ request, onClose, onDone }: {
           <div className="space-y-1">
             <select className={`${INPUT} max-w-xs`} value={h.targetEnv} disabled={h.targetLocked} onChange={(e) => h.pickEnv(e.target.value)}>
               {h.targetInfo === undefined && !h.isManual && <option value={h.targetEnv}>{h.targetEnv}</option>}
-              {h.envOptions.map((e) => <option key={e.name} value={e.name}>{e.label}</option>)}
+              {h.envOptions.map((e) => { const o = envOptionProps(e, getActiveService()); return <option key={e.name} value={e.name} disabled={o.disabled}>{o.label}</option>; })}
               <option value={MANUAL_ENV}>{MANUAL_LABEL}</option>
             </select>
             <div className="text-[11px] text-slate-500">

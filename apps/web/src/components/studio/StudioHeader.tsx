@@ -4,12 +4,12 @@ import {
   Users, X, Zap
 } from "lucide-react";
 import { Chip, MenuButton, SplitButton } from "../ui";
-import { DOMAIN_LABEL, ENV_DOT } from "../../types";
+import { DOMAIN_LABEL, ENV_DOT, SERVICE_LABEL } from "../../types";
 import { useStudio } from "../../studio/StudioContext";
 
 export function StudioHeader() {
   const {
-    activeConfigType, configDomain, copiedTenantId, copyToClipboard, currentGroupId, fetchTargetEnvs,
+    activeConfigType, configDomain, handleSwitchTargetService, targetServiceKey, copiedTenantId, copyToClipboard, currentGroupId, fetchTargetEnvs,
     handleCompareWithDb, handleCompareWithOriginal, handleSave, handleSwitchTargetEnv, handleValidate,
     handleValidateAndSave, histories, isSaving, isSplitScreen, isTargetReadonly, jsonContent, onLogout,
     openCompareTenantModal, setShowEnvCompare, openEditTenantModal, openSavePresetModal, openSyncCenter, originalContent,
@@ -56,6 +56,26 @@ export function StudioHeader() {
               />
             );
           })()}
+          {/* Pemilih layanan (ats_db, hris_db, ...): selalu terlihat agar tidak salah database */}
+          {(() => {
+            const services = targetEnvs.find(e => e.name === targetEnvName)?.services || [];
+            const cur = services.find(x => x.key === targetServiceKey);
+            return (
+              <MenuButton
+                align="left"
+                label={SERVICE_LABEL[targetServiceKey]}
+                title={cur?.dbName ? `Layanan ${cur.label} · ${cur.dbName}` : "Layanan / database config"}
+                icon={<Database className="w-3.5 h-3.5" />}
+                items={services.map(x => ({
+                  key: x.key,
+                  label: `${x.label} · ${x.dbName ?? "-"}${x.key === targetServiceKey ? "  ✓" : ""}`,
+                  hint: x.available ? undefined : x.reason || "Tidak tersedia di env ini",
+                  disabled: !x.available,
+                  onSelect: () => handleSwitchTargetService(x.key)
+                }))}
+              />
+            );
+          })()}
           {targetEnvs.find(e => e.name === targetEnvName)?.readonly && <Chip tone="amber">Read-only</Chip>}
           {targetEnvs.find(e => e.name === targetEnvName)?.protected && <Chip tone="rose">Dilindungi</Chip>}
         </div>
@@ -63,6 +83,8 @@ export function StudioHeader() {
         {/* Breadcrumb: selalu menunjukkan apa yang sedang diedit */}
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] whitespace-nowrap overflow-hidden">
           <span className="w-px h-4 bg-slate-800 mr-1 shrink-0" />
+          <span className="shrink-0 font-medium text-slate-300">{SERVICE_LABEL[targetServiceKey]}</span>
+          <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
           <span className={`shrink-0 font-medium ${configDomain === "workflow_pipeline" ? "text-teal-300" : "text-indigo-300"}`}>
             {DOMAIN_LABEL[configDomain]}
           </span>

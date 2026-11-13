@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { StudioUser } from "../components/AuthGate";
-import { api, getActiveDomain, getActiveTargetEnv, setActiveDomain, setActiveTargetEnv, setEnvConfirmHandler } from "../lib/api";
-import { type ConfigDomain, type ConfigItem, DOMAIN_LABEL, type TargetEnvInfo, type Tenant } from "../types";
+import { api, getActiveDomain, getActiveService, getActiveTargetEnv, setActiveDomain, setActiveService, setActiveTargetEnv, setEnvConfirmHandler } from "../lib/api";
+import { presetDirPref, presetDirPrefPatch } from "../lib/presetPrefs";
+import { type ConfigDomain, type ConfigItem, DOMAIN_LABEL, SERVICE_LABEL, type ServiceKey, serviceInEnv, type TargetEnvInfo, type Tenant } from "../types";
 import type { StudioState } from "./useStudioState";
 
 // Aksi inti: muat tenant/config, ganti env/domain, validasi, simpan, shortcut & guard perubahan.
@@ -17,7 +18,7 @@ export function useCoreActions(s: StudioState) {
     setShowValidationPanel, setSplitJsonContent, setSplitMode, setSplitSourceType, setSplitTitle,
     setStatusMessage, setTargetEnvName, setTargetEnvs, setTenantSuggestions, setTenants, setTenantsWarning,
     setUser, setValidationIssues, showEnvCompare,
-    splitJsonContent, targetEnvName, targetEnvs, tenants, user
+    splitJsonContent, targetEnvName, targetEnvs, tenants, user, targetServiceKey, setTargetServiceKey
   } = s;
 
   const copyToClipboard = (text: string, e?: React.MouseEvent) => {
@@ -122,7 +123,7 @@ export function useCoreActions(s: StudioState) {
     }
   };
   const savePresetDirPref = (dir: string) =>
-    savePreferences(getActiveDomain() === "workflow_pipeline" ? { presetDirWorkflow: dir } : { presetDirTenant: dir });
+    savePreferences(presetDirPrefPatch(getActiveService(), getActiveDomain(), dir));
 
   const handleUpdatePresetDir = (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,9 +188,50 @@ export function useCoreActions(s: StudioState) {
         setActiveTargetEnv(json.defaultEnv);
         setTargetEnvName(json.defaultEnv);
       }
+      // Layanan aktif tidak tersedia di env aktif: kembali ke ATS
+      const activeEnv = list.find(e => e.name === getActiveTargetEnv());
+      if (getActiveService() !== "ats" && activeEnv?.services && !serviceInEnv(activeEnv, getActiveService())?.available) {
+        fallBackToAts(activeEnv.label);
+      }
     } catch (err) {
       console.error("Gagal memuat target env:", err);
     }
+  };
+
+  // Layanan aktif tidak ada di env: pindah ke ATS + beri tahu user
+  const fallBackToAts = (envLabel: string) => {
+    const prev = getActiveService();
+    setActiveService("ats");
+    setTargetServiceKey("ats");
+    resetWorkspace();
+    if (configDomain !== "tenant_config") {
+      setActiveDomain("tenant_config");
+      setConfigDomain("tenant_config");
+    }
+    setStatusMessage(`⚠️ Layanan ${SERVICE_LABEL[prev]} tidak tersedia di ${envLabel}, beralih ke ATS.`);
+    setTimeout(() => setStatusMessage(null), 4000);
+  };
+
+  const handleSwitchTargetService = async (next: ServiceKey) => {
+    if (next === targetServiceKey) return;
+    if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah layanan dan buang perubahan tersebut?")) return;
+    const info = serviceInEnv(targetEnvs.find(e => e.name === targetEnvName), next);
+    setActiveService(next);
+    setTargetServiceKey(next);
+    resetWorkspace();
+    savePreferences({ lastTargetService: next });
+    // Layanan tanpa tabel workflow: kembali ke Tenant Config
+    let domain = configDomain;
+    if (domain === "workflow_pipeline" && info && !info.hasWorkflow) {
+      domain = "tenant_config";
+      setActiveDomain(domain);
+      setConfigDomain(domain);
+    }
+    fetchReferences(presetDirPref(user.preferences, next, domain));
+    // Tenant yang sama dipertahankan bila ada di layanan baru (tenant_id dipakai bersama lintas layanan)
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
+    setStatusMessage(`🧩 Layanan aktif: ${SERVICE_LABEL[next]}${info?.dbName ? ` (${info.dbName})` : ""}`);
+    setTimeout(() => setStatusMessage(null), 3000);
   };
 
   const handleSwitchTargetEnv = async (next: string) => {
@@ -199,8 +241,14 @@ export function useCoreActions(s: StudioState) {
     setTargetEnvName(next);
     resetWorkspace();
     savePreferences({ lastTargetEnv: next });
-    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
     const env = targetEnvs.find(e => e.name === next);
+    const fellBack = getActiveService() !== "ats" && !!env?.services && !serviceInEnv(env, getActiveService())?.available;
+    if (fellBack) {
+      fallBackToAts(env!.label);
+      savePreferences({ lastTargetService: "ats" });
+    }
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
+    if (fellBack) return;
     setStatusMessage(`🌐 Target env: ${env?.label || next}${env?.readonly ? " (read-only)" : ""}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
@@ -212,9 +260,7 @@ export function useCoreActions(s: StudioState) {
     setConfigDomain(next);
     resetWorkspace();
     // Folder preset mengikuti domain (preferensi user); kosong = default server untuk domain tsb
-    const nextDir = next === "workflow_pipeline"
-      ? user.preferences.presetDirWorkflow || ""
-      : user.preferences.presetDirTenant || "";
+    const nextDir = presetDirPref(user.preferences, getActiveService(), next);
     fetchReferences(nextDir);
     // Muat ulang daftar tenant (jumlah config per domain) dan pertahankan tenant yang sedang dipilih
     await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
@@ -531,7 +577,7 @@ export function useCoreActions(s: StudioState) {
 
   return {
     copyToClipboard, fetchTenants, fetchReferences, savePreferences, savePresetDirPref,
-    handleUpdatePresetDir, selectTenant, resetWorkspace, fetchTargetEnvs, handleSwitchTargetEnv,
+    handleUpdatePresetDir, selectTenant, resetWorkspace, fetchTargetEnvs, handleSwitchTargetEnv, handleSwitchTargetService,
     handleSwitchDomain, loadConfig, fetchHistories, handleValidate, fetchLatestDbConfig, handleCompareWithDb,
     handleApplyDbSnapshot, handleReloadFromDb, handleStaleConfig, handleSave, handleValidateAndSave, isDirty,
     isTargetReadonly, confirmDiscard, openTenant, openConfig, searchInputRef, shortcutHandlerRef,

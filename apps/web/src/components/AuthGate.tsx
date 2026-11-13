@@ -15,6 +15,9 @@ export interface StudioUser {
     lastDomain: string | null;
     lastTenantId: string | null;
     lastTargetEnv: string | null;
+    lastTargetService: string | null;
+    /** Folder preset layanan selain ATS, kunci `<layanan>:<domain>` */
+    presetDirs: Record<string, string>;
   };
 }
 

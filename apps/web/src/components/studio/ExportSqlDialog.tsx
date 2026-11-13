@@ -1,11 +1,11 @@
 import Editor from "@monaco-editor/react";
 import { useEffect, useRef, useState } from "react";
-import { api } from "../../lib/api";
+import { api, getActiveService } from "../../lib/api";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
 import { duplicatePathList, isPathOk, markDuplicatePaths, mergeOverrides, overrideToSend, pendingPathReason, showPathField, UUID_RE } from "../../studio/pathRules";
 import { MAX_REASON } from "../../studio/useCopyDialog";
-import { MANUAL_ENV, type CompareSide, type CopyPreview, type ExportSqlResult, type PathStatus, type PreviewItem, type Tenant } from "../../types";
+import { MANUAL_ENV, type CompareSide, type CopyPreview, type ExportSqlResult, type PathStatus, type PreviewItem, type Tenant, envOptionProps } from "../../types";
 import { PathOverrideField } from "./PathOverrideField";
 import { useDialogEsc } from "./useDialogEsc";
 
@@ -284,7 +284,7 @@ export function ExportSqlDialog({ left, right, checkedTypes, tenantsFor, loadTen
           <span>Env tujuan</span>
           <select className={`${INPUT} max-w-xs`} value={targetEnv} disabled={busy}
             onChange={(e) => { setTargetEnv(e.target.value); setTargetTenantId(""); setShowNew(false); resetResult(); }}>
-            {targetEnvs.map((e) => <option key={e.name} value={e.name}>{e.label}</option>)}
+            {targetEnvs.map((e) => { const o = envOptionProps(e, getActiveService()); return <option key={e.name} value={e.name} disabled={o.disabled}>{o.label}</option>; })}
             <option value={MANUAL_ENV}>Production (isi manual)</option>
           </select>
 

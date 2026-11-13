@@ -135,7 +135,33 @@ export interface TargetEnvInfo {
   hostMasked: string;
   source: string;
   status?: { ok: boolean; error?: string; ms?: number };
+  /** Layanan (ats_db, hris_db, ...) yang tersedia di env ini */
+  services?: ServiceInfo[];
 }
+
+// Layanan backend yang config-nya dikelola Studio; dipilih lewat header X-Target-Service
+export type ServiceKey = "ats" | "hris" | "organization" | "auth" | "communication";
+export interface ServiceInfo {
+  key: ServiceKey;
+  label: string;
+  dbName: string | null;
+  available: boolean;
+  hasWorkflow: boolean;
+  reason?: string;
+}
+export const SERVICE_LABEL: Record<ServiceKey, string> = {
+  ats: "ATS", hris: "HRIS", organization: "Organization", auth: "Auth", communication: "Communication"
+};
+export const isServiceKey = (x: unknown): x is ServiceKey =>
+  typeof x === "string" && Object.prototype.hasOwnProperty.call(SERVICE_LABEL, x);
+export const serviceInEnv = (env: TargetEnvInfo | undefined, key: ServiceKey): ServiceInfo | undefined =>
+  env?.services?.find((s) => s.key === key);
+/** Props <option> env di dialog Salin/Export/Bandingkan: disabled bila layanan aktif tidak ada di env itu */
+export const envOptionProps = (env: TargetEnvInfo, key: ServiceKey): { disabled: boolean; label: string } => {
+  const s = serviceInEnv(env, key);
+  const ok = !env.services || !!s?.available;
+  return { disabled: !ok, label: ok ? env.label : `${env.label} (Layanan ${SERVICE_LABEL[key]} tidak tersedia)` };
+};
 
 export const ENV_DOT: Record<string, string> = {
   slate: "bg-slate-400", indigo: "bg-indigo-400", emerald: "bg-emerald-400", amber: "bg-amber-400",

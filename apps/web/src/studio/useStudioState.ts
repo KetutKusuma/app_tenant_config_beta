@@ -1,8 +1,10 @@
 import { useState } from "react";
 import type { ContextMenuState } from "../components/ui";
-import { setActiveTargetEnv } from "../lib/api";
+import { setActiveService, setActiveTargetEnv } from "../lib/api";
+import { presetDirPref } from "../lib/presetPrefs";
+import { isServiceKey } from "../types";
 import type {
-  AppProps, ConfigDomain, ConfigItem, CopyDialogRequest, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant,
+  AppProps, ConfigDomain, ServiceKey, ConfigItem, CopyDialogRequest, HistoryItem, ReferenceItem, TargetEnvInfo, Tenant,
   TenantSuggestion
 } from "../types";
 import type { DeltaFormat } from "../utils/jsonDiff";
@@ -33,6 +35,12 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     const env = user.preferences.lastTargetEnv || "";
     setActiveTargetEnv(env);
     return env;
+  });
+  const [targetServiceKey, setTargetServiceKey] = useState<ServiceKey>(() => {
+    const pref = user.preferences.lastTargetService;
+    const key: ServiceKey = isServiceKey(pref) ? pref : "ats";
+    setActiveService(key);
+    return key;
   });
   const [envConfirm, setEnvConfirm] = useState<null | { env: string; resolve: (ok: boolean) => void }>(null);
   const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
@@ -92,8 +100,8 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
 
   // Local References State & Customizable Folder Path
   // Folder preset per user & per domain; string kosong = BFF memakai preferensi user / default server
-  const [presetDirPath, setPresetDirPath] = useState<string>(user.preferences.presetDirTenant || "");
-  const [presetInputPath, setPresetInputPath] = useState<string>(user.preferences.presetDirTenant || "");
+  const [presetDirPath, setPresetDirPath] = useState<string>(() => presetDirPref(user.preferences, targetServiceKey, "tenant_config"));
+  const [presetInputPath, setPresetInputPath] = useState<string>(() => presetDirPref(user.preferences, targetServiceKey, "tenant_config"));
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [showRefDrawer, setShowRefDrawer] = useState(false);
@@ -177,7 +185,8 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     setDeleteError, showSavePresetModal, setShowSavePresetModal, exportScope, setExportScope,
     exportSubfolder, setExportSubfolder, presetSaveFilename, setPresetSaveFilename, presetSaveTargetDir,
     setPresetSaveTargetDir, includeSkillPreset, setIncludeSkillPreset, isExportingSkill, setIsExportingSkill,
-    isSavingPreset, setIsSavingPreset, savePresetStatus, setSavePresetStatus
+    isSavingPreset, setIsSavingPreset, savePresetStatus, setSavePresetStatus,
+    targetServiceKey, setTargetServiceKey
   };
 }
 
