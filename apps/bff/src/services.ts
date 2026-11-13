@@ -113,3 +113,14 @@ export function isServiceKey(x: unknown): x is ServiceKey {
 export function tableFor(service: ServiceKey, domain: ConfigDomain): TableSpec | null {
   return SERVICES[service].domains[domain] ?? null;
 }
+
+/** Env + layanan: pemisah data Studio di Neon (riwayat, preset_links, batch) */
+export interface StudioScope {
+  env: string;
+  service: ServiceKey;
+}
+
+/** Scope request aktif; dipanggil setelah middleware env + layanan */
+export function scopeOf(req: { targetEnv?: { name: string }; targetService?: ServiceSpec }): StudioScope {
+  return { env: req.targetEnv!.name, service: req.targetService!.key };
+}

@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import express from "express";
 import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
+import { scopeOf } from "../services";
 import { domainOf, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
@@ -73,7 +74,7 @@ router.post("/api/configs", async (req, res) => {
     // Catat versi 1 di history
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
+      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service)
       VALUES (
         ${targetTenantId ? esc(targetTenantId) : "NULL"}, 
         ${cleanGroupId ? esc(cleanGroupId) : "NULL"}, 
@@ -83,7 +84,8 @@ router.post("/api/configs", async (req, res) => {
         ${esc(JSON.stringify(jsonValue))}::jsonb, 
         'Initial creation', 
         ${esc(actorName(req))},
-        ${esc(req.targetEnv!.name)}
+        ${esc(req.targetEnv!.name)},
+        ${esc(req.targetService!.key)}
       );
     `);
 
@@ -135,7 +137,7 @@ router.put("/api/configs/:configId", async (req, res) => {
           currentConfig,
           composeNote(reason.value, autoSummary(currentConfig.value, value)),
           authorName,
-          req.targetEnv!.name
+          scopeOf(req)
         );
         backupVersion = snap.version;
         return snap.historyId;
@@ -211,13 +213,13 @@ router.delete("/api/configs/:configId", async (req, res) => {
     const verRes = await auditDb.query(`
       SELECT COALESCE(MAX(version), 0) as last_version 
       FROM tenant_studio.tenant_config_histories 
-      WHERE core_config_id = ${esc(configId)} AND target_env = ${esc(req.targetEnv!.name)};
+      WHERE core_config_id = ${esc(configId)} AND target_env = ${esc(req.targetEnv!.name)} AND target_service = ${esc(req.targetService!.key)};
     `);
     const nextVersion = parseInt(verRes.rows[0].last_version, 10) + 1;
 
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env)
+      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service)
       VALUES (
         ${currentConfig.tenant_id ? esc(currentConfig.tenant_id) : "NULL"}, 
         ${currentConfig.group_id ? esc(currentConfig.group_id) : "NULL"}, 
@@ -227,7 +229,8 @@ router.delete("/api/configs/:configId", async (req, res) => {
         ${esc(JSON.stringify(currentConfig.value || {}))}::jsonb, 
         ${esc(`DELETED: Konfigurasi ${currentConfig.config_type} dihapus oleh ${authorName}`)}, 
         ${esc(authorName)},
-        ${esc(req.targetEnv!.name)}
+        ${esc(req.targetEnv!.name)},
+        ${esc(req.targetService!.key)}
       );
     `);
 
@@ -242,7 +245,7 @@ router.delete("/api/configs/:configId", async (req, res) => {
     if (currentConfig.tenant_id && currentConfig.config_type) {
       await auditDb.query(`
         DELETE FROM tenant_studio.preset_links 
-        WHERE target_env = ${esc(req.targetEnv!.name)} AND tenant_id = ${esc(currentConfig.tenant_id)} AND config_type = ${esc(D.linkKey(currentConfig.config_type))};
+        WHERE target_env = ${esc(req.targetEnv!.name)} AND target_service = ${esc(req.targetService!.key)} AND tenant_id = ${esc(currentConfig.tenant_id)} AND config_type = ${esc(D.linkKey(currentConfig.config_type))};
       `).catch(() => {});
     }
 
@@ -267,7 +270,7 @@ router.get("/api/configs/:configId/histories", async (req, res) => {
         h.batch_id, b.kind AS batch_kind, b.source_env AS batch_source_env, b.source_tenant_code AS batch_source_tenant_code
       FROM tenant_studio.tenant_config_histories h
       LEFT JOIN tenant_studio.config_change_batches b ON b.id = h.batch_id
-      WHERE h.core_config_id = ${esc(configId)} AND h.target_env = ${esc(req.targetEnv!.name)}
+      WHERE h.core_config_id = ${esc(configId)} AND h.target_env = ${esc(req.targetEnv!.name)} AND h.target_service = ${esc(req.targetService!.key)}
       ORDER BY h.version DESC;
     `);
     res.json({ data: histRes.rows });

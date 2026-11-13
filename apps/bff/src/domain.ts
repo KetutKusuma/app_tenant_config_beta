@@ -40,14 +40,24 @@ export function domainOf(req: express.Request): DomainSpec {
   return (raw === "workflow_pipeline" && domainSpecFor(service, "workflow_pipeline")) || domainSpecFor(service, "tenant_config")!;
 }
 
-// Folder preset default: preferensi user login per domain, lalu fallback env / bawaan
+// Folder preset default: preferensi user login per layanan + domain. ATS: kolom lama lalu fallback env / bawaan.
+// Layanan lain TIDAK jatuh ke folder ATS (preset ATS tidak boleh ter-sync ke hris_db, dst.): null = belum diatur.
 export const DEFAULT_PRESET_DIR = process.env.STUDIO_DEFAULT_PRESET_DIR || "/Users/ketutkusuma/Python/test_redis_stream/stable";
-export function presetDirFor(req: express.Request): string {
+export function presetDirFor(req: express.Request): string | null {
   const prefs = req.user?.preferences;
-  if (domainOf(req).key === "workflow_pipeline") {
+  const service: ServiceKey = req.targetService?.key ?? "ats";
+  const domain = domainOf(req).key;
+  if (service !== "ats") return prefs?.presetDirs?.[`${service}:${domain}`] || null;
+  if (domain === "workflow_pipeline") {
     return prefs?.presetDirWorkflow || prefs?.presetDirTenant || DEFAULT_PRESET_DIR;
   }
   return prefs?.presetDirTenant || DEFAULT_PRESET_DIR;
+}
+
+/** Response 400 untuk layanan non-ATS yang folder presetnya belum diatur */
+export function presetDirMissing(req: express.Request): { code: string; error: string } {
+  const label = req.targetService?.label ?? "ATS";
+  return { code: "PRESET_DIR_REQUIRED", error: `Folder preset untuk layanan ${label} belum diatur.` };
 }
 
 // Optimistic locking: editor wajib mengirim versi (updated_at) yang ia muat terakhir.

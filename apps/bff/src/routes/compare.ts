@@ -381,6 +381,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
 
     const shape = exportBatchShape(domains);
     const batchId = await createBatch({
+        targetService: req.targetService!.key,
       kind: "export_sql",
       domain: shape.domain,
       sourceEnv,
@@ -549,6 +550,7 @@ router.post("/api/compare/copy", async (req, res) => {
     const deps: CopyDeps = {
       createBatch: async () => {
         batchId = await createBatch({
+        targetService: req.targetService!.key,
           kind: "salin",
           domain: shape.domain,
           sourceEnv,
@@ -570,7 +572,7 @@ router.post("/api/compare/copy", async (req, res) => {
       backupOld: async (o, part, id) => {
         const pathChange = part.table.hasPath ? { from: o.target.path, to: o.source.path } : undefined;
         const note = composeNote(reason, `Sebelum disalin dari ${from}`, autoSummary(o.target.value, o.source.value, pathChange));
-        await snapshotBeforeChange(o.target, note, author, targetEnv.name, id);
+        await snapshotBeforeChange(o.target, note, author, { env: targetEnv.name, service: req.targetService!.key }, id);
       },
       discardBatchBackups: discardBatchSnapshots,
       writeTarget: (ps) => writeCopyTxMulti(() => targetDb.connect(), ps, { tenantId: targetTenantId, groupId: targetGroupId }),
@@ -578,7 +580,7 @@ router.post("/api/compare/copy", async (req, res) => {
         const key = `${row.domain}:${row.config_type}`;
         const pathPart = overriddenFrom.has(key) ? `path: ${overriddenFrom.get(key) ?? "(kosong)"} → ${row.path}` : null;
         const note = composeNote(reason, `Disalin dari ${from}`, "Config baru", pathPart);
-        await snapshotBeforeChange(row, note, author, targetEnv.name, id);
+        await snapshotBeforeChange(row, note, author, { env: targetEnv.name, service: req.targetService!.key }, id);
       },
       finishBatch,
     };
@@ -615,6 +617,7 @@ router.get("/api/compare/batches", async (req, res) => {
     const q = (k: string) => (typeof req.query[k] === "string" ? (req.query[k] as string).trim() : "") || undefined;
     const limit = q("limit");
     const data = await listBatches({
+      targetService: req.targetService!.key,
       sourceEnv: q("sourceEnv"),
       sourceTenantId: q("sourceTenantId"),
       targetEnv: q("targetEnv"),

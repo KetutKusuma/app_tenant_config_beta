@@ -26,7 +26,9 @@ export interface StudioUser {
     lastDomain: string | null;
     lastTenantId: string | null;
     lastTargetEnv: string | null;
-    lastTargetService?: string | null;
+    lastTargetService: string | null;
+    /** Folder preset layanan selain ATS, kunci `<layanan>:<domain>` (ATS memakai presetDirTenant/Workflow) */
+    presetDirs: Record<string, string>;
   };
 }
 
@@ -109,7 +111,9 @@ function toStudioUser(row: any): StudioUser {
       presetDirWorkflow: row.preset_dir_workflow || null,
       lastDomain: row.last_domain || null,
       lastTenantId: row.last_tenant_id || null,
-      lastTargetEnv: row.last_target_env || null
+      lastTargetEnv: row.last_target_env || null,
+      lastTargetService: row.last_target_service || null,
+      presetDirs: row.preset_dirs && typeof row.preset_dirs === "object" ? row.preset_dirs : {}
     }
   };
 }
@@ -155,6 +159,8 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
       updated_at timestamp NOT NULL DEFAULT now()
     );
     ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS last_target_env text;
+    ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS last_target_service text;
+    ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS preset_dirs jsonb NOT NULL DEFAULT '{}'::jsonb;
   `);
 
   // User default dibuat hanya jika tabel user masih kosong
@@ -199,7 +205,8 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
 async function loadUserById(auditDb: Pool, esc: Esc, userId: string): Promise<StudioUser | null> {
   const r = await auditDb.query(`
     SELECT u.id, u.email, u.display_name, u.must_change_password,
-           p.preset_dir_tenant, p.preset_dir_workflow, p.last_domain, p.last_tenant_id, p.last_target_env
+           p.preset_dir_tenant, p.preset_dir_workflow, p.last_domain, p.last_tenant_id, p.last_target_env,
+           p.last_target_service, p.preset_dirs
     FROM tenant_studio.studio_users u
     LEFT JOIN tenant_studio.studio_user_preferences p ON p.user_id = u.id
     WHERE u.id = ${esc(userId)} AND u.is_active = true;
@@ -343,22 +350,43 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
         presetDirWorkflow: "preset_dir_workflow",
         lastDomain: "last_domain",
         lastTenantId: "last_tenant_id",
-        lastTargetEnv: "last_target_env"
+        lastTargetEnv: "last_target_env",
+        lastTargetService: "last_target_service"
       };
       const entries = Object.entries(cols).filter(([k]) => k in body);
-      if (entries.length === 0) return res.status(400).json({ error: "Tidak ada preferensi yang dikirim." });
+      const dirs = body.presetDirs;
+      const hasDirs = dirs !== undefined;
+      if (entries.length === 0 && !hasDirs) return res.status(400).json({ error: "Tidak ada preferensi yang dikirim." });
+      if (hasDirs) {
+        const ok = dirs && typeof dirs === "object" && !Array.isArray(dirs) &&
+          Object.entries(dirs).every(([k, v]) => /^[a-z_]+:[a-z_]+$/.test(k) && (v === null || typeof v === "string"));
+        if (!ok) return res.status(400).json({ error: "presetDirs harus objek { '<layanan>:<domain>': string | null }." });
+      }
       for (const [k] of entries) {
         if (body[k] !== null && typeof body[k] !== "string") {
           return res.status(400).json({ error: `${k} harus berupa string.` });
         }
       }
-      const colList = entries.map(([, c]) => c).join(", ");
-      const valList = entries.map(([k]) => (body[k] ? esc(String(body[k]).trim()) : "NULL")).join(", ");
-      const updList = entries.map(([, c]) => `${c} = EXCLUDED.${c}`).join(", ");
+      const colList = entries.map(([, c]) => c);
+      const valList = entries.map(([k]) => (body[k] ? esc(String(body[k]).trim()) : "NULL"));
+      const updList = entries.map(([, c]) => `${c} = EXCLUDED.${c}`);
+      if (hasDirs) {
+        // Gabung dengan nilai lama: kunci bernilai null/kosong dihapus, sisanya ditimpa
+        const set: Record<string, string> = {};
+        const del: string[] = [];
+        for (const [k, v] of Object.entries(dirs as Record<string, string | null>)) {
+          if (v && v.trim()) set[k] = v.trim();
+          else del.push(k);
+        }
+        const delSql = del.map((k) => ` - ${esc(k)}`).join("");
+        colList.push("preset_dirs");
+        valList.push(`(${esc(JSON.stringify(set))}::jsonb${delSql})`);
+        updList.push(`preset_dirs = (studio_user_preferences.preset_dirs || ${esc(JSON.stringify(set))}::jsonb)${delSql}`);
+      }
       await auditDb.query(`
-        INSERT INTO tenant_studio.studio_user_preferences (user_id, ${colList}, updated_at)
-        VALUES (${esc(req.user!.id)}, ${valList}, NOW())
-        ON CONFLICT (user_id) DO UPDATE SET ${updList}, updated_at = NOW();
+        INSERT INTO tenant_studio.studio_user_preferences (user_id, ${colList.join(", ")}, updated_at)
+        VALUES (${esc(req.user!.id)}, ${valList.join(", ")}, NOW())
+        ON CONFLICT (user_id) DO UPDATE SET ${updList.join(", ")}, updated_at = NOW();
       `);
       res.json({ success: true, user: await loadUserById(auditDb, esc, req.user!.id) });
     } catch (err: any) {

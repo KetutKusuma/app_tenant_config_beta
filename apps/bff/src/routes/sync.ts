@@ -4,8 +4,9 @@ import fs from "fs";
 import path from "path";
 import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
-import { domainOf, presetDirFor } from "../domain";
+import { domainOf, presetDirFor, presetDirMissing } from "../domain";
 import { assertWritable } from "../envs";
+import { scopeOf } from "../services";
 import { backupThenWrite } from "../backupFirst";
 import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { isSafePresetPath, normalizeName, sameJson, scanJsonFiles, setPresetBase, snapshotBeforeChange, discardSnapshot, upsertPresetLink, writeJsonFileWithBackup } from "../presetSync";
@@ -43,6 +44,7 @@ router.get("/api/sync/status", async (req, res) => {
   try {
     const tenantId = String(req.query.tenantId || "GLOBAL_DEFAULT");
     const dir = (req.query.dir as string) || presetDirFor(req);
+    if (!dir) return res.status(400).json(presetDirMissing(req));
     const isGlobal = tenantId === "GLOBAL_DEFAULT";
     const D = domainOf(req);
 
@@ -54,7 +56,7 @@ router.get("/api/sync/status", async (req, res) => {
     `);
     const linkRes = await auditDb.query(`
       SELECT config_type, file_path, base_db_version FROM tenant_studio.preset_links
-      WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND tenant_id = ${esc(tenantId)};
+      WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND target_service = ${esc(req.targetService!.key)} AND tenant_id = ${esc(tenantId)};
     `);
     const links = new Map<string, string>(linkRes.rows.map((r: any) => [r.config_type, r.file_path]));
     const bases = new Map<string, string | null>(linkRes.rows.map((r: any) => [r.config_type, r.base_db_version]));
@@ -136,14 +138,14 @@ router.put("/api/sync/link", async (req, res) => {
     if (!filePath) {
       await auditDb.query(`
         DELETE FROM tenant_studio.preset_links
-        WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(configType)};
+        WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND target_service = ${esc(req.targetService!.key)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(configType)};
       `);
       return res.json({ success: true, message: "Link file dihapus" });
     }
     if (!isSafePresetPath(filePath)) {
       return res.status(400).json({ error: "Path harus absolut dan berekstensi .json" });
     }
-    await upsertPresetLink(req.user!.id, req.targetEnv!.name, tenantId, configType, filePath);
+    await upsertPresetLink(req.user!.id, scopeOf(req), tenantId, configType, filePath);
     res.json({ success: true, message: "Link file disimpan" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -207,7 +209,7 @@ router.post("/api/sync/apply", async (req, res) => {
           if (fs.existsSync(filePath)) {
             try {
               if (sameJson(row.value || {}, JSON.parse(fs.readFileSync(filePath, "utf8")))) {
-                await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, row.version_token);
+                await setPresetBase(req.user!.id, scopeOf(req), tenantId, linkType, filePath, row.version_token);
                 report("skipped", "Sudah sama");
                 continue;
               }
@@ -216,7 +218,7 @@ router.post("/api/sync/apply", async (req, res) => {
             }
           }
           writeJsonFileWithBackup(filePath, row.value || {});
-          await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, row.version_token);
+          await setPresetBase(req.user!.id, scopeOf(req), tenantId, linkType, filePath, row.version_token);
           report("updated");
           continue;
         }
@@ -240,14 +242,14 @@ router.post("/api/sync/apply", async (req, res) => {
 
         if (row) {
           if (sameJson(row.value || {}, parsed)) {
-            await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, row.version_token);
+            await setPresetBase(req.user!.id, scopeOf(req), tenantId, linkType, filePath, row.version_token);
             report("skipped", "Sudah sama");
             continue;
           }
           // Tolak push bila file belum pernah di-pull, atau DB sudah berubah sejak pull terakhir
           const linkRow = await auditDb.query(`
             SELECT file_path, base_db_version FROM tenant_studio.preset_links
-            WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(linkType)};
+            WHERE user_id = ${esc(req.user!.id)} AND target_env = ${esc(req.targetEnv!.name)} AND target_service = ${esc(req.targetService!.key)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(linkType)};
           `);
           const link = linkRow.rows[0];
           if (!link || link.file_path !== filePath || !link.base_db_version) {
@@ -267,7 +269,7 @@ router.post("/api/sync/apply", async (req, res) => {
                   row,
                   composeNote(reason, `Push dari file ${path.basename(filePath)}`, autoSummary(row.value, parsed)),
                   authorName,
-                  req.targetEnv!.name
+                  scopeOf(req)
                 );
                 backedUp = true;
                 return snap.historyId;
@@ -295,7 +297,7 @@ router.post("/api/sync/apply", async (req, res) => {
             report("failed", "Database berubah saat proses push. Pull dulu, lalu coba lagi.");
             continue;
           }
-          await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, outcome.result.version_token);
+          await setPresetBase(req.user!.id, scopeOf(req), tenantId, linkType, filePath, outcome.result.version_token);
           report("updated");
         } else if (createIfMissing) {
           const newId = randomUUID();
@@ -318,12 +320,12 @@ router.post("/api/sync/apply", async (req, res) => {
             { id: newId, tenant_id: isGlobal ? null : tenantId, group_id: cleanGroup, config_type: configType, value: parsed },
             composeNote(reason, `Dibuat dari file ${path.basename(filePath)}`, "Config baru"),
             authorName,
-            req.targetEnv!.name
+            scopeOf(req)
           );
           const createdRow = await req.targetDb!.query(`
             SELECT updated_at::text AS version_token FROM ${D.table} WHERE id = ${esc(newId)};
           `);
-          await setPresetBase(req.user!.id, req.targetEnv!.name, tenantId, linkType, filePath, createdRow.rows[0].version_token);
+          await setPresetBase(req.user!.id, scopeOf(req), tenantId, linkType, filePath, createdRow.rows[0].version_token);
           report("created");
         } else {
           report("failed", "Config belum ada di database (aktifkan 'buat baru' untuk membuatnya)");

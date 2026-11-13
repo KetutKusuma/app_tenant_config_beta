@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { auditDb, esc } from "./db";
+import type { StudioScope } from "./services";
 
 // Helper Sync Center: perbandingan JSON kanonik, file preset, snapshot riwayat, preset_links.
 
@@ -48,18 +49,18 @@ export function writeJsonFileWithBackup(filePath: string, value: any): { existed
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
   return { existed };
 }
-export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, env: string, batchId: string | null = null): Promise<{ historyId: string; version: number }> {
+export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, scope: StudioScope, batchId: string | null = null): Promise<{ historyId: string; version: number }> {
   const v = await auditDb.query(`
     SELECT COALESCE(MAX(version), 0) AS last_version
     FROM tenant_studio.tenant_config_histories
-    WHERE core_config_id = ${esc(row.id)} AND target_env = ${esc(env)};
+    WHERE core_config_id = ${esc(row.id)} AND target_env = ${esc(scope.env)} AND target_service = ${esc(scope.service)};
   `);
   const nextVersion = parseInt(v.rows[0].last_version, 10) + 1;
   // change_summary adalah varchar(500): potong sebagai jaring pengaman bila pemanggil tidak memakai composeNote
   const summaryText = (typeof summary === "function" ? summary(nextVersion) : summary).slice(0, 500);
   const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
-    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env${batchId ? ", batch_id" : ""})
+    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service${batchId ? ", batch_id" : ""})
     VALUES (
       ${row.tenant_id ? esc(row.tenant_id) : "NULL"},
       ${row.group_id ? esc(row.group_id) : "NULL"},
@@ -69,7 +70,8 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
       ${esc(JSON.stringify(row.value || {}))}::jsonb,
       ${esc(summaryText)},
       ${esc(author)},
-      ${esc(env)}${batchId ? `,\n      ${esc(batchId)}` : ""}
+      ${esc(scope.env)},
+      ${esc(scope.service)}${batchId ? `,\n      ${esc(batchId)}` : ""}
     )
     RETURNING id;
   `);
@@ -81,20 +83,20 @@ export async function discardSnapshot(historyId: string): Promise<void> {
 export async function discardBatchSnapshots(batchId: string): Promise<void> {
   await auditDb.query(`DELETE FROM tenant_studio.tenant_config_histories WHERE batch_id = ${esc(batchId)};`);
 }
-export async function upsertPresetLink(userId: string, env: string, tenantId: string, configType: string, filePath: string) {
+export async function upsertPresetLink(userId: string, scope: StudioScope, tenantId: string, configType: string, filePath: string) {
   await auditDb.query(`
-    INSERT INTO tenant_studio.preset_links (user_id, target_env, tenant_id, config_type, file_path, updated_at)
-    VALUES (${esc(userId)}, ${esc(env)}, ${esc(tenantId)}, ${esc(configType)}, ${esc(filePath)}, NOW())
-    ON CONFLICT (user_id, target_env, tenant_id, config_type) DO UPDATE
+    INSERT INTO tenant_studio.preset_links (user_id, target_env, target_service, tenant_id, config_type, file_path, updated_at)
+    VALUES (${esc(userId)}, ${esc(scope.env)}, ${esc(scope.service)}, ${esc(tenantId)}, ${esc(configType)}, ${esc(filePath)}, NOW())
+    ON CONFLICT (user_id, target_env, target_service, tenant_id, config_type) DO UPDATE
     SET file_path = EXCLUDED.file_path,
         base_db_version = CASE WHEN preset_links.file_path = EXCLUDED.file_path THEN preset_links.base_db_version END,
         updated_at = NOW();
   `);
 }
-export async function setPresetBase(userId: string, env: string, tenantId: string, configType: string, filePath: string, versionToken: string) {
-  await upsertPresetLink(userId, env, tenantId, configType, filePath);
+export async function setPresetBase(userId: string, scope: StudioScope, tenantId: string, configType: string, filePath: string, versionToken: string) {
+  await upsertPresetLink(userId, scope, tenantId, configType, filePath);
   await auditDb.query(`
     UPDATE tenant_studio.preset_links SET base_db_version = ${esc(versionToken)}
-    WHERE user_id = ${esc(userId)} AND target_env = ${esc(env)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(configType)};
+    WHERE user_id = ${esc(userId)} AND target_env = ${esc(scope.env)} AND target_service = ${esc(scope.service)} AND tenant_id = ${esc(tenantId)} AND config_type = ${esc(configType)};
   `);
 }

@@ -27,6 +27,7 @@ export function initStudioSchema() {
   .then(() => initAuthSchema(auditDb, esc))
   .then(() => migrateTargetEnvColumns())
   .then(() => migrateChangeBatches())
+  .then(() => migrateTargetService())
   .catch((err) => console.error("Gagal menyiapkan tabel studio (preset_links/auth):", err.message));
 }
 
@@ -116,4 +117,27 @@ export async function migrateChangeBatches() {
     CREATE INDEX IF NOT EXISTS tenant_config_histories_batch_idx
       ON tenant_studio.tenant_config_histories (batch_id);
   `);
+}
+
+// Data Studio dipisah per layanan (ats, hris, ...). Baris lama = 'ats' karena sebelum fitur ini Studio hanya
+// membuka ats_db. Aditif dan idempotent; PK preset_links ikut memuat target_service.
+export async function migrateTargetService() {
+  await auditDb.query(`
+    ALTER TABLE tenant_studio.tenant_config_histories ADD COLUMN IF NOT EXISTS target_service text NOT NULL DEFAULT 'ats';
+    ALTER TABLE tenant_studio.preset_links ADD COLUMN IF NOT EXISTS target_service text NOT NULL DEFAULT 'ats';
+    ALTER TABLE tenant_studio.config_change_batches ADD COLUMN IF NOT EXISTS target_service text NOT NULL DEFAULT 'ats';
+    CREATE INDEX IF NOT EXISTS idx_config_histories_env_service
+      ON tenant_studio.tenant_config_histories (target_env, target_service, core_config_id, version DESC);
+  `);
+  const pk = await auditDb.query(`
+    SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+    WHERE conrelid = 'tenant_studio.preset_links'::regclass AND contype = 'p';
+  `);
+  if (pk.rows[0] && !String(pk.rows[0].def).includes("target_service")) {
+    await auditDb.query(`
+      ALTER TABLE tenant_studio.preset_links DROP CONSTRAINT IF EXISTS preset_links_pkey;
+      ALTER TABLE tenant_studio.preset_links ADD PRIMARY KEY (user_id, target_env, target_service, tenant_id, config_type);
+    `);
+    console.log("🧩 preset_links, history & batch dipisah per layanan.");
+  }
 }

@@ -3,7 +3,8 @@ import fs from "fs";
 import path from "path";
 import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
-import { domainOf, presetDirFor, staleVersionError } from "../domain";
+import { scopeOf } from "../services";
+import { domainOf, presetDirFor, presetDirMissing, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
 import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
@@ -17,6 +18,7 @@ export const router = express.Router();
 router.get("/api/references", (req, res) => {
   try {
     const customDir = (req.query.dir as string) || presetDirFor(req);
+    if (!customDir) return res.status(400).json(presetDirMissing(req));
     const list: Array<{ path: string; name: string; category: string }> = [];
 
     if (fs.existsSync(customDir)) {
@@ -125,6 +127,7 @@ router.post("/api/references/save", (req, res) => {
     const targetDir = dir && typeof dir === "string" && dir.trim() 
       ? dir.trim() 
       : presetDirFor(req);
+    if (!targetDir) return res.status(400).json(presetDirMissing(req));
 
     if (!filename || typeof filename !== "string" || !filename.trim()) {
       return res.status(400).json({ error: "Nama file preset wajib diisi!" });
@@ -195,6 +198,7 @@ router.post("/api/references/export-bulk", async (req, res) => {
     const targetDir = dir && typeof dir === "string" && dir.trim()
       ? dir.trim()
       : presetDirFor(req);
+    if (!targetDir) return res.status(400).json(presetDirMissing(req));
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
@@ -301,6 +305,7 @@ router.post("/api/references/export-skill", (req, res) => {
     const targetDir = dir && typeof dir === "string" && dir.trim()
       ? dir.trim()
       : presetDirFor(req);
+    if (!targetDir) return res.status(400).json(presetDirMissing(req));
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
@@ -365,7 +370,7 @@ router.post("/api/references/sync-single", async (req, res) => {
             autoSummary(currentConfig.value, jsonParsed)
           ),
           authorName,
-          req.targetEnv!.name
+          scopeOf(req)
         );
         backupVersion = snap.version;
         return snap.historyId;
