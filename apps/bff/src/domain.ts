@@ -1,43 +1,43 @@
 import "./loadEnv";
 import express from "express";
+import { tableFor, type ServiceKey, type TableSpec } from "./services";
 
 // Domain konfigurasi (tenant_config / workflow_pipeline) dan folder preset default per user.
 
 // Domain konfigurasi: tenant_config (public.tenant_configurations) atau
 // workflow_pipeline (public.pipeline_workflow_configurations). Keduanya ada di DB target (ats_db)
 // dengan struktur hampir sama; bedanya kolom tipe (`workflow_config_type`) dan tidak ada kolom `path`.
+// Tabel per domain kini ditentukan oleh layanan aktif (services.ts), bukan lagi di-hardcode ke ats_db.
 export type ConfigDomain = "tenant_config" | "workflow_pipeline";
-export interface DomainSpec {
+export interface DomainSpec extends TableSpec {
   key: ConfigDomain;
-  table: string;
-  typeCol: string;
-  hasPath: boolean;
   /** kolom path untuk SELECT (NULL bila tabel tidak punya kolom path) */
   pathSel: string;
   /** key config_type di tenant_studio.preset_links, diberi prefix agar tidak bentrok antar domain */
   linkKey: (configType: string) => string;
 }
+
+export function domainSpecFor(service: ServiceKey, domain: ConfigDomain): DomainSpec | null {
+  const t = tableFor(service, domain);
+  if (!t) return null;
+  return {
+    ...t,
+    key: domain,
+    pathSel: t.hasPath ? "path" : "NULL::text AS path",
+    linkKey: domain === "workflow_pipeline" ? (x) => `WORKFLOW_PIPELINE:${x}` : (x) => x
+  };
+}
+
+/** Alias ATS untuk pemakai lama; dihapus setelah semua route memakai domainSpecFor */
 export const DOMAINS: Record<ConfigDomain, DomainSpec> = {
-  tenant_config: {
-    key: "tenant_config",
-    table: "public.tenant_configurations",
-    typeCol: "config_type",
-    hasPath: true,
-    pathSel: "path",
-    linkKey: (t) => t
-  },
-  workflow_pipeline: {
-    key: "workflow_pipeline",
-    table: "public.pipeline_workflow_configurations",
-    typeCol: "workflow_config_type",
-    hasPath: false,
-    pathSel: "NULL::text AS path",
-    linkKey: (t) => `WORKFLOW_PIPELINE:${t}`
-  }
+  tenant_config: domainSpecFor("ats", "tenant_config")!,
+  workflow_pipeline: domainSpecFor("ats", "workflow_pipeline")!
 };
+
 export function domainOf(req: express.Request): DomainSpec {
   const raw = req.header("x-config-domain") || (req.query.domain as string) || req.body?.domain;
-  return raw === "workflow_pipeline" ? DOMAINS.workflow_pipeline : DOMAINS.tenant_config;
+  const service: ServiceKey = req.targetService?.key ?? "ats";
+  return (raw === "workflow_pipeline" && domainSpecFor(service, "workflow_pipeline")) || domainSpecFor(service, "tenant_config")!;
 }
 
 // Folder preset default: preferensi user login per domain, lalu fallback env / bawaan
