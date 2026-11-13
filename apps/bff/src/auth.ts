@@ -26,6 +26,7 @@ export interface StudioUser {
     lastDomain: string | null;
     lastTenantId: string | null;
     lastTargetEnv: string | null;
+    lastTargetService?: string | null;
   };
 }
 

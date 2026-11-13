@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 import { auditDb, esc } from "./db";
 import { registerAuth } from "./auth";
-import { targetEnvMiddleware } from "./envs";
+import { targetEnvMiddleware, targetServiceMiddleware } from "./envs";
 import { initStudioSchema } from "./studioSchema";
 import { router as tenantRoutes } from "./routes/tenants";
 import { router as configRoutes } from "./routes/configs";
@@ -26,6 +26,8 @@ app.use(express.json({ limit: "50mb" }));
 registerAuth(app, auditDb, esc);
 // Target env (ats_db) per request: header X-Target-Env -> preferensi user -> default
 app.use("/api", targetEnvMiddleware());
+// Layanan target (ats_db, hris_db, ...) per request: header X-Target-Service (wajib untuk operasi tulis)
+app.use("/api", targetServiceMiddleware());
 
 app.use(tenantRoutes);
 app.use(configRoutes);

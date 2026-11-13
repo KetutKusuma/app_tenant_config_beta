@@ -1,19 +1,20 @@
 import express from "express";
 import { auditDb, esc } from "../db";
 import { domainOf } from "../domain";
-import { baseTenantCode, defaultEnvName, listProfiles, pingProfile, poolFor } from "../envs";
+import { baseTenantCode, defaultEnvName, listProfiles, pingProfile, poolFor, serviceAvailability } from "../envs";
 
 // Route: profil target env, health check, direktori tenant & daftar config per tenant.
 
 export const router = express.Router();
 
-// Daftar profil target env (tanpa kredensial) + status koneksi masing-masing
+// Daftar profil target env (tanpa kredensial) + status koneksi + layanan yang tersedia di masing-masing
 router.get("/api/envs", async (req, res) => {
   try {
     const { profiles, errors, defaultEnv } = listProfiles();
     const statuses = await Promise.all(profiles.map((p) => pingProfile(p.name)));
+    const services = await Promise.all(profiles.map((p) => serviceAvailability(p.name)));
     res.json({
-      data: profiles.map((p, i) => ({ ...p, status: statuses[i] })),
+      data: profiles.map((p, i) => ({ ...p, status: statuses[i], services: services[i] })),
       errors,
       defaultEnv
     });

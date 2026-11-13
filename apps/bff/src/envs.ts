@@ -3,6 +3,7 @@ import { Pool, type PoolConfig } from "pg";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import { SERVICES, SERVICE_KEYS, isServiceKey, type ServiceKey } from "./services";
 
 // ============================================================================
 // Target Environment Profiles: setiap file envs/<nama>.env = 1 koneksi ats_db.
@@ -33,6 +34,8 @@ export interface TargetEnvProfile {
 interface LoadedProfile extends TargetEnvProfile {
   mtimeMs: number;
   poolConfig: PoolConfig;
+  /** Konfigurasi pool per layanan (ats = poolConfig). Layanan tanpa entri = tidak dikonfigurasi di env ini */
+  servicePools: Partial<Record<ServiceKey, PoolConfig>>;
 }
 
 declare global {
@@ -83,6 +86,32 @@ function poolConfigFrom(vars: Record<string, string | undefined>): { config: Poo
   return { host, config: { connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 5000 } };
 }
 
+/**
+ * Konfigurasi pool untuk satu layanan dari isi file profil env. ats = perilaku lama (DB_NAME / TARGET_DB_URL).
+ * Layanan lain: DB_HOST -> database DB_NAME_<LAYANAN> atau nama default layanan; TARGET_DB_URL -> hanya bila
+ * TARGET_DB_URL_<LAYANAN> diisi. null = layanan tidak dikonfigurasi di env ini.
+ */
+export function servicePoolConfig(vars: Record<string, string | undefined>, service: ServiceKey): PoolConfig | null {
+  if (service === "ats") return poolConfigFrom(vars).config;
+  const suffix = service.toUpperCase();
+  if (vars.DB_HOST) {
+    const { config } = poolConfigFrom(vars);
+    return { ...config, database: vars[`DB_NAME_${suffix}`] || SERVICES[service].defaultDbName };
+  }
+  const url = vars[`TARGET_DB_URL_${suffix}`];
+  if (!url) return null;
+  return { connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 5000 };
+}
+
+function servicePoolsFrom(vars: Record<string, string | undefined>): Partial<Record<ServiceKey, PoolConfig>> {
+  const out: Partial<Record<ServiceKey, PoolConfig>> = {};
+  for (const key of SERVICE_KEYS) {
+    const c = servicePoolConfig(vars, key);
+    if (c) out[key] = c;
+  }
+  return out;
+}
+
 const profileCache = new Map<string, LoadedProfile>();
 const pools = new Map<string, { pool: Pool; mtimeMs: number }>();
 const loadErrors = new Map<string, string>();
@@ -115,7 +144,8 @@ function loadProfiles(): Map<string, LoadedProfile> {
         hostMasked: maskHost(host),
         source: `envs/${file}`,
         mtimeMs,
-        poolConfig: config
+        poolConfig: config,
+        servicePools: servicePoolsFrom(vars)
       });
     } catch (err: any) {
       loadErrors.set(name, `envs/${file}: ${err.message}`);
@@ -123,10 +153,11 @@ function loadProfiles(): Map<string, LoadedProfile> {
   }
 
   if (result.size === 0) {
-    const { config, host } = poolConfigFrom({
+    const legacyVars = {
       ...process.env,
       TARGET_DB_URL: process.env.TARGET_DB_URL || process.env.AUDIT_DB_URL
-    });
+    };
+    const { config, host } = poolConfigFrom(legacyVars);
     result.set(LEGACY_NAME, {
       name: LEGACY_NAME,
       label: "Default (.env)",
@@ -137,24 +168,25 @@ function loadProfiles(): Map<string, LoadedProfile> {
       hostMasked: maskHost(host),
       source: ".env",
       mtimeMs: 0,
-      poolConfig: config
+      poolConfig: config,
+      servicePools: servicePoolsFrom(legacyVars)
     });
   }
 
   profileCache.clear();
   result.forEach((p, k) => profileCache.set(k, p));
   // Tutup pool milik profil yang filenya dihapus
-  for (const [name, entry] of pools) {
-    if (!result.has(name)) {
+  for (const [key, entry] of pools) {
+    if (!result.has(key.split(":")[0])) {
       entry.pool.end().catch(() => {});
-      pools.delete(name);
+      pools.delete(key);
     }
   }
   return result;
 }
 
 export function listProfiles(): { profiles: TargetEnvProfile[]; errors: string[]; defaultEnv: string } {
-  const profiles = [...loadProfiles().values()].map(({ mtimeMs: _m, poolConfig: _c, ...p }) => p);
+  const profiles = [...loadProfiles().values()].map(({ mtimeMs: _m, poolConfig: _c, servicePools: _s, ...p }) => p);
   return { profiles, errors: [...loadErrors.values()], defaultEnv: defaultEnvName() };
 }
 
@@ -171,17 +203,87 @@ export function defaultEnvName(): string {
   return [...all.keys()].sort()[0];
 }
 
-/** Pool untuk profil; dibuat saat pertama dipakai, dibuat ulang bila file profilnya berubah */
-export function poolFor(name: string): Pool {
+/** Pool untuk profil + layanan (kunci `<env>:<layanan>`); dibuat saat pertama dipakai, dibuat ulang bila file profilnya berubah */
+export function poolFor(name: string, service: ServiceKey = "ats"): Pool {
   const profile = profileCache.get(name) || loadProfiles().get(name);
   if (!profile) throw new Error(`Target env '${name}' tidak ditemukan`);
-  const existing = pools.get(name);
+  const config = profile.servicePools[service];
+  if (!config) throw new Error(`Layanan '${SERVICES[service].label}' tidak dikonfigurasi di env '${name}'`);
+  const key = `${name}:${service}`;
+  const existing = pools.get(key);
   if (existing && existing.mtimeMs === profile.mtimeMs) return existing.pool;
   if (existing) existing.pool.end().catch(() => {});
-  const pool = new Pool(profile.poolConfig);
-  pool.on("error", (err) => console.error(`Target DB Pool Error [${name}]:`, err.message));
-  pools.set(name, { pool, mtimeMs: profile.mtimeMs });
+  const pool = new Pool(config);
+  pool.on("error", (err) => console.error(`Target DB Pool Error [${key}]:`, err.message));
+  pools.set(key, { pool, mtimeMs: profile.mtimeMs });
   return pool;
+}
+
+export interface ServiceAvailability {
+  key: ServiceKey;
+  label: string;
+  dbName: string | null;
+  available: boolean;
+  hasWorkflow: boolean;
+  reason?: string;
+}
+
+interface AvailabilityDeps {
+  configs: (env: string) => Partial<Record<ServiceKey, PoolConfig>>;
+  ping: (env: string, service: ServiceKey) => Promise<{ ok: boolean; reason?: string }>;
+}
+
+function dbNameOf(c: PoolConfig): string | null {
+  if (c.database) return c.database;
+  if (c.connectionString) {
+    try {
+      return new URL(c.connectionString).pathname.replace(/^\//, "") || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function defaultPing(env: string, service: ServiceKey): Promise<{ ok: boolean; reason?: string }> {
+  const table = SERVICES[service].domains.tenant_config.table;
+  try {
+    const r = await poolFor(env, service).query("SELECT to_regclass($1) IS NOT NULL AS ok", [table]);
+    return r.rows[0]?.ok ? { ok: true } : { ok: false, reason: `tabel ${table} tidak ditemukan` };
+  } catch (err: any) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+const defaultAvailabilityDeps: AvailabilityDeps = {
+  configs: (env) => (profileCache.get(env) || loadProfiles().get(env))?.servicePools ?? {},
+  ping: defaultPing
+};
+
+const availabilityCache = new Map<string, { at: number; mtimeMs: number; list: ServiceAvailability[] }>();
+const AVAILABILITY_TTL_MS = 60_000;
+
+/** Status tiap layanan di satu env: dikonfigurasi + tabel config ada. Di-cache 60 detik per env (deps bawaan saja) */
+export async function serviceAvailability(env: string, deps?: AvailabilityDeps): Promise<ServiceAvailability[]> {
+  const d = deps ?? defaultAvailabilityDeps;
+  const mtimeMs = profileCache.get(env)?.mtimeMs ?? -1;
+  if (!deps) {
+    const hit = availabilityCache.get(env);
+    if (hit && hit.mtimeMs === mtimeMs && Date.now() - hit.at < AVAILABILITY_TTL_MS) return hit.list;
+  }
+  const configs = d.configs(env);
+  const list = await Promise.all(
+    SERVICE_KEYS.map(async (key): Promise<ServiceAvailability> => {
+      const s = SERVICES[key];
+      const base = { key, label: s.label, hasWorkflow: !!s.domains.workflow_pipeline };
+      const config = configs[key];
+      if (!config) return { ...base, dbName: null, available: false, reason: "tidak dikonfigurasi di profil env ini" };
+      const p = await d.ping(env, key);
+      return { ...base, dbName: dbNameOf(config), available: p.ok, ...(p.ok ? {} : { reason: p.reason }) };
+    })
+  );
+  if (!deps) availabilityCache.set(env, { at: Date.now(), mtimeMs, list });
+  return list;
 }
 
 export async function pingProfile(name: string): Promise<{ ok: boolean; error?: string; ms?: number }> {
@@ -209,7 +311,7 @@ export function targetEnvMiddleware(): express.RequestHandler {
         error: `Target env '${requested}' tidak dikenal. Pilih salah satu: ${[...profiles.keys()].join(", ")}`
       });
     }
-    const { mtimeMs: _m, poolConfig: _c, ...profile } = profiles.get(requested)!;
+    const { mtimeMs: _m, poolConfig: _c, servicePools: _s, ...profile } = profiles.get(requested)!;
     req.targetEnv = profile;
     try {
       req.targetDb = poolFor(requested);
@@ -243,4 +345,53 @@ export function assertWritable(req: express.Request, res: express.Response): boo
     return false;
   }
   return true;
+}
+
+const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Middleware /api: tentukan layanan target (ATS, HRIS, ...) dari header X-Target-Service. Dipasang SETELAH
+ * targetEnvMiddleware. Request tulis WAJIB membawa header agar tab/client lama tidak menulis ke layanan yang
+ * tidak sedang tampil; request baca boleh jatuh ke preferensi user lalu ats.
+ */
+export function targetServiceMiddleware(deps?: {
+  availability?: (env: string) => Promise<ServiceAvailability[]>;
+  pool?: (env: string, service: ServiceKey) => Pool;
+}): express.RequestHandler {
+  const availability = deps?.availability ?? ((env: string) => serviceAvailability(env));
+  const pool = deps?.pool ?? poolFor;
+  return async (req, res, next) => {
+    if (req.path.startsWith("/auth/") || req.path.startsWith("/envs") || req.path.startsWith("/me/")) return next();
+    const env = req.targetEnv;
+    if (!env) return next();
+    const raw = req.header("x-target-service");
+    if (raw !== undefined && !isServiceKey(raw)) {
+      return res.status(400).json({
+        code: "UNKNOWN_TARGET_SERVICE",
+        error: `Layanan '${raw}' tidak dikenal. Pilih salah satu: ${SERVICE_KEYS.join(", ")}`
+      });
+    }
+    if (raw === undefined && WRITE_METHODS.has(req.method)) {
+      return res.status(400).json({
+        code: "TARGET_SERVICE_REQUIRED",
+        error: "Layanan tujuan tidak disebutkan. Muat ulang halaman Studio."
+      });
+    }
+    const pref = req.user?.preferences.lastTargetService;
+    const key: ServiceKey = raw !== undefined ? raw : isServiceKey(pref) ? pref : "ats";
+    try {
+      const status = (await availability(env.name)).find((s) => s.key === key);
+      if (!status?.available) {
+        return res.status(409).json({
+          code: "SERVICE_UNAVAILABLE",
+          error: `Layanan ${SERVICES[key].label} tidak tersedia di env ${env.label}: ${status?.reason || "tidak dikonfigurasi"}`
+        });
+      }
+      req.targetService = SERVICES[key];
+      req.targetDb = pool(env.name, key);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+    next();
+  };
 }
