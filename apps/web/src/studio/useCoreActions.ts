@@ -96,6 +96,17 @@ export function useCoreActions(s: StudioState) {
     try {
       const res = await api(`/api/references?dir=${encodeURIComponent(dirToFetch)}`);
       const json = await res.json();
+      if (!res.ok) {
+        // Folder belum diatur / milik layanan lain: kosongkan daftar & folder agar preset layanan lain tidak terpakai
+        setReferences([]);
+        setPresetDirPath(dirToFetch);
+        setPresetInputPath(dirToFetch);
+        if (json.error) {
+          setStatusMessage(`📁 ${json.error}`);
+          setTimeout(() => setStatusMessage(null), 4000);
+        }
+        return;
+      }
       if (json.data) {
         setReferences(json.data);
         if (json.currentDir) {
@@ -190,8 +201,10 @@ export function useCoreActions(s: StudioState) {
       }
       // Layanan aktif tidak tersedia di env aktif: kembali ke ATS
       const activeEnv = list.find(e => e.name === getActiveTargetEnv());
-      if (getActiveService() !== "ats" && activeEnv?.services && !serviceInEnv(activeEnv, getActiveService())?.available) {
+      const svc = serviceInEnv(activeEnv, getActiveService());
+      if (getActiveService() !== "ats" && activeEnv?.services && !svc?.available && !svc?.unreachable) {
         fallBackToAts(activeEnv.label);
+        await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
       }
     } catch (err) {
       console.error("Gagal memuat target env:", err);
@@ -208,6 +221,8 @@ export function useCoreActions(s: StudioState) {
       setActiveDomain("tenant_config");
       setConfigDomain("tenant_config");
     }
+    savePreferences({ lastTargetService: "ats" });
+    fetchReferences(presetDirPref(user.preferences, "ats", "tenant_config"));
     setStatusMessage(`⚠️ Layanan ${SERVICE_LABEL[prev]} tidak tersedia di ${envLabel}, beralih ke ATS.`);
     setTimeout(() => setStatusMessage(null), 4000);
   };
@@ -242,11 +257,9 @@ export function useCoreActions(s: StudioState) {
     resetWorkspace();
     savePreferences({ lastTargetEnv: next });
     const env = targetEnvs.find(e => e.name === next);
-    const fellBack = getActiveService() !== "ats" && !!env?.services && !serviceInEnv(env, getActiveService())?.available;
-    if (fellBack) {
-      fallBackToAts(env!.label);
-      savePreferences({ lastTargetService: "ats" });
-    }
+    const nextSvc = serviceInEnv(env, getActiveService());
+    const fellBack = getActiveService() !== "ats" && !!env?.services && !nextSvc?.available && !nextSvc?.unreachable;
+    if (fellBack) fallBackToAts(env!.label);
     await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
     if (fellBack) return;
     setStatusMessage(`🌐 Target env: ${env?.label || next}${env?.readonly ? " (read-only)" : ""}`);

@@ -146,6 +146,8 @@ export interface ServiceInfo {
   label: string;
   dbName: string | null;
   available: boolean;
+  /** Gagal koneksi sementara (bukan tidak dikonfigurasi) */
+  unreachable?: boolean;
   hasWorkflow: boolean;
   reason?: string;
 }
@@ -159,7 +161,7 @@ export const serviceInEnv = (env: TargetEnvInfo | undefined, key: ServiceKey): S
 /** Props <option> env di dialog Salin/Export/Bandingkan: disabled bila layanan aktif tidak ada di env itu */
 export const envOptionProps = (env: TargetEnvInfo, key: ServiceKey): { disabled: boolean; label: string } => {
   const s = serviceInEnv(env, key);
-  const ok = !env.services || !!s?.available;
+  const ok = !env.services || !!s?.available || !!s?.unreachable;
   return { disabled: !ok, label: ok ? env.label : `${env.label} (Layanan ${SERVICE_LABEL[key]} tidak tersedia)` };
 };
 

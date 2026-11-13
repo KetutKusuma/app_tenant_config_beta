@@ -5,7 +5,7 @@ import path from "path";
 import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
 import { scopeOf } from "../services";
-import { domainOf, presetDirFor, presetDirMissing, staleVersionError } from "../domain";
+import { domainOf, foreignPresetDir, presetDirFor, presetDirMissing, staleVersionError } from "../domain";
 import { assertWritable } from "../envs";
 import { backupThenWrite } from "../backupFirst";
 import { discardSnapshot, snapshotBeforeChange } from "../presetSync";
@@ -20,6 +20,8 @@ router.get("/api/references", (req, res) => {
   try {
     const customDir = (req.query.dir as string) || presetDirFor(req);
     if (!customDir) return res.status(400).json(presetDirMissing(req));
+    const foreign = foreignPresetDir(req, customDir);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
     const list: Array<{ path: string; name: string; category: string }> = [];
 
     if (fs.existsSync(customDir)) {
@@ -57,6 +59,8 @@ router.get("/api/references/file", (req, res) => {
     if (!filePath) {
       return res.status(400).json({ error: "Invalid file path" });
     }
+    const foreign = foreignPresetDir(req, filePath);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "File not found" });
     }
@@ -129,6 +133,8 @@ router.post("/api/references/save", (req, res) => {
       ? dir.trim() 
       : presetDirFor(req);
     if (!targetDir) return res.status(400).json(presetDirMissing(req));
+    const foreign = foreignPresetDir(req, targetDir);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
 
     if (!filename || typeof filename !== "string" || !filename.trim()) {
       return res.status(400).json({ error: "Nama file preset wajib diisi!" });
@@ -200,6 +206,8 @@ router.post("/api/references/export-bulk", async (req, res) => {
       ? dir.trim()
       : presetDirFor(req);
     if (!targetDir) return res.status(400).json(presetDirMissing(req));
+    const foreign = foreignPresetDir(req, targetDir);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
@@ -307,6 +315,8 @@ router.post("/api/references/export-skill", (req, res) => {
       ? dir.trim()
       : presetDirFor(req);
     if (!targetDir) return res.status(400).json(presetDirMissing(req));
+    const foreign = foreignPresetDir(req, targetDir);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });

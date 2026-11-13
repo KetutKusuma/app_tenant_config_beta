@@ -5,7 +5,7 @@ import fs from "fs";
 import path from "path";
 import { actorName } from "../auth";
 import { auditDb, esc } from "../db";
-import { domainOf, presetDirFor, presetDirMissing } from "../domain";
+import { domainOf, foreignPresetDir, presetDirFor, presetDirMissing } from "../domain";
 import { assertWritable } from "../envs";
 import { scopeOf } from "../services";
 import { backupThenWrite } from "../backupFirst";
@@ -23,6 +23,8 @@ router.put("/api/references/file", (req, res) => {
     if (!isSafePresetPath(filePath)) {
       return res.status(400).json({ error: "Path harus absolut dan berekstensi .json" });
     }
+    const foreign = foreignPresetDir(req, filePath);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
     if (content === undefined || content === null) {
       return res.status(400).json({ error: "Konten tidak boleh kosong" });
     }
@@ -46,6 +48,8 @@ router.get("/api/sync/status", async (req, res) => {
     const tenantId = String(req.query.tenantId || "GLOBAL_DEFAULT");
     const dir = (req.query.dir as string) || presetDirFor(req);
     if (!dir) return res.status(400).json(presetDirMissing(req));
+    const foreign = foreignPresetDir(req, dir);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
     const isGlobal = tenantId === "GLOBAL_DEFAULT";
     const D = domainOf(req);
 
@@ -146,6 +150,8 @@ router.put("/api/sync/link", async (req, res) => {
     if (!isSafePresetPath(filePath)) {
       return res.status(400).json({ error: "Path harus absolut dan berekstensi .json" });
     }
+    const foreign = foreignPresetDir(req, filePath);
+    if (foreign) return res.status(400).json({ code: "PRESET_DIR_FOREIGN", error: foreign });
     await upsertPresetLink(req.user!.id, scopeOf(req), tenantId, configType, filePath);
     res.json({ success: true, message: "Link file disimpan" });
   } catch (err: any) {
@@ -186,6 +192,11 @@ router.post("/api/sync/apply", async (req, res) => {
       try {
         if (!configType || !isSafePresetPath(filePath)) {
           report("failed", "configType/filePath tidak valid");
+          continue;
+        }
+        const foreignItem = foreignPresetDir(req, filePath);
+        if (foreignItem) {
+          report("failed", foreignItem);
           continue;
         }
 

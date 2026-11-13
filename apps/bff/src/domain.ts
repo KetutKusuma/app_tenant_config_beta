@@ -1,6 +1,6 @@
 import "./loadEnv";
 import express from "express";
-import { tableFor, type ServiceKey, type TableSpec } from "./services";
+import { SERVICES, isServiceKey, tableFor, type ServiceKey, type TableSpec } from "./services";
 
 // Domain konfigurasi (tenant_config / workflow_pipeline) dan folder preset default per user.
 
@@ -51,6 +51,33 @@ export function presetDirFor(req: express.Request): string | null {
     return prefs?.presetDirWorkflow || prefs?.presetDirTenant || DEFAULT_PRESET_DIR;
   }
   return prefs?.presetDirTenant || DEFAULT_PRESET_DIR;
+}
+
+/**
+ * Folder/berkas preset milik layanan LAIN? Pemilik ditentukan oleh folder terpanjang yang memuat path
+ * (folder HRIS di dalam folder ATS tetap milik HRIS). Mengembalikan pesan error, atau null bila boleh.
+ * Mencegah preset ATS dibaca/ditimpa saat layanan lain aktif (dan sebaliknya).
+ */
+export function foreignPresetDir(req: express.Request, p: string): string | null {
+  const prefs = req.user?.preferences;
+  const current: ServiceKey = req.targetService?.key ?? "ats";
+  const owned: Array<{ dir: string; service: ServiceKey }> = [];
+  const atsDirs = [prefs?.presetDirTenant, prefs?.presetDirWorkflow];
+  if (atsDirs.some((d) => !d)) atsDirs.push(DEFAULT_PRESET_DIR);
+  for (const d of atsDirs) if (d) owned.push({ dir: d, service: "ats" });
+  for (const [k, d] of Object.entries(prefs?.presetDirs ?? {})) {
+    const svc = k.split(":")[0];
+    if (d && isServiceKey(svc)) owned.push({ dir: d, service: svc });
+  }
+  const norm = (x: string) => x.replace(/\/+$/, "");
+  const target = norm(p.trim());
+  let owner: { dir: string; service: ServiceKey } | null = null;
+  for (const o of owned) {
+    const dir = norm(o.dir);
+    if ((target === dir || target.startsWith(dir + "/")) && (!owner || dir.length > norm(owner.dir).length)) owner = o;
+  }
+  if (!owner || owner.service === current) return null;
+  return `Folder ${owner.dir} adalah folder preset layanan ${SERVICES[owner.service].label}. Pilih folder preset untuk layanan ${SERVICES[current].label}.`;
 }
 
 /** Response 400 untuk layanan non-ATS yang folder presetnya belum diatur */

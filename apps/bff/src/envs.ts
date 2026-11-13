@@ -224,13 +224,15 @@ export interface ServiceAvailability {
   label: string;
   dbName: string | null;
   available: boolean;
+  /** true: gagal koneksi (VPN putus, timeout) — sementara; request tetap diteruskan agar route melapor sendiri */
+  unreachable?: boolean;
   hasWorkflow: boolean;
   reason?: string;
 }
 
 interface AvailabilityDeps {
   configs: (env: string) => Partial<Record<ServiceKey, PoolConfig>>;
-  ping: (env: string, service: ServiceKey) => Promise<{ ok: boolean; reason?: string }>;
+  ping: (env: string, service: ServiceKey) => Promise<{ ok: boolean; unreachable?: boolean; reason?: string }>;
 }
 
 function dbNameOf(c: PoolConfig): string | null {
@@ -245,13 +247,14 @@ function dbNameOf(c: PoolConfig): string | null {
   return null;
 }
 
-async function defaultPing(env: string, service: ServiceKey): Promise<{ ok: boolean; reason?: string }> {
+async function defaultPing(env: string, service: ServiceKey): Promise<{ ok: boolean; unreachable?: boolean; reason?: string }> {
   const table = SERVICES[service].domains.tenant_config.table;
   try {
     const r = await poolFor(env, service).query("SELECT to_regclass($1) IS NOT NULL AS ok", [table]);
     return r.rows[0]?.ok ? { ok: true } : { ok: false, reason: `tabel ${table} tidak ditemukan` };
   } catch (err: any) {
-    return { ok: false, reason: err.message };
+    // 3D000 = database tidak ada (masalah konfigurasi, permanen); selain itu dianggap gangguan koneksi sementara
+    return err?.code === "3D000" ? { ok: false, reason: err.message } : { ok: false, unreachable: true, reason: err.message };
   }
 }
 
@@ -279,10 +282,11 @@ export async function serviceAvailability(env: string, deps?: AvailabilityDeps):
       const config = configs[key];
       if (!config) return { ...base, dbName: null, available: false, reason: "tidak dikonfigurasi di profil env ini" };
       const p = await d.ping(env, key);
-      return { ...base, dbName: dbNameOf(config), available: p.ok, ...(p.ok ? {} : { reason: p.reason }) };
+      return { ...base, dbName: dbNameOf(config), available: p.ok, ...(p.ok ? {} : { reason: p.reason }), ...(p.unreachable ? { unreachable: true } : {}) };
     })
   );
-  if (!deps) availabilityCache.set(env, { at: Date.now(), mtimeMs, list });
+  // Gangguan koneksi tidak di-cache: begitu VPN pulih, request berikutnya langsung normal
+  if (!deps && !list.some((x) => x.unreachable)) availabilityCache.set(env, { at: Date.now(), mtimeMs, list });
   return list;
 }
 
@@ -379,9 +383,17 @@ export function targetServiceMiddleware(deps?: {
     }
     const pref = req.user?.preferences.lastTargetService;
     const key: ServiceKey = raw !== undefined ? raw : isServiceKey(pref) ? pref : "ats";
+    // Domain workflow diminta eksplisit untuk layanan tanpa tabel workflow: tolak, jangan diam-diam pakai tenant_config
+    const domain = req.header("x-config-domain") || (req.query?.domain as string | undefined) || req.body?.domain;
+    if (domain === "workflow_pipeline" && !SERVICES[key].domains.workflow_pipeline) {
+      return res.status(400).json({
+        code: "DOMAIN_UNAVAILABLE",
+        error: `Layanan ${SERVICES[key].label} tidak punya tabel workflow.`
+      });
+    }
     try {
       const status = (await availability(env.name)).find((s) => s.key === key);
-      if (!status?.available) {
+      if (!status?.available && !status?.unreachable) {
         return res.status(409).json({
           code: "SERVICE_UNAVAILABLE",
           error: `Layanan ${SERVICES[key].label} tidak tersedia di env ${env.label}: ${status?.reason || "tidak dikonfigurasi"}`

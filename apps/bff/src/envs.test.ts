@@ -125,3 +125,35 @@ test("middleware: route auth dan envs dilewati", async () => {
   const mw = targetServiceMiddleware({ availability: allAvailable, pool: () => ({}) as any });
   assert.equal(await run(mw, req, res), true);
 });
+
+// ---- I1: DB tidak terjangkau tidak memblokir request (perilaku lama: route melapor sendiri) ----
+test("middleware: layanan tidak terjangkau (koneksi) tetap diteruskan", async () => {
+  const { req, res } = fakeReqRes({ method: "GET", header: "ats" });
+  const mw = targetServiceMiddleware({
+    availability: async () => [{ key: "ats", label: "ATS", dbName: "ats_db", available: false, unreachable: true, hasWorkflow: true, reason: "timeout" }],
+    pool: () => ({}) as any
+  });
+  assert.equal(await run(mw, req, res), true);
+  assert.equal(req.targetService.key, "ats");
+});
+
+test("serviceAvailability: ping gagal koneksi ditandai unreachable", async () => {
+  const list = await serviceAvailability("development", {
+    configs: () => ({ hris: { database: "hris_db" } }),
+    ping: async () => ({ ok: false, unreachable: true, reason: "timeout" })
+  });
+  const hris = list.find((s) => s.key === "hris")!;
+  assert.equal(hris.available, false);
+  assert.equal(hris.unreachable, true);
+});
+
+// ---- I3: domain workflow diminta eksplisit untuk layanan tanpa workflow ----
+test("middleware: X-Config-Domain workflow_pipeline di layanan Auth -> 400 DOMAIN_UNAVAILABLE", async () => {
+  const { req, res } = fakeReqRes({ method: "GET", header: "auth" });
+  const base = req.header;
+  req.header = (n: string) => (n.toLowerCase() === "x-config-domain" ? "workflow_pipeline" : base(n));
+  const mw = targetServiceMiddleware({ availability: allAvailable, pool: () => ({}) as any });
+  assert.equal(await run(mw, req, res), false);
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.code, "DOMAIN_UNAVAILABLE");
+});

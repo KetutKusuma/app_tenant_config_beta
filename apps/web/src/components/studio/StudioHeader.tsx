@@ -70,7 +70,7 @@ export function StudioHeader() {
                   key: x.key,
                   label: `${x.label} · ${x.dbName ?? "-"}${x.key === targetServiceKey ? "  ✓" : ""}`,
                   hint: x.available ? undefined : x.reason || "Tidak tersedia di env ini",
-                  disabled: !x.available,
+                  disabled: !x.available && !x.unreachable,
                   onSelect: () => handleSwitchTargetService(x.key)
                 }))}
               />
