@@ -23,6 +23,8 @@ export interface ExportSqlInput {
   source: { env: string; tenantCode: string };
   target: { env: string; tenantId: string | null; groupId: string | null; tenantCode: string };
   author: string; createdAt: Date; reason: string;
+  /** Layanan + database tujuan, dicetak di header file */
+  service?: { label: string; dbName: string | null };
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -108,7 +110,7 @@ function itemSql(mode: ExportSqlInput["mode"], domain: ExportTable, item: Export
 }
 
 export function buildExportSql(input: ExportSqlInput): string {
-  const { sections, mode, source, target, author, createdAt, reason } = input;
+  const { sections, mode, source, target, author, createdAt, reason, service } = input;
   const tenantId = normTenantId(target.tenantId);
   const groupId = resolveGroupId(tenantId, target.groupId);
   const n = sections.reduce((sum, s) => sum + s.items.length, 0);
@@ -116,6 +118,7 @@ export function buildExportSql(input: ExportSqlInput): string {
   const header = [
     "-- Tenant Studio · Export SQL",
     "-- Catatan : dibuat oleh Tenant Studio dan TIDAK dijalankan otomatis. Periksa sebelum menjalankan.",
+    ...(service ? [`-- Layanan : ${oneLine(service.label)} (${oneLine(service.dbName ?? "-")})`] : []),
     `-- Tabel   : ${sections.map((s) => oneLine(s.domain.table)).join(", ")}`,
     `-- Sumber  : ${oneLine(source.env)} · ${oneLine(source.tenantCode)}`,
     `-- Tujuan  : ${oneLine(target.env)} · ${oneLine(target.tenantCode)} · tenant_id ${oneLine(tenantId ?? "NULL")} · group_id ${oneLine(groupId ?? "NULL")}`,

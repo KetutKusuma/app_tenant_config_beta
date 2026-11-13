@@ -343,3 +343,8 @@ test("buildExportSql ATS: id tetap gen_random_uuid() tanpa ::text", () => {
   assert.ok(sql.includes("SELECT gen_random_uuid(), "));
   assert.ok(!sql.includes("gen_random_uuid()::text"));
 });
+
+test("buildExportSql: header mencantumkan layanan dan database", () => {
+  const sql = buildExportSql({ ...base(), service: { label: "HRIS", dbName: "hris_db" } });
+  assert.ok(sql.includes("-- Layanan : HRIS (hris_db)\n"));
+});

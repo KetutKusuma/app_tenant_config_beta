@@ -1,7 +1,8 @@
 import { pgErrorMessage } from "../configRows";
 import express from "express";
-import { DOMAINS, domainOf, type ConfigDomain, type DomainSpec } from "../domain";
-import { assertWritable, poolFor } from "../envs";
+import { domainOf, domainSpecFor, isConfigDomain, type ConfigDomain, type DomainSpec } from "../domain";
+import { assertServiceInEnvs } from "../compare/compareService";
+import { assertWritable, poolFor, serviceAvailability } from "../envs";
 import { buildCompareEntries, loadSides } from "../compare/compareEntries";
 import { fetchTenantMeta, fetchTenantRows, findProfile } from "../compare/tenantRows";
 import { buildExportSql, exportBatchShape, exportFileName, exportItemOf, resolveGroupId, typeKey, type ExportSection } from "../compare/sqlExport";
@@ -23,6 +24,26 @@ import type { ConfigRow } from "../compare/types";
 
 export const router = express.Router();
 
+
+/** Nama database layanan aktif di env tujuan (header Export SQL); production-manual → null */
+async function serviceDbName(req: express.Request, env: string): Promise<string | null> {
+  if (env === PRODUCTION_MANUAL) return null;
+  return (await serviceAvailability(env)).find((s) => s.key === req.targetService!.key)?.dbName ?? null;
+}
+
+/** Pesan bila layanan aktif tidak tersedia di salah satu env; dikirim sebagai 409 */
+async function serviceEnvError(req: express.Request, envs: string[]): Promise<string | null> {
+  return assertServiceInEnvs(req.targetService!.key, envs);
+}
+
+/** Buang domain yang tidak dimiliki layanan aktif (mis. workflow di Auth). Kosong → null */
+function supportedDomains<T>(req: express.Request, items: T[], nameOf: (t: T) => ConfigDomain): T[] | null {
+  const kept = items.filter((t) => domainSpecFor(req.targetService!.key, nameOf(t)) !== null);
+  return kept.length ? kept : null;
+}
+
+const noDomainError = (req: express.Request) => `Layanan ${req.targetService!.label} tidak punya domain yang diminta.`;
+
 router.get("/api/compare", async (req, res) => {
   try {
     const q = (k: string) => (typeof req.query[k] === "string" ? (req.query[k] as string) : "");
@@ -34,10 +55,12 @@ router.get("/api/compare", async (req, res) => {
     if (!lp) return res.status(400).json({ error: `Env '${leftEnv}' tidak dikenal` });
     if (!rp) return res.status(400).json({ error: `Env '${rightEnv}' tidak dikenal` });
 
+    const envErr = await serviceEnvError(req, [leftEnv, rightEnv]);
+    if (envErr) return res.status(409).json({ code: "SERVICE_UNAVAILABLE", error: envErr });
     const D = domainOf(req);
     const loaded = await loadSides(
-      async () => fetchTenantRows(poolFor(leftEnv), D, leftTenant),
-      async () => fetchTenantRows(poolFor(rightEnv), D, rightTenant),
+      async () => fetchTenantRows(poolFor(leftEnv, req.targetService!.key), D, leftTenant),
+      async () => fetchTenantRows(poolFor(rightEnv, req.targetService!.key), D, rightTenant),
       { kiri: lp.label, kanan: rp.label }
     );
     if (!loaded.ok) return res.status(502).json({ error: loaded.error, side: loaded.side });
@@ -75,7 +98,7 @@ export function parsePreviewQuery(q: Record<string, unknown>): { ok: true; value
   if (names.length === 0) return fail("Parameter domains wajib diisi (pisahkan dengan koma)");
   const domains: ConfigDomain[] = [];
   for (const name of names) {
-    if (!Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${name}' tidak dikenal`);
+    if (!isConfigDomain(name)) return fail(`Domain '${name}' tidak dikenal`);
     if (!domains.includes(name as ConfigDomain)) domains.push(name as ConfigDomain);
   }
   return { ok: true, value: { sourceEnv, sourceTenantId, targetEnv, targetTenantId, domains } };
@@ -97,7 +120,11 @@ router.get("/api/compare/copy-preview", async (req, res) => {
   try {
     const parsed = parsePreviewQuery(req.query);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, targetEnv, targetTenantId, domains } = parsed.value;
+    const { sourceEnv, sourceTenantId, targetEnv, targetTenantId } = parsed.value;
+    const domains = supportedDomains(req, parsed.value.domains, (d) => d);
+    if (!domains) return res.status(400).json({ error: noDomainError(req) });
+    const envErr = await serviceEnvError(req, [sourceEnv, targetEnv]);
+    if (envErr) return res.status(409).json({ code: "SERVICE_UNAVAILABLE", error: envErr });
     const sp = findProfile(sourceEnv);
     if (!sp) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
     const targetReadable = targetEnv !== PRODUCTION_MANUAL;
@@ -114,10 +141,10 @@ router.get("/api/compare/copy-preview", async (req, res) => {
     const labels = { kiri: sp.label, kanan: tp?.label ?? PRODUCTION_MANUAL_LABEL };
     const out: CopyPreview["domains"] = [];
     for (const domain of domains) {
-      const D = DOMAINS[domain];
+      const D = domainSpecFor(req.targetService!.key, domain)!;
       const loaded = await loadSides(
-        async () => fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
-        async () => (targetReadable ? fetchTenantRows(poolFor(targetEnv), D, targetTenantId) : []),
+        async () => fetchTenantRows(poolFor(sourceEnv, req.targetService!.key), D, sourceTenantId),
+        async () => (targetReadable ? fetchTenantRows(poolFor(targetEnv, req.targetService!.key), D, targetTenantId) : []),
         labels
       );
       if (!loaded.ok) return res.status(502).json({ error: loaded.error, side: loaded.side });
@@ -129,7 +156,7 @@ router.get("/api/compare/copy-preview", async (req, res) => {
         items = previewItems(buildCompareEntries(loaded.left, loaded.right).entries, D.hasPath);
         // Path hanya ada di tenant_config; workflow_pipeline tidak punya kolom path, jadi tanpa SQL path.
         if (D.hasPath && targetTenantCode !== null) {
-          const db = poolFor(targetEnv);
+          const db = poolFor(targetEnv, req.targetService!.key);
           const paths = items.filter((i) => (i.status === "baru" || i.status === "timpa") && i.path !== null).map((i) => i.path as string);
           const conflicts = await findPathConflicts(db, D.table, paths, targetTenantId);
           if (conflicts.size) {
@@ -154,7 +181,9 @@ router.get("/api/compare/path-check", async (req, res) => {
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
     const { targetEnv, targetTenantId, path } = parsed.value;
     if (!findProfile(targetEnv)) return res.status(400).json({ error: `Env '${targetEnv}' tidak dikenal` });
-    const conflicts = await findPathConflicts(poolFor(targetEnv), DOMAINS.tenant_config.table, [path], targetTenantId);
+    const envErr = await serviceEnvError(req, [targetEnv]);
+    if (envErr) return res.status(409).json({ code: "SERVICE_UNAVAILABLE", error: envErr });
+    const conflicts = await findPathConflicts(poolFor(targetEnv, req.targetService!.key), domainSpecFor(req.targetService!.key, "tenant_config")!.table, [path], targetTenantId);
     const owner = conflicts.get(path);
     res.json({ data: owner ? { available: false, ownerTenantId: owner.tenantId, ownerConfigType: owner.configType } : { available: true } });
   } catch (err: any) {
@@ -178,7 +207,7 @@ function parseDomainStage(domains: unknown): { ok: true; stage: DomainStage[] } 
   const stage: DomainStage[] = [];
   for (const d of domains) {
     const name = isPlainObject(d) ? d.domain : undefined;
-    if (typeof name !== "string" || !Object.prototype.hasOwnProperty.call(DOMAINS, name)) return fail(`Domain '${String(name)}' tidak dikenal`);
+    if (typeof name !== "string" || !isConfigDomain(name)) return fail(`Domain '${String(name)}' tidak dikenal`);
     if (seen.has(name)) return fail(`Domain '${name}' disebut dua kali`);
     seen.add(name);
     const raw = d as Record<string, unknown>;
@@ -264,7 +293,11 @@ router.post("/api/compare/export-sql", async (req, res) => {
   try {
     const parsed = parseExportBody(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, mode, reason, target, domains } = parsed.value;
+    const { sourceEnv, sourceTenantId, mode, reason, target } = parsed.value;
+    const domains = supportedDomains(req, parsed.value.domains, (d) => d.domain);
+    if (!domains) return res.status(400).json({ error: noDomainError(req) });
+    const envErr = await serviceEnvError(req, [sourceEnv, target.kind === "profile" ? target.env : PRODUCTION_MANUAL]);
+    if (envErr) return res.status(409).json({ code: "SERVICE_UNAVAILABLE", error: envErr });
     const sp = findProfile(sourceEnv);
     if (!sp) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
 
@@ -274,8 +307,8 @@ router.post("/api/compare/export-sql", async (req, res) => {
     // Isi sumber tiap domain dibaca ulang saat request.
     const sources: Array<{ d: ExportDomainBody; D: DomainSpec; rowOf: Map<string, ConfigRow> }> = [];
     for (const d of domains) {
-      const D = DOMAINS[d.domain];
-      const srcRows = await fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId, d.configTypes);
+      const D = domainSpecFor(req.targetService!.key, d.domain)!;
+      const srcRows = await fetchTenantRows(poolFor(sourceEnv, req.targetService!.key), D, sourceTenantId, d.configTypes);
       const byType = new Map<string, ConfigRow[]>();
       for (const r of srcRows) byType.set(r.config_type, [...(byType.get(r.config_type) ?? []), r]);
       const missing = d.configTypes.filter((c) => !byType.has(c));
@@ -332,7 +365,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
       const dupes = duplicateFinalPaths(items);
       if (dupes.length) return res.status(400).json({ error: `Path ganda dalam pilihan: ${dupes.join(", ")}` });
       if (target.kind === "profile" && tenantIdForSql !== null) {
-        const conflicts = await findPathConflicts(poolFor(target.env), s.domain.table, items.map((i) => i.path), tenantIdForSql);
+        const conflicts = await findPathConflicts(poolFor(target.env, req.targetService!.key), s.domain.table, items.map((i) => i.path), tenantIdForSql);
         if (conflicts.size) {
           const paths = [...conflicts.keys()].sort();
           return res.status(409).json({ code: "PATH_CONFLICT", error: pathConflictError(paths), paths });
@@ -348,7 +381,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
       try {
         const snap: Record<string, { id: string; value: any; updated_at: string } | null> = {};
         for (const { d, D } of sources) {
-          const tr = await fetchTenantRows(poolFor(snapshotEnv), D, target.tenantId, d.configTypes);
+          const tr = await fetchTenantRows(poolFor(snapshotEnv, req.targetService!.key), D, target.tenantId, d.configTypes);
           for (const c of d.configTypes) {
             const row = tr.find((r) => r.config_type === c);
             snap[typeKey(multi, d.domain, c)] = row ? { id: row.id, value: row.value, updated_at: row.version_token } : null;
@@ -368,6 +401,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
       sql = buildExportSql({
         sections,
         mode,
+        service: { label: req.targetService!.label, dbName: await serviceDbName(req, target.kind === "profile" ? target.env : PRODUCTION_MANUAL) },
         source: { env: sourceEnv, tenantCode: sourceMeta.code },
         target: { env: targetEnvLabel, tenantId: tenantIdForSql, groupId: groupInput, tenantCode: targetTenantCode },
         author,
@@ -487,8 +521,12 @@ router.post("/api/compare/copy", async (req, res) => {
 
     const parsed = parseCopyBody(req.body);
     if (!parsed.ok) return res.status(400).json({ error: parsed.error });
-    const { sourceEnv, sourceTenantId, targetTenantId, reason, domains } = parsed.value;
+    const { sourceEnv, sourceTenantId, targetTenantId, reason } = parsed.value;
+    const domains = supportedDomains(req, parsed.value.domains, (d) => d.domain);
+    if (!domains) return res.status(400).json({ error: noDomainError(req) });
     if (!findProfile(sourceEnv)) return res.status(400).json({ error: `Env '${sourceEnv}' tidak dikenal` });
+    const envErr = await serviceEnvError(req, [sourceEnv]);
+    if (envErr) return res.status(409).json({ code: "SERVICE_UNAVAILABLE", error: envErr });
     if (sourceEnv === targetEnv.name && sourceTenantId === targetTenantId) {
       return res.status(400).json({ error: "Sumber dan tujuan sama (env dan tenant). Pilih tujuan lain." });
     }
@@ -504,9 +542,9 @@ router.post("/api/compare/copy", async (req, res) => {
     // `domain:config_type` → path sumber, untuk baris baru yang path akhirnya berasal dari override
     const overriddenFrom = new Map<string, string | null>();
     for (const d of domains) {
-      const D = DOMAINS[d.domain];
+      const D = domainSpecFor(req.targetService!.key, d.domain)!;
       const [srcRows, tgtRows] = await Promise.all([
-        fetchTenantRows(poolFor(sourceEnv), D, sourceTenantId),
+        fetchTenantRows(poolFor(sourceEnv, req.targetService!.key), D, sourceTenantId),
         fetchTenantRows(targetDb, D, targetTenantId),
       ]);
       const fresh = planCopy(buildCompareEntries(srcRows, tgtRows).entries);

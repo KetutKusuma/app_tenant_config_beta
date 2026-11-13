@@ -28,11 +28,10 @@ export function domainSpecFor(service: ServiceKey, domain: ConfigDomain): Domain
   };
 }
 
-/** Alias ATS untuk pemakai lama; dihapus setelah semua route memakai domainSpecFor */
-export const DOMAINS: Record<ConfigDomain, DomainSpec> = {
-  tenant_config: domainSpecFor("ats", "tenant_config")!,
-  workflow_pipeline: domainSpecFor("ats", "workflow_pipeline")!
-};
+export const CONFIG_DOMAINS: ConfigDomain[] = ["tenant_config", "workflow_pipeline"];
+export function isConfigDomain(x: unknown): x is ConfigDomain {
+  return typeof x === "string" && (CONFIG_DOMAINS as string[]).includes(x);
+}
 
 export function domainOf(req: express.Request): DomainSpec {
   const raw = req.header("x-config-domain") || (req.query.domain as string) || req.body?.domain;
