@@ -2,7 +2,7 @@ import {
   AlertTriangle, ArrowLeftRight, Building2, Check, Copy, CopyPlus, Database, Download, Edit2, FileCode, FilePlus,
   Layers, Plus, RefreshCw, Search, Trash2, Users, Workflow
 } from "lucide-react";
-import { DOMAIN_LABEL, ENV_DOT, SERVICE_DEFAULT_DB, SERVICE_TONE, serviceInEnv } from "../../types";
+import { DOMAIN_LABEL, ENV_DOT, SERVICE_DEFAULT_DB, serviceInEnv } from "../../types";
 import { useStudio } from "../../studio/StudioContext";
 
 export function Sidebar() {
@@ -67,13 +67,6 @@ export function Sidebar() {
               <span className="shrink-0 tabular-nums text-slate-500">{filteredTenants.length}</span>
               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${ENV_DOT[activeEnv?.color || "slate"] || "bg-slate-400"}`} />
               <span className="normal-case tracking-normal font-medium text-slate-300 truncate">{envLabel}</span>
-              <span className="text-slate-600">·</span>
-              <span
-                className={`normal-case tracking-normal font-mono font-medium truncate ${SERVICE_TONE[targetServiceKey].text}`}
-                title={`Config dibaca dari database ${dbName}`}
-              >
-                {dbName}
-              </span>
             </span>
             <div className="flex items-center gap-0.5 shrink-0">
               <button

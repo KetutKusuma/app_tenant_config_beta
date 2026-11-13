@@ -78,7 +78,8 @@ export function MenuButton({
   items,
   active = false,
   align = "right",
-  title
+  title,
+  tone
 }: {
   label: string;
   icon?: ReactNode;
@@ -86,6 +87,8 @@ export function MenuButton({
   active?: boolean;
   align?: "left" | "right";
   title?: string;
+  /** Kelas warna tombol (mis. badge berwarna); menggantikan gaya ghost bawaan */
+  tone?: string;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
@@ -96,8 +99,8 @@ export function MenuButton({
         aria-haspopup="menu"
         aria-expanded={open}
         title={title}
-        className={`h-7 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-medium transition ${
-          open || active ? "bg-slate-800 text-white" : "text-slate-300 hover:text-white hover:bg-slate-800/70"
+        className={`h-7 px-2.5 rounded-md flex items-center gap-1.5 text-[11px] font-medium whitespace-nowrap transition ${
+          tone ? `ring-1 ring-inset ${tone} hover:brightness-125` : open || active ? "bg-slate-800 text-white" : "text-slate-300 hover:text-white hover:bg-slate-800/70"
         }`}
       >
         {icon}
