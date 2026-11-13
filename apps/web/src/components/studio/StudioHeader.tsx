@@ -4,7 +4,7 @@ import {
   Users, X, Zap
 } from "lucide-react";
 import { Chip, MenuButton, SplitButton } from "../ui";
-import { DOMAIN_LABEL, ENV_DOT, SERVICE_LABEL } from "../../types";
+import { DOMAIN_LABEL, ENV_DOT, SERVICE_DEFAULT_DB, SERVICE_LABEL, SERVICE_TONE } from "../../types";
 import { useStudio } from "../../studio/StudioContext";
 
 export function StudioHeader() {
@@ -60,14 +60,16 @@ export function StudioHeader() {
           {(() => {
             const services = targetEnvs.find(e => e.name === targetEnvName)?.services || [];
             const cur = services.find(x => x.key === targetServiceKey);
+            const db = cur?.dbName || SERVICE_DEFAULT_DB[targetServiceKey];
             return (
               <MenuButton
                 align="left"
-                label={SERVICE_LABEL[targetServiceKey]}
-                title={cur?.dbName ? `Layanan ${cur.label} · ${cur.dbName}` : "Layanan / database config"}
-                icon={<Database className="w-3.5 h-3.5" />}
+                label={`${SERVICE_LABEL[targetServiceKey]} · ${db}`}
+                title={`Sedang membuka database ${db} (layanan ${SERVICE_LABEL[targetServiceKey]}). Klik untuk ganti layanan.`}
+                icon={<Database className={`w-3.5 h-3.5 ${SERVICE_TONE[targetServiceKey].text}`} />}
                 items={services.map(x => ({
                   key: x.key,
+                  icon: <span className={`w-2 h-2 rounded-full ${SERVICE_TONE[x.key].dot}`} />,
                   label: `${x.label} · ${x.dbName ?? "-"}${x.key === targetServiceKey ? "  ✓" : ""}`,
                   hint: x.available ? undefined : x.reason || "Tidak tersedia di env ini",
                   disabled: !x.available && !x.unreachable,
@@ -83,7 +85,19 @@ export function StudioHeader() {
         {/* Breadcrumb: selalu menunjukkan apa yang sedang diedit */}
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 min-w-0 flex-1 text-[11px] whitespace-nowrap overflow-hidden">
           <span className="w-px h-4 bg-slate-800 mr-1 shrink-0" />
-          <span className="shrink-0 font-medium text-slate-300">{SERVICE_LABEL[targetServiceKey]}</span>
+          {(() => {
+            const db = targetEnvs.find(e => e.name === targetEnvName)?.services?.find(x => x.key === targetServiceKey)?.dbName
+              || SERVICE_DEFAULT_DB[targetServiceKey];
+            return (
+              <span
+                className={`shrink-0 inline-flex items-center gap-1 px-1.5 h-5 rounded font-mono text-[10px] ring-1 ring-inset ${SERVICE_TONE[targetServiceKey].badge}`}
+                title={`Database aktif: ${db} (layanan ${SERVICE_LABEL[targetServiceKey]})`}
+              >
+                <Database className="w-3 h-3" />
+                {db}
+              </span>
+            );
+          })()}
           <ChevronRight className="w-3 h-3 text-slate-600 shrink-0" />
           <span className={`shrink-0 font-medium ${configDomain === "workflow_pipeline" ? "text-teal-300" : "text-indigo-300"}`}>
             {DOMAIN_LABEL[configDomain]}

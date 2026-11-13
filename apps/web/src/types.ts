@@ -154,6 +154,18 @@ export interface ServiceInfo {
 export const SERVICE_LABEL: Record<ServiceKey, string> = {
   ats: "ATS", hris: "HRIS", organization: "Organization", auth: "Auth", communication: "Communication"
 };
+/** Nama database bawaan tiap layanan (dipakai bila daftar env belum termuat) */
+export const SERVICE_DEFAULT_DB: Record<ServiceKey, string> = {
+  ats: "ats_db", hris: "hris_db", organization: "organization_db", auth: "auth_db", communication: "communication_db"
+};
+/** Warna khas tiap layanan agar database aktif mudah dikenali (badge, titik, teks) */
+export const SERVICE_TONE: Record<ServiceKey, { badge: string; dot: string; text: string }> = {
+  ats: { badge: "bg-sky-500/15 text-sky-200 ring-sky-500/40", dot: "bg-sky-400", text: "text-sky-300" },
+  hris: { badge: "bg-amber-500/15 text-amber-200 ring-amber-500/40", dot: "bg-amber-400", text: "text-amber-300" },
+  organization: { badge: "bg-emerald-500/15 text-emerald-200 ring-emerald-500/40", dot: "bg-emerald-400", text: "text-emerald-300" },
+  auth: { badge: "bg-violet-500/15 text-violet-200 ring-violet-500/40", dot: "bg-violet-400", text: "text-violet-300" },
+  communication: { badge: "bg-rose-500/15 text-rose-200 ring-rose-500/40", dot: "bg-rose-400", text: "text-rose-300" }
+};
 export const isServiceKey = (x: unknown): x is ServiceKey =>
   typeof x === "string" && Object.prototype.hasOwnProperty.call(SERVICE_LABEL, x);
 export const serviceInEnv = (env: TargetEnvInfo | undefined, key: ServiceKey): ServiceInfo | undefined =>
