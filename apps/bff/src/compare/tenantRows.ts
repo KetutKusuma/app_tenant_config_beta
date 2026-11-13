@@ -1,3 +1,4 @@
+import { extraSelect, liveWhere } from "../configRows";
 import type { Pool } from "pg";
 import { auditDb, esc } from "../db";
 import type { DomainSpec } from "../domain";
@@ -14,9 +15,9 @@ export async function fetchTenantRows(pool: Pool, D: DomainSpec, tenantId: strin
   if (configTypes && configTypes.length === 0) return [];
   const typeFilter = configTypes ? ` AND ${D.typeCol} IN (${configTypes.map(esc).join(", ")})` : "";
   const r = await pool.query(`
-    SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, value, is_default, updated_at::text AS version_token
+    SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, value, is_default, updated_at::text AS version_token${extraSelect(D)}
     FROM ${D.table}
-    WHERE ${tenantWhere(tenantId)} AND deleted_at IS NULL${typeFilter}
+    WHERE ${tenantWhere(tenantId)} AND ${liveWhere(D)}${typeFilter}
     ORDER BY ${D.typeCol} ASC;
   `);
   return r.rows as ConfigRow[];

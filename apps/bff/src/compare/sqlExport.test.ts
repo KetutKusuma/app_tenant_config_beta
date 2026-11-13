@@ -323,3 +323,23 @@ test("exportItemOf: tipe dan isi dibawa apa adanya", () => {
   assert.equal(it.configType, "VACANCY_STABLE");
   assert.deepEqual(it.value, { v: [1, 2] });
 });
+
+test("buildExportSql HRIS: id varchar memakai gen_random_uuid()::text dan kolom type ikut", () => {
+  const HRIS = {
+    table: "public.tenant_configurations", typeCol: "config_type", hasPath: true,
+    idType: "varchar" as const, extraCopyCols: ["type"], extraInsertDefaults: {}, groupIdFromSource: true,
+  };
+  const sql = buildExportSql({
+    ...base(),
+    sections: [{ domain: HRIS, items: [{ configType: "SYSTEM_MENU", path: "system-menu", value: { m: 1 }, isDefault: false, extra: { type: "SYSTEM_MENU" }, groupId: null }] }],
+    mode: "lewati",
+  });
+  assert.match(sql, /INSERT INTO public\.tenant_configurations \(id, tenant_id, group_id, config_type, path, value, is_default, created_at, updated_at, type\)/);
+  assert.match(sql, /SELECT gen_random_uuid\(\)::text, '[^']*', NULL, 'SYSTEM_MENU', 'system-menu', .*, false, NOW\(\), NOW\(\), 'SYSTEM_MENU'/);
+});
+
+test("buildExportSql ATS: id tetap gen_random_uuid() tanpa ::text", () => {
+  const sql = buildExportSql({ ...base(), mode: "lewati" });
+  assert.ok(sql.includes("SELECT gen_random_uuid(), "));
+  assert.ok(!sql.includes("gen_random_uuid()::text"));
+});

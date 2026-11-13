@@ -1,3 +1,4 @@
+import { liveWhere } from "../configRows";
 import express from "express";
 import { auditDb, esc } from "../db";
 import { domainOf } from "../domain";
@@ -62,7 +63,7 @@ router.get("/api/tenants", async (req, res) => {
       const configsRes = await req.targetDb!.query(`
         SELECT tenant_id, count(*) as total_configs
         FROM ${D.table}
-        WHERE deleted_at IS NULL
+        WHERE ${liveWhere(D)}
         GROUP BY tenant_id;
       `);
       configRows = configsRes.rows;
@@ -203,8 +204,8 @@ router.get("/api/tenants/:tenantId/configs", async (req, res) => {
     const { tenantId } = req.params;
     const D = domainOf(req);
     const whereClause = tenantId === "GLOBAL_DEFAULT"
-      ? "tenant_id IS NULL AND deleted_at IS NULL"
-      : `tenant_id = ${esc(tenantId)} AND deleted_at IS NULL`;
+      ? `tenant_id IS NULL AND ${liveWhere(D)}`
+      : `tenant_id = ${esc(tenantId)} AND ${liveWhere(D)}`;
 
     const configsRes = await req.targetDb!.query(`
       SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, is_default, created_at, updated_at 

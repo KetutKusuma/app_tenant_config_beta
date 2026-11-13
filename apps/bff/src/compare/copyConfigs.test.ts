@@ -503,3 +503,45 @@ test("overriddenSourcePaths: hanya baris dibuat yang path-nya diganti override (
   assert.deepEqual([...m.entries()].sort(), [["A", "/src/a"], ["B", null]]);
   assert.equal(overriddenSourcePaths(plan, {}).size, 0);
 });
+
+// ---- Layanan selain ATS: kolom ekstra (type, is_active) dan group_id dari sumber ----
+
+const HRIS_WF: CopyTable = {
+  table: "workflow_pipelines.workflow_pipeline_configurations", typeCol: "workflow_config_type", hasPath: false,
+  extraCopyCols: ["is_active"], extraInsertDefaults: { is_active: "true" }, groupIdFromSource: true,
+};
+const ORG_TC: CopyTable = {
+  table: "core.tenant_configurations", typeCol: "config_type", hasPath: true,
+  extraCopyCols: ["type"], extraInsertDefaults: {}, groupIdFromSource: false,
+};
+
+function createOnly(source: ConfigRow): CopyPlan {
+  return { create: [source], overwrite: [], same: [], targetOnly: [], duplicates: [], unselected: [] };
+}
+
+test("writeCopyTxMulti HRIS workflow: is_active disalin dari sumber, group_id dari sumber (NULL)", async () => {
+  const f = fakeClient();
+  const src: ConfigRow = { ...row("FLOW"), group_id: null, extra: { is_active: false } };
+  const created = await writeCopyTxMulti(f.connect, [{ domain: "workflow_pipeline", table: HRIS_WF, plan: createOnly(src) }], { tenantId: "tt", groupId: "g-1" }, () => "new-1");
+  const ins = f.sql.find((q) => q.startsWith("INSERT INTO"))!;
+  assert.match(ins, /\(id, tenant_id, group_id, workflow_config_type, value, is_default, created_at, updated_at, is_active\)/);
+  assert.match(ins, /SELECT 'new-1', 'tt', NULL, 'FLOW', .*, false, NOW\(\), NOW\(\), false/);
+  assert.equal(created[0].group_id, null);
+});
+
+test("writeCopyTxMulti HRIS workflow: sumber tanpa is_active memakai default true", async () => {
+  const f = fakeClient();
+  const src: ConfigRow = { ...row("FLOW"), group_id: null };
+  await writeCopyTxMulti(f.connect, [{ domain: "workflow_pipeline", table: HRIS_WF, plan: createOnly(src) }], { tenantId: "tt", groupId: "g-1" }, () => "new-1");
+  const ins = f.sql.find((q) => q.startsWith("INSERT INTO"))!;
+  assert.match(ins, /NOW\(\), NOW\(\), true\n/);
+});
+
+test("writeCopyTxMulti Organization: type disalin, group_id tujuan (perilaku lama)", async () => {
+  const f = fakeClient();
+  const src: ConfigRow = { ...row("JOB_POSITION"), group_id: "src-g", extra: { type: "JOB_POSITION" } };
+  await writeCopyTxMulti(f.connect, [{ domain: "tenant_config", table: ORG_TC, plan: createOnly(src) }], { tenantId: "tt", groupId: "g-1" }, () => "new-1");
+  const ins = f.sql.find((q) => q.startsWith("INSERT INTO"))!;
+  assert.match(ins, /INSERT INTO core\.tenant_configurations \(id, tenant_id, group_id, config_type, path, value, is_default, created_at, updated_at, type\)/);
+  assert.match(ins, /SELECT 'new-1', 'tt', 'g-1', 'JOB_POSITION', .*NOW\(\), NOW\(\), 'JOB_POSITION'/);
+});

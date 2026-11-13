@@ -1,3 +1,4 @@
+import { extraInsert } from "../configRows";
 import { randomUUID } from "crypto";
 import { esc } from "../db";
 import type { ConfigDomain } from "../domain";
@@ -14,7 +15,10 @@ export interface CopyPlan {
   unselected: string[];
 }
 
-export interface CopyTable { table: string; typeCol: string; hasPath: boolean }
+export interface CopyTable {
+  table: string; typeCol: string; hasPath: boolean;
+  extraCopyCols?: string[]; extraInsertDefaults?: Record<string, string>; groupIdFromSource?: boolean;
+}
 /** Satu tabel yang disalin: domain + tabelnya + rencana salin untuk tabel itu. */
 export interface CopyPart { domain: ConfigDomain; table: CopyTable; plan: CopyPlan }
 /** Baris baru hasil salin, ditandai dari domain/tabel mana asalnya. */
@@ -299,8 +303,10 @@ export async function writeCopyTxMulti(
       for (const source of plan.create) {
         const id = newId();
         const path = t.hasPath ? finalPath(source) : null;
-        const cols = ["id", "tenant_id", "group_id", t.typeCol, ...(t.hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at"];
-        const vals = [esc(id), esc(target.tenantId), esc(target.groupId), esc(source.config_type), ...(t.hasPath ? [esc(path)] : []), jsonb(source.value), "false", "NOW()", "NOW()"];
+        const groupId = t.groupIdFromSource ? source.group_id : target.groupId;
+        const extra = extraInsert(t, source.extra);
+        const cols = ["id", "tenant_id", "group_id", t.typeCol, ...(t.hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at", ...extra.cols];
+        const vals = [esc(id), esc(target.tenantId), esc(groupId), esc(source.config_type), ...(t.hasPath ? [esc(path)] : []), jsonb(source.value), "false", "NOW()", "NOW()", ...extra.vals];
         const r = await client.query(`
           INSERT INTO ${t.table} (${cols.join(", ")})
           SELECT ${vals.join(", ")}
@@ -311,7 +317,7 @@ export async function writeCopyTxMulti(
           throw new TargetChangedError(`Config ${source.config_type} sudah ada di tujuan (dibuat saat proses salin). Tidak ada yang ditulis. Muat ulang perbandingan.`, source.config_type);
         }
         created.push({
-          id, tenant_id: target.tenantId, group_id: target.groupId, config_type: source.config_type, path,
+          id, tenant_id: target.tenantId, group_id: groupId, config_type: source.config_type, path,
           value: source.value, is_default: false, version_token: String(r.rows[0].version_token), domain,
         });
       }

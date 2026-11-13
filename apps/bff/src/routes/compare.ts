@@ -1,3 +1,4 @@
+import { pgErrorMessage } from "../configRows";
 import express from "express";
 import { DOMAINS, domainOf, type ConfigDomain, type DomainSpec } from "../domain";
 import { assertWritable, poolFor } from "../envs";
@@ -603,6 +604,9 @@ router.post("/api/compare/copy", async (req, res) => {
     // Path bentrok terdeteksi di dalam transaksi (sudah di-ROLLBACK, tidak ada yang ditulis): UI memuat ulang pratinjau.
     if (err instanceof PathConflictError) return res.status(409).json({ ...body, code: err.code, paths: err.paths });
     // Tujuan berubah di tengah tulis (sudah di-ROLLBACK): UI bisa menawarkan muat ulang.
+    // Constraint DB tujuan (FK tenant Organization, unique index workflow HRIS): transaksi sudah di-ROLLBACK.
+    const pgMsg = pgErrorMessage(err, { serviceLabel: req.targetService?.label ?? "ATS" });
+    if (pgMsg) return res.status(409).json({ ...body, code: "DB_CONSTRAINT", error: pgMsg });
     if (err instanceof TargetChangedError) Object.assign(body, { code: err.code, configTypes: [err.configType] });
     // COMMIT mungkin sudah masuk: cadangan isi lama tetap disimpan, user perlu memeriksa tujuan.
     if (isCommitUncertain(err)) body.commitUncertain = true;

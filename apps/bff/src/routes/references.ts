@@ -1,3 +1,4 @@
+import { liveWhere } from "../configRows";
 import express from "express";
 import fs from "fs";
 import path from "path";
@@ -205,7 +206,7 @@ router.post("/api/references/export-bulk", async (req, res) => {
     }
 
     const D = domainOf(req);
-    let query = `SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, value FROM ${D.table} WHERE deleted_at IS NULL`;
+    let query = `SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, ${D.pathSel}, value FROM ${D.table} WHERE ${liveWhere(D)}`;
     if (scope === "current_tenant") {
       if (tenantId === "GLOBAL_DEFAULT" || !tenantId) {
         query += " AND tenant_id IS NULL";

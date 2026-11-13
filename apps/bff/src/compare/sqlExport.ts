@@ -1,11 +1,21 @@
+import { extraInsert } from "../configRows";
 import { esc } from "../db.js";
 import type { ConfigDomain } from "../domain.js";
 import { finalPath, pathGuardSql } from "./pathConflicts.js";
 import type { ConfigRow } from "./types.js";
 
-export interface ExportTable { table: string; typeCol: string; hasPath: boolean }
+export interface ExportTable {
+  table: string; typeCol: string; hasPath: boolean;
+  idType?: "uuid" | "varchar"; extraCopyCols?: string[]; extraInsertDefaults?: Record<string, string>; groupIdFromSource?: boolean;
+}
 /** `path` sudah final (override sudah dipakai); kosong dipulihkan dari config_type oleh builder. */
-export interface ExportItem { configType: string; path: string | null; value: any; isDefault: boolean }
+export interface ExportItem {
+  configType: string; path: string | null; value: any; isDefault: boolean;
+  /** Kolom ekstra baris sumber (type, is_active) */
+  extra?: Record<string, unknown>;
+  /** group_id baris sumber; dipakai bila tabel groupIdFromSource */
+  groupId?: string | null;
+}
 /** Satu tabel di file export: tabelnya dan config yang ditulis ke tabel itu. */
 export interface ExportSection { domain: ExportTable; items: ExportItem[] }
 export interface ExportSqlInput {
@@ -48,6 +58,8 @@ export function exportItemOf(row: ConfigRow, opts: { hasPath: boolean; override?
     path: opts.hasPath ? finalPath(row, opts.override) : null,
     value: row.value,
     isDefault: opts.toGlobal ? !!row.is_default : false,
+    ...(row.extra ? { extra: row.extra } : {}),
+    ...(row.group_id !== undefined ? { groupId: row.group_id } : {}),
   };
 }
 
@@ -86,8 +98,11 @@ function itemSql(mode: ExportSqlInput["mode"], domain: ExportTable, item: Export
   if (mode === "timpa") {
     out.push(`UPDATE ${table}\nSET value = ${json},${hasPath ? ` path = ${path},` : ""} updated_at = NOW()\nWHERE ${where};`);
   }
-  const cols = ["id", "tenant_id", "group_id", typeCol, ...(hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at"];
-  const vals = ["gen_random_uuid()", esc(tenantId), esc(groupId), esc(item.configType), ...(hasPath ? [path] : []), json, esc(item.isDefault), "NOW()", "NOW()"];
+  const extra = extraInsert(domain, item.extra);
+  const idExpr = domain.idType === "varchar" ? "gen_random_uuid()::text" : "gen_random_uuid()";
+  const rowGroupId = domain.groupIdFromSource ? (item.groupId ?? null) : groupId;
+  const cols = ["id", "tenant_id", "group_id", typeCol, ...(hasPath ? ["path"] : []), "value", "is_default", "created_at", "updated_at", ...extra.cols];
+  const vals = [idExpr, esc(tenantId), esc(rowGroupId), esc(item.configType), ...(hasPath ? [path] : []), json, esc(item.isDefault), "NOW()", "NOW()", ...extra.vals];
   out.push(`INSERT INTO ${table} (${cols.join(", ")})\nSELECT ${vals.join(", ")}\nWHERE NOT EXISTS (SELECT 1 FROM ${table} WHERE ${where});`);
   return out.join("\n");
 }

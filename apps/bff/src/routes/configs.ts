@@ -1,3 +1,4 @@
+import { extraInsert, pgErrorMessage } from "../configRows";
 import { randomUUID } from "crypto";
 import express from "express";
 import { actorName } from "../auth";
@@ -22,7 +23,7 @@ router.get("/api/configs/:configId", async (req, res) => {
       SELECT id, tenant_id, group_id, ${D.typeCol} AS config_type, is_default, ${D.pathSel}, value, updated_at,
         updated_at::text AS version_token
       FROM ${D.table}
-      WHERE id = ${esc(configId)};
+      WHERE id = ${esc(configId)} AND ${D.typeCol} IS NOT NULL;
     `);
 
     if (rowRes.rows.length === 0) {
@@ -51,10 +52,11 @@ router.post("/api/configs", async (req, res) => {
     const jsonValue = value && typeof value === "object" ? value : {};
     const configId = (req.body.id && typeof req.body.id === "string" && req.body.id.trim()) ? req.body.id.trim() : randomUUID();
     const D = domainOf(req);
+    const ex = extraInsert(D, undefined);
 
     const insertRes = await req.targetDb!.query(`
       INSERT INTO ${D.table} 
-      (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at)
+      (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at${ex.cols.map((c) => `, ${c}`).join("")})
       VALUES (
         ${esc(configId)},
         ${targetTenantId ? esc(targetTenantId) : "NULL"}, 
@@ -64,7 +66,7 @@ router.post("/api/configs", async (req, res) => {
         ${esc(JSON.stringify(jsonValue))}::jsonb, 
         ${targetTenantId === null ? "true" : "false"}, 
         NOW(), 
-        NOW()
+        NOW()${ex.vals.map((v) => `, ${v}`).join("")}
       )
       RETURNING id;
     `);
@@ -94,6 +96,8 @@ router.post("/api/configs", async (req, res) => {
       data: { id: newConfigId }
     });
   } catch (err: any) {
+    const pgMsg = pgErrorMessage(err, { serviceLabel: req.targetService?.label ?? "ATS" });
+    if (pgMsg) return res.status(409).json({ code: "DB_CONSTRAINT", error: pgMsg });
     res.status(500).json({ error: err.message });
   }
 });

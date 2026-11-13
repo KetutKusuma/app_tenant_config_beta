@@ -1,3 +1,4 @@
+import { extraInsert, liveWhere } from "../configRows";
 import { randomUUID } from "crypto";
 import express from "express";
 import fs from "fs";
@@ -51,7 +52,7 @@ router.get("/api/sync/status", async (req, res) => {
     const cfgRes = await req.targetDb!.query(`
       SELECT id, group_id, ${D.typeCol} AS config_type, value, updated_at, updated_at::text AS version_token
       FROM ${D.table}
-      WHERE ${isGlobal ? "tenant_id IS NULL" : `tenant_id = ${esc(tenantId)}`} AND deleted_at IS NULL
+      WHERE ${isGlobal ? "tenant_id IS NULL" : `tenant_id = ${esc(tenantId)}`} AND ${liveWhere(D)}
       ORDER BY ${D.typeCol} ASC;
     `);
     const linkRes = await auditDb.query(`
@@ -302,9 +303,10 @@ router.post("/api/sync/apply", async (req, res) => {
         } else if (createIfMissing) {
           const newId = randomUUID();
           const cleanGroup = groupId ? String(groupId).trim() : null;
+          const ex = extraInsert(D, undefined);
           await req.targetDb!.query(`
             INSERT INTO ${D.table}
-            (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at)
+            (id, tenant_id, group_id, ${D.typeCol}, ${D.hasPath ? "path, " : ""}value, is_default, created_at, updated_at${ex.cols.map((c) => `, ${c}`).join("")})
             VALUES (
               ${esc(newId)},
               ${isGlobal ? "NULL" : esc(tenantId)},
@@ -313,7 +315,7 @@ router.post("/api/sync/apply", async (req, res) => {
               ${D.hasPath ? esc(configType.toLowerCase().replace(/_/g, "-")) + "," : ""}
               ${esc(JSON.stringify(parsed))}::jsonb,
               ${isGlobal ? "true" : "false"},
-              NOW(), NOW()
+              NOW(), NOW()${ex.vals.map((v) => `, ${v}`).join("")}
             );
           `);
           await snapshotBeforeChange(
