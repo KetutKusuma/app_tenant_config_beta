@@ -14,6 +14,9 @@ export const REPO_ROOT = path.resolve(here, "../../..");
 const BFF_URL = (process.env.STUDIO_BFF_URL || `http://localhost:${process.env.PORT_BFF || 4000}`).replace(/\/$/, "");
 
 export type Domain = "tenant_config" | "workflow_pipeline";
+/** Layanan/database config (header X-Target-Service); default ats */
+export type Service = "ats" | "hris" | "organization" | "auth" | "communication";
+export const SERVICES: Service[] = ["ats", "hris", "organization", "auth", "communication"];
 export interface Scope {
   env?: string;
   domain: Domain;
@@ -25,6 +28,7 @@ export interface TargetEnv {
   readonly: boolean;
   protected: boolean;
   status?: { ok: boolean; error?: string; ms?: number };
+  services?: Array<{ key: Service; label: string; dbName: string | null; available: boolean; hasWorkflow: boolean; reason?: string }>;
 }
 
 const ALLOWED_POST = new Set(["/api/auth/login", "/api/validator/check"]);
@@ -66,7 +70,7 @@ async function login(): Promise<void> {
 export async function studioRequest(
   method: "GET" | "POST",
   apiPath: string,
-  scope: { env?: string; domain?: Domain } = {},
+  scope: { env?: string; domain?: Domain; service?: Service } = {},
   body?: unknown
 ): Promise<any> {
   const pathOnly = apiPath.split("?")[0];
@@ -79,6 +83,8 @@ export async function studioRequest(
     const headers: Record<string, string> = { Cookie: cookie!, "User-Agent": "tenant-studio-mcp" };
     if (scope.domain) headers["X-Config-Domain"] = scope.domain;
     if (scope.env) headers["X-Target-Env"] = scope.env;
+    // BFF menolak POST tanpa layanan; selalu kirim (default ats)
+    headers["X-Target-Service"] = scope.service ?? "ats";
     if (body !== undefined) headers["Content-Type"] = "application/json";
 
     const res = await rawFetch(`${BFF_URL}${apiPath}`, {
