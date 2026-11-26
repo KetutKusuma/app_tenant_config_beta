@@ -1,0 +1,34 @@
+services:
+  bff:
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT_BFF: "4000"
+      STUDIO_WEB_ORIGIN: https://${APP_DOMAIN}
+      STUDIO_COOKIE_SECURE: "true"
+      STUDIO_DEFAULT_PRESET_DIR: /data/presets/stable
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./envs:/app/envs:ro
+      - ./presets:/data/presets
+    expose:
+      - "4000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - bff
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
