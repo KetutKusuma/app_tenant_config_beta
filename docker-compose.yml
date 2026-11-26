@@ -11,24 +11,6 @@ services:
       - ./.env:/app/.env:ro
       - ./envs:/app/envs:ro
       - ./presets:/data/presets
-    expose:
-      - "4000"
-
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    depends_on:
-      - bff
     ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-
-volumes:
-  caddy_data:
-  caddy_config:
+      # Hanya loopback; akses publik lewat Tailscale Funnel
+      - "127.0.0.1:4000:4000"
