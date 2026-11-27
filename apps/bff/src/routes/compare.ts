@@ -15,7 +15,7 @@ import { duplicateFinalPaths, finalPath, findPathConflicts, takenPathsWithPrefix
 import { attachConflicts, previewItems, previewSourceOnly, type CopyPreview, type PreviewItem } from "../compare/copyPreview";
 import { autoSummary, composeNote, parseReason } from "../changeSummary";
 import { discardBatchSnapshots, snapshotBeforeChange } from "../presetSync";
-import { actorName } from "../auth";
+import { actor } from "../auth";
 import type { ConfigRow } from "../compare/types";
 
 // Route: banding seluruh config satu tenant di env A dengan satu tenant di env B (baca saja),
@@ -395,7 +395,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
     if (!beforeSnapshot) warning = SNAPSHOT_WARNING;
 
     const now = new Date();
-    const author = actorName(req);
+    const author = actor(req);
     let sql: string;
     try {
       sql = buildExportSql({
@@ -404,7 +404,7 @@ router.post("/api/compare/export-sql", async (req, res) => {
         service: { label: req.targetService!.label, dbName: await serviceDbName(req, target.kind === "profile" ? target.env : PRODUCTION_MANUAL) },
         source: { env: sourceEnv, tenantCode: sourceMeta.code },
         target: { env: targetEnvLabel, tenantId: tenantIdForSql, groupId: groupInput, tenantCode: targetTenantCode },
-        author,
+        author: author.name,
         createdAt: now,
         reason,
       });
@@ -582,7 +582,7 @@ router.post("/api/compare/copy", async (req, res) => {
     }
 
     const targetGroupId = resolveGroupId(targetTenantId, targetMeta.groupId);
-    const author = actorName(req);
+    const author = actor(req);
     const from = `${sourceEnv} · ${sourceMeta.code}`;
     const shape = batchShape(parts);
 

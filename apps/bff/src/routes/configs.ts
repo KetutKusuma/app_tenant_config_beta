@@ -1,7 +1,7 @@
 import { extraInsert, pgErrorMessage } from "../configRows";
 import { randomUUID } from "crypto";
 import express from "express";
-import { actorName } from "../auth";
+import { actor } from "../auth";
 import { auditDb, esc } from "../db";
 import { scopeOf } from "../services";
 import { domainOf, staleVersionError } from "../domain";
@@ -76,7 +76,7 @@ router.post("/api/configs", async (req, res) => {
     // Catat versi 1 di history
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service)
+      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, author_id, target_env, target_service)
       VALUES (
         ${targetTenantId ? esc(targetTenantId) : "NULL"}, 
         ${cleanGroupId ? esc(cleanGroupId) : "NULL"}, 
@@ -85,7 +85,8 @@ router.post("/api/configs", async (req, res) => {
         1, 
         ${esc(JSON.stringify(jsonValue))}::jsonb, 
         'Initial creation', 
-        ${esc(actorName(req))},
+        ${esc(actor(req).name)},
+        ${esc(actor(req).id)},
         ${esc(req.targetEnv!.name)},
         ${esc(req.targetService!.key)}
       );
@@ -106,7 +107,7 @@ router.post("/api/configs", async (req, res) => {
 router.put("/api/configs/:configId", async (req, res) => {
   const { configId } = req.params;
   const { value, groupId, changeSummary, expectedVersion } = req.body;
-  const authorName = actorName(req);
+  const author = actor(req);
   const D = domainOf(req);
 
   if (!value || typeof value !== "object") {
@@ -140,7 +141,7 @@ router.put("/api/configs/:configId", async (req, res) => {
         const snap = await snapshotBeforeChange(
           currentConfig,
           composeNote(reason.value, autoSummary(currentConfig.value, value)),
-          authorName,
+          author,
           scopeOf(req)
         );
         backupVersion = snap.version;
@@ -190,7 +191,8 @@ router.delete("/api/configs/:configId", async (req, res) => {
   try {
     const { configId } = req.params;
     const { confirmationConfigType } = req.body;
-    const authorName = actorName(req);
+    const author = actor(req);
+    const authorName = author.name;
     if (!assertWritable(req, res)) return;
     const D = domainOf(req);
 
@@ -223,7 +225,7 @@ router.delete("/api/configs/:configId", async (req, res) => {
 
     await auditDb.query(`
       INSERT INTO tenant_studio.tenant_config_histories 
-      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service)
+      (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, author_id, target_env, target_service)
       VALUES (
         ${currentConfig.tenant_id ? esc(currentConfig.tenant_id) : "NULL"}, 
         ${currentConfig.group_id ? esc(currentConfig.group_id) : "NULL"}, 
@@ -233,6 +235,7 @@ router.delete("/api/configs/:configId", async (req, res) => {
         ${esc(JSON.stringify(currentConfig.value || {}))}::jsonb, 
         ${esc(`DELETED: Konfigurasi ${currentConfig.config_type} dihapus oleh ${authorName}`)}, 
         ${esc(authorName)},
+        ${esc(author.id)},
         ${esc(req.targetEnv!.name)},
         ${esc(req.targetService!.key)}
       );
@@ -270,10 +273,11 @@ router.get("/api/configs/:configId/histories", async (req, res) => {
     const { configId } = req.params;
     // batch_*: diisi bila entri dibuat oleh Salin (label "Salin · <env sumber> · <kode tenant sumber>")
     const histRes = await auditDb.query(`
-      SELECT h.id, h.version, h.group_id, h.config_value, h.change_summary, h.author_name, h.created_at,
+      SELECT h.id, h.version, h.group_id, h.config_value, h.change_summary, h.author_name, h.created_at, u.email AS author_email,
         h.batch_id, b.kind AS batch_kind, b.source_env AS batch_source_env, b.source_tenant_code AS batch_source_tenant_code
       FROM tenant_studio.tenant_config_histories h
       LEFT JOIN tenant_studio.config_change_batches b ON b.id = h.batch_id
+      LEFT JOIN tenant_studio.studio_users u ON u.id = h.author_id
       WHERE h.core_config_id = ${esc(configId)} AND h.target_env = ${esc(req.targetEnv!.name)} AND h.target_service = ${esc(req.targetService!.key)}
       ORDER BY h.version DESC;
     `);

@@ -129,8 +129,14 @@ export function requireAdmin(req: express.Request, res: express.Response, next: 
 }
 
 /** Nama yang dicatat di history (author_name) — selalu dari user login, bukan dari body request */
+export interface Actor { id: string | null; name: string }
+
+export function actor(req: express.Request, fallbackName = "Studio User", suffix = ""): Actor {
+  return { id: req.user?.id ?? null, name: (req.user?.displayName ?? fallbackName) + suffix };
+}
+
 export function actorName(req: express.Request, fallback = "Studio User"): string {
-  return req.user ? req.user.displayName : fallback;
+  return actor(req, fallback).name;
 }
 
 /**

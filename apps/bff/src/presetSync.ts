@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { auditDb, esc } from "./db";
 import type { StudioScope } from "./services";
+import type { Actor } from "./auth";
 
 // Helper Sync Center: perbandingan JSON kanonik, file preset, snapshot riwayat, preset_links.
 
@@ -49,7 +50,7 @@ export function writeJsonFileWithBackup(filePath: string, value: any): { existed
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf8");
   return { existed };
 }
-export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: string, scope: StudioScope, batchId: string | null = null): Promise<{ historyId: string; version: number }> {
+export async function snapshotBeforeChange(row: any, summary: string | ((version: number) => string), author: Actor, scope: StudioScope, batchId: string | null = null): Promise<{ historyId: string; version: number }> {
   const v = await auditDb.query(`
     SELECT COALESCE(MAX(version), 0) AS last_version
     FROM tenant_studio.tenant_config_histories
@@ -60,7 +61,7 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
   const summaryText = (typeof summary === "function" ? summary(nextVersion) : summary).slice(0, 500);
   const ins = await auditDb.query(`
     INSERT INTO tenant_studio.tenant_config_histories
-    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, target_env, target_service${batchId ? ", batch_id" : ""})
+    (tenant_id, group_id, config_type, core_config_id, version, config_value, change_summary, author_name, author_id, target_env, target_service${batchId ? ", batch_id" : ""})
     VALUES (
       ${row.tenant_id ? esc(row.tenant_id) : "NULL"},
       ${row.group_id ? esc(row.group_id) : "NULL"},
@@ -69,7 +70,8 @@ export async function snapshotBeforeChange(row: any, summary: string | ((version
       ${nextVersion},
       ${esc(JSON.stringify(row.value || {}))}::jsonb,
       ${esc(summaryText)},
-      ${esc(author)},
+      ${esc(author.name)},
+      ${esc(author.id)},
       ${esc(scope.env)},
       ${esc(scope.service)}${batchId ? `,\n      ${esc(batchId)}` : ""}
     )

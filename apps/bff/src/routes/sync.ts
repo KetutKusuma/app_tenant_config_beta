@@ -3,7 +3,7 @@ import { randomUUID } from "crypto";
 import express from "express";
 import fs from "fs";
 import path from "path";
-import { actorName } from "../auth";
+import { actor } from "../auth";
 import { auditDb, esc } from "../db";
 import { domainOf, foreignPresetDir, presetDirFor, presetDirMissing } from "../domain";
 import { assertWritable } from "../envs";
@@ -163,7 +163,7 @@ router.put("/api/sync/link", async (req, res) => {
 router.post("/api/sync/apply", async (req, res) => {
   try {
     const { tenantId, direction, items, createIfMissing = false, groupId, reason: rawReason } = req.body;
-    const authorName = `${actorName(req, "Preset Sync")} (Sync Center)`;
+    const author = actor(req, "Preset Sync", " (Sync Center)");
     if (direction !== "push" && direction !== "pull") {
       return res.status(400).json({ error: "direction harus 'push' atau 'pull'" });
     }
@@ -280,7 +280,7 @@ router.post("/api/sync/apply", async (req, res) => {
                 const snap = await snapshotBeforeChange(
                   row,
                   composeNote(reason, `Push dari file ${path.basename(filePath)}`, autoSummary(row.value, parsed)),
-                  authorName,
+                  author,
                   scopeOf(req)
                 );
                 backedUp = true;
@@ -332,7 +332,7 @@ router.post("/api/sync/apply", async (req, res) => {
           await snapshotBeforeChange(
             { id: newId, tenant_id: isGlobal ? null : tenantId, group_id: cleanGroup, config_type: configType, value: parsed },
             composeNote(reason, `Dibuat dari file ${path.basename(filePath)}`, "Config baru"),
-            authorName,
+            author,
             scopeOf(req)
           );
           const createdRow = await req.targetDb!.query(`

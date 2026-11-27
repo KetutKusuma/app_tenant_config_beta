@@ -2,7 +2,7 @@ import { liveWhere } from "../configRows";
 import express from "express";
 import fs from "fs";
 import path from "path";
-import { actorName } from "../auth";
+import { actor } from "../auth";
 import { auditDb, esc } from "../db";
 import { scopeOf } from "../services";
 import { domainOf, foreignPresetDir, presetDirFor, presetDirMissing, staleVersionError } from "../domain";
@@ -342,7 +342,7 @@ router.post("/api/references/export-skill", (req, res) => {
 router.post("/api/references/sync-single", async (req, res) => {
   try {
     const { configId, content, sourceFilename, expectedVersion, reason: rawReason } = req.body;
-    const authorName = actorName(req, "Preset Sync");
+    const author = actor(req, "Preset Sync");
     if (!assertWritable(req, res)) return;
     const D = domainOf(req);
     if (!configId) {
@@ -380,7 +380,7 @@ router.post("/api/references/sync-single", async (req, res) => {
             `Sync dari preset ${sourceFilename || "file lokal"}`,
             autoSummary(currentConfig.value, jsonParsed)
           ),
-          authorName,
+          author,
           scopeOf(req)
         );
         backupVersion = snap.version;
