@@ -481,7 +481,6 @@ export function useCoreActions(s: StudioState) {
           value: parsed,
           groupId: currentGroupId || null,
           changeSummary: summary,
-          authorName: "Studio Developer",
           expectedVersion: configVersion
         })
       });

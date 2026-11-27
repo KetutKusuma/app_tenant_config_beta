@@ -3,13 +3,14 @@ import { useStudio } from "../../studio/StudioContext";
 import type { CopyDialogDone } from "../../types";
 import { ChangePasswordForm } from "../AuthGate";
 import { ContextMenu, PromptDialog, TypeToConfirmDialog } from "../ui";
+import { ManageAccountsModal } from "./ManageAccountsModal";
 import { CopyConfigDialog } from "./CopyConfigDialog";
 
 export function GlobalOverlays() {
   const {
     activeConfigType, copyDialog, ctxMenu, currentGroupId, envConfirm, handleDeleteTenant, isDirty, loadConfig,
     promptDialog, selectedConfigId, selectedTenant, setConfigs, setCopyDialog, setCtxMenu, setEnvConfirm,
-    setPromptDialog, setShowChangePassword, setStatusMessage, setTenantToDelete, setUser, showChangePassword,
+    setPromptDialog, setShowChangePassword, showManageAccounts, setShowManageAccounts, setStatusMessage, setTenantToDelete, setUser, showChangePassword,
     statusMessage, targetEnvName, targetEnvs, tenantToDelete, user
   } = useStudio();
 
@@ -84,6 +85,10 @@ export function GlobalOverlays() {
             />
           </div>
         </div>
+      )}
+
+      {showManageAccounts && user.role === "admin" && (
+        <ManageAccountsModal currentUserId={user.id} onClose={() => setShowManageAccounts(false)} />
       )}
 
       {tenantToDelete && (

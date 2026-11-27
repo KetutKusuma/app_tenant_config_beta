@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
+import { api } from "../lib/api";
 import { Layers, Lock, LogIn, KeyRound, Eye, EyeOff } from "lucide-react";
 
 // Gerbang login Tenant Studio: cek sesi (/api/auth/me), tampilkan form login atau
@@ -9,6 +10,7 @@ export interface StudioUser {
   email: string;
   displayName: string;
   mustChangePassword: boolean;
+  role: "admin" | "user";
   preferences: {
     presetDirTenant: string | null;
     presetDirWorkflow: string | null;
@@ -228,6 +230,26 @@ export function AuthGate({
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
   }, []);
+
+  // Cek sesi ringan saat tab kembali fokus (akun bisa dinonaktifkan admin); 401 memicu UNAUTHORIZED_EVENT lewat api()
+  const lastCheck = useRef(0);
+  const loggedIn = !!user;
+  useEffect(() => {
+    if (!loggedIn) return;
+    const check = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastCheck.current < 30_000) return;
+      lastCheck.current = now;
+      void api("/api/auth/me").catch(() => {});
+    };
+    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", check);
+    return () => {
+      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", check);
+    };
+  }, [loggedIn]);
 
   const onLogout = useCallback(async () => {
     await logout();

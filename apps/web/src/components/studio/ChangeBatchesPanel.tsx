@@ -197,7 +197,7 @@ export function ChangeBatchesPanel({ left, right, onClose }: { left: CompareSide
               )}
               {b.error && <div className="text-[11px] text-rose-300 truncate" title={b.error}>{b.error}</div>}
               <div className="flex items-center gap-1 text-[10px] text-slate-500">
-                <span className="truncate flex-1" title={b.author_name ?? ""}>{b.author_name ?? "-"}</span>
+                <span className="truncate flex-1" title={b.author_email ?? b.author_name ?? ""}>{b.author_name ?? "-"}</span>
                 {b.kind === "export_sql" && (
                   <>
                     <button className={GHOST} disabled={busyId === b.id} onClick={() => void downloadSql(b)}>Unduh SQL lagi</button>

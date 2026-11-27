@@ -236,7 +236,6 @@ export function useCompareActions(ctx: StudioState & CoreActions) {
           value: parsed,
           groupId: compareTenant.groupId || null,
           changeSummary: summary,
-          authorName: "Studio Developer",
           expectedVersion: compareConfigVersion
         })
       });

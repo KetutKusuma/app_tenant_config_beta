@@ -47,7 +47,7 @@ export function HistoryPanel() {
                   )}
                   <p className="text-slate-300 text-[10px]">{h.change_summary}</p>
                   <div className="flex items-center justify-between text-[9px] text-slate-500 pt-1 border-t border-slate-900">
-                    <span>{h.author_name}</span>
+                    <span title={h.author_email ?? undefined}>{h.author_name}</span>
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => handleCompareHistory(h)}

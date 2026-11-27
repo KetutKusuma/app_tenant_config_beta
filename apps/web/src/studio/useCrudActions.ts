@@ -299,8 +299,7 @@ export function useCrudActions(ctx: StudioState & CoreActions) {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          confirmationConfigType: deleteInputConfirmation.trim(),
-          authorName: "Studio User"
+          confirmationConfigType: deleteInputConfirmation.trim()
         })
       });
 

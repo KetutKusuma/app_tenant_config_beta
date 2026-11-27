@@ -190,7 +190,6 @@ export function useSyncCenter(ctx: StudioState & CoreActions) {
           direction,
           items: targetItems,
           groupId: currentGroupId || selectedTenant.groupId,
-          authorName: "Sync Center",
           ...(direction === "push" ? { reason } : {})
         })
       });

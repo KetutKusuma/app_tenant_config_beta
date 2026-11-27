@@ -1,5 +1,5 @@
 import { UNAUTHORIZED_EVENT } from "../components/AuthGate";
-import type { ConfigDomain, ServiceKey } from "../types";
+import type { AdminUserRow, ConfigDomain, ServiceKey, UserEventRow } from "../types";
 
 // Domain konfigurasi aktif: menentukan tabel DB yang dipakai BFF (lewat header X-Config-Domain)
 let activeDomain: ConfigDomain = "tenant_config";
@@ -47,3 +47,27 @@ export const api = async (input: string, init: RequestInit = {}, confirmEnv?: st
   }
   return res;
 };
+
+// --- Admin: kelola akun ---
+const adminJson = async <T>(res: Response): Promise<T> => {
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `Permintaan gagal (${res.status})`);
+  return json as T;
+};
+const jsonInit = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body)
+});
+
+export const listUsers = async () => (await adminJson<{ data: AdminUserRow[] }>(await api("/api/admin/users"))).data;
+export const createUser = async (body: { email: string; displayName?: string; role?: "admin" | "user"; password?: string }) =>
+  adminJson<{ user: AdminUserRow; tempPassword: string }>(await api("/api/admin/users", jsonInit("POST", body)));
+export const updateUser = async (id: string, body: { displayName?: string; role?: "admin" | "user"; isActive?: boolean }) =>
+  adminJson<{ user: AdminUserRow }>(await api(`/api/admin/users/${id}`, jsonInit("PATCH", body)));
+export const resetUserPassword = async (id: string, password?: string) =>
+  adminJson<{ tempPassword: string }>(await api(`/api/admin/users/${id}/reset-password`, jsonInit("POST", password ? { password } : {})));
+export const listUserEvents = async (before?: string) =>
+  adminJson<{ data: UserEventRow[]; nextBefore: string | null }>(
+    await api(`/api/admin/user-events?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`)
+  );

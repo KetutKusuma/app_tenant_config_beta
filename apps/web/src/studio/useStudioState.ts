@@ -103,6 +103,7 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
   const [presetDirPath, setPresetDirPath] = useState<string>(() => presetDirPref(user.preferences, targetServiceKey, "tenant_config"));
   const [presetInputPath, setPresetInputPath] = useState<string>(() => presetDirPref(user.preferences, targetServiceKey, "tenant_config"));
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [showManageAccounts, setShowManageAccounts] = useState(false);
   const [references, setReferences] = useState<ReferenceItem[]>([]);
   const [showRefDrawer, setShowRefDrawer] = useState(false);
 
@@ -174,7 +175,7 @@ export function useStudioState({ user, setUser, onLogout }: AppProps) {
     compareModalTenantId, setCompareModalTenantId, compareModalConfigType, setCompareModalConfigType,
     compareModalMode, setCompareModalMode, jsonDeltaFormat, setJsonDeltaFormat, jsonDeltaDirection,
     setJsonDeltaDirection, deltaCopied, setDeltaCopied, presetDirPath, setPresetDirPath, presetInputPath,
-    setPresetInputPath, showChangePassword, setShowChangePassword, references, setReferences, showRefDrawer,
+    setPresetInputPath, showChangePassword, setShowChangePassword, showManageAccounts, setShowManageAccounts, references, setReferences, showRefDrawer,
     setShowRefDrawer, validationIssues, setValidationIssues, showValidationPanel, setShowValidationPanel,
     histories, setHistories, showHistoryModal, setShowHistoryModal, showDocsModal, setShowDocsModal,
     statusMessage, setStatusMessage, copiedNotification, setCopiedNotification, copiedTenantId,

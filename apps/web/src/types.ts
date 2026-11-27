@@ -41,6 +41,7 @@ export interface HistoryItem {
   config_value: any;
   change_summary: string;
   author_name: string;
+  author_email?: string | null;
   created_at: string;
   batch_id?: string | null;
   batch_kind?: "salin" | "export_sql" | null;
@@ -73,6 +74,7 @@ export interface ChangeBatch {
   sql_text?: string | null;
   before_snapshot?: unknown;
   author_name: string | null;
+  author_email?: string | null;
   created_at: string;
   finished_at: string | null;
 }
@@ -247,4 +249,25 @@ export interface CopyBatchResult {
     skipped: { same: string[]; targetOnly: string[]; duplicates: string[]; unselected: string[] };
   }>;
   warnings: string[];
+}
+
+export interface AdminUserRow {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "admin" | "user";
+  isActive: boolean;
+  mustChangePassword: boolean;
+  lastLoginAt: string | null;
+  createdAt: string;
+  createdByName: string | null;
+}
+
+export interface UserEventRow {
+  id: string;
+  actorName: string;
+  targetEmail: string;
+  action: "create" | "update" | "deactivate" | "activate" | "reset_password";
+  details: Record<string, any>;
+  createdAt: string;
 }

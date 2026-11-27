@@ -13,7 +13,7 @@ export function StudioHeader() {
     handleCompareWithDb, handleCompareWithOriginal, handleSave, handleSwitchTargetEnv, handleValidate,
     handleValidateAndSave, histories, isSaving, isSplitScreen, isTargetReadonly, jsonContent, onLogout,
     openCompareTenantModal, setShowEnvCompare, openEditTenantModal, openSavePresetModal, openSyncCenter, originalContent,
-    presetDirPath, references, selectedConfigId, selectedTenant, setIsSplitScreen, setShowChangePassword,
+    presetDirPath, references, selectedConfigId, selectedTenant, setIsSplitScreen, setShowChangePassword, setShowManageAccounts,
     setShowDocsModal, setShowHistoryModal, setShowRefDrawer, showHistoryModal, targetEnvName, targetEnvs,
     user
   } = useStudio();
@@ -318,6 +318,14 @@ export function StudioHeader() {
                 icon: <KeyRound className="w-3.5 h-3.5" />,
                 onSelect: () => setShowChangePassword(true)
               },
+              ...(user.role === "admin"
+                ? [{
+                    key: "accounts",
+                    label: "Kelola Akun",
+                    icon: <Users className="w-3.5 h-3.5" />,
+                    onSelect: () => setShowManageAccounts(true)
+                  }]
+                : []),
               "divider",
               {
                 key: "logout",
