@@ -20,7 +20,8 @@ login, dan `/api/validator/check` sebelum request dikirim. Usulan diterapkan use
 
    Pakai akun khusus MCP dengan role `user` (bukan akun admin). Admin membuatnya lewat menu
    **Kelola Akun** di Studio; setelah itu isi `STUDIO_MCP_EMAIL`/`STUDIO_MCP_PASSWORD` dengan akun itu
-   dan login sekali di Studio untuk mengganti password sementara.
+   dan login sekali di Studio untuk mengganti password sementara. Setelah password diganti, isi
+   `STUDIO_MCP_PASSWORD` di `.env` dengan password BARU (bukan yang sementara).
    Akun harus sudah pernah login di Studio dan tidak dalam status "wajib ganti password".
 
 2. Jalankan BFF: `pnpm dev:bff` (atau `pnpm dev`).

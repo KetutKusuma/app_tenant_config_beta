@@ -241,7 +241,11 @@ export function AuthGate({
       const now = Date.now();
       if (now - lastCheck.current < 30_000) return;
       lastCheck.current = now;
-      void api("/api/auth/me").catch(() => {});
+      api("/api/auth/me")
+        .then(async (res) => {
+          if (res.ok) setUser((await res.json()).user);
+        })
+        .catch(() => {});
     };
     document.addEventListener("visibilitychange", check);
     window.addEventListener("focus", check);

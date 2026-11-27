@@ -30,12 +30,12 @@ function eventLine(e: UserEventRow): string {
   return `${s} · ${fmtTime(e.createdAt)}`;
 }
 
-function Overlay({ children, onClose, z = "z-[60]" }: { children: ReactNode; onClose: () => void; z?: string }) {
+function Overlay({ children, onClose, z = "z-[60]" }: { children: ReactNode; onClose?: () => void; z?: string }) {
   return (
     <div
       className={`fixed inset-0 ${z} bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4`}
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-      onKeyDown={(e) => e.key === "Escape" && onClose()}
+      onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}
+      onKeyDown={(e) => e.key === "Escape" && onClose?.()}
     >
       {children}
     </div>
@@ -58,7 +58,7 @@ function SecretDialog({ email, password, onClose }: { email: string; password: s
     }
   };
   return (
-    <Overlay onClose={onClose} z="z-[70]">
+    <Overlay z="z-[70]">
       <div className="w-full max-w-sm rounded-xl bg-slate-900 border border-slate-800 shadow-2xl p-5 space-y-4">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">Password sementara</h3>
@@ -136,8 +136,16 @@ function UserFormDialog({
   const [busy, setBusy] = useState(false);
 
   const generate = () => {
-    const bytes = crypto.getRandomValues(new Uint8Array(12));
-    setPassword(Array.from(bytes, (b) => "abcdefghjkmnpqrstuvwxyz23456789"[b % 31]).join(""));
+    // 16 karakter, rejection sampling (tanpa bias), alfabet sama dengan server (tanpa 0 O I l 1)
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    const limit = 256 - (256 % alphabet.length);
+    let out = "";
+    while (out.length < 16) {
+      for (const b of crypto.getRandomValues(new Uint8Array(32))) {
+        if (b < limit && out.length < 16) out += alphabet[b % alphabet.length];
+      }
+    }
+    setPassword(out);
   };
 
   const submit = async (e: FormEvent) => {
