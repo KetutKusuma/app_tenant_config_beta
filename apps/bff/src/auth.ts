@@ -45,7 +45,7 @@ declare global {
 type Esc = (val: any) => string;
 
 // Format hash: scrypt$<salt hex>$<hash hex>
-async function hashPassword(password: string): Promise<string> {
+export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
   const hash = await scrypt(password, salt, 64);
   return `scrypt$${salt.toString("hex")}$${hash.toString("hex")}`;
@@ -118,6 +118,14 @@ function toStudioUser(row: any): StudioUser {
       presetDirs: row.preset_dirs && typeof row.preset_dirs === "object" ? row.preset_dirs : {}
     }
   };
+}
+
+/** Middleware: hanya admin yang boleh lanjut. Dipasang setelah middleware session (req.user sudah terisi). */
+export function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ code: "FORBIDDEN", error: "Hanya admin yang boleh mengakses fitur ini." });
+  }
+  next();
 }
 
 /** Nama yang dicatat di history (author_name) — selalu dari user login, bukan dari body request */
