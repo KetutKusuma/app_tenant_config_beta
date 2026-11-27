@@ -18,6 +18,9 @@ login, dan `/api/validator/check` sebelum request dikirim. Usulan diterapkan use
    # STUDIO_BFF_URL=http://localhost:4000
    ```
 
+   Pakai akun khusus MCP dengan role `user` (bukan akun admin). Admin membuatnya lewat menu
+   **Kelola Akun** di Studio; setelah itu isi `STUDIO_MCP_EMAIL`/`STUDIO_MCP_PASSWORD` dengan akun itu
+   dan login sekali di Studio untuk mengganti password sementara.
    Akun harus sudah pernah login di Studio dan tidak dalam status "wajib ganti password".
 
 2. Jalankan BFF: `pnpm dev:bff` (atau `pnpm dev`).
