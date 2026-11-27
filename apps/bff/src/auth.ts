@@ -20,6 +20,7 @@ export interface StudioUser {
   email: string;
   displayName: string;
   mustChangePassword: boolean;
+  role: "admin" | "user";
   preferences: {
     presetDirTenant: string | null;
     presetDirWorkflow: string | null;
@@ -106,6 +107,7 @@ function toStudioUser(row: any): StudioUser {
     email: row.email,
     displayName: row.display_name || row.email,
     mustChangePassword: !!row.must_change_password,
+    role: row.role === "admin" ? "admin" : "user",
     preferences: {
       presetDirTenant: row.preset_dir_tenant || null,
       presetDirWorkflow: row.preset_dir_workflow || null,
@@ -161,6 +163,21 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
     ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS last_target_env text;
     ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS last_target_service text;
     ALTER TABLE tenant_studio.studio_user_preferences ADD COLUMN IF NOT EXISTS preset_dirs jsonb NOT NULL DEFAULT '{}'::jsonb;
+    ALTER TABLE tenant_studio.studio_users
+      ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user'
+        CHECK (role IN ('admin','user')),
+      ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES tenant_studio.studio_users(id);
+    CREATE TABLE IF NOT EXISTS tenant_studio.studio_user_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      actor_user_id uuid REFERENCES tenant_studio.studio_users(id),
+      actor_name text NOT NULL,
+      target_user_id uuid REFERENCES tenant_studio.studio_users(id),
+      target_email text NOT NULL,
+      action text NOT NULL,
+      details jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_studio_user_events_created ON tenant_studio.studio_user_events (created_at DESC);
   `);
 
   // User default dibuat hanya jika tabel user masih kosong
@@ -173,12 +190,21 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
     } else {
       const hash = await hashPassword(password);
       await auditDb.query(`
-        INSERT INTO tenant_studio.studio_users (email, password_hash, display_name, must_change_password)
-        VALUES (${esc(email)}, ${esc(hash)}, ${esc(email.split("@")[0])}, true);
+        INSERT INTO tenant_studio.studio_users (email, password_hash, display_name, must_change_password, role)
+        VALUES (${esc(email)}, ${esc(hash)}, ${esc(email.split("@")[0])}, true, 'admin');
       `);
       console.log(`👤 User default Studio dibuat: ${email} (wajib ganti password saat login pertama)`);
     }
   }
+
+  // Bootstrap admin: bila belum ada admin, pakai STUDIO_DEFAULT_EMAIL, atau user aktif tertua
+  await auditDb.query(`
+    UPDATE tenant_studio.studio_users SET role = 'admin'
+    WHERE id = COALESCE(
+            (SELECT id FROM tenant_studio.studio_users WHERE email = ${esc((process.env.STUDIO_DEFAULT_EMAIL || "").trim().toLowerCase())} AND is_active),
+            (SELECT id FROM tenant_studio.studio_users WHERE is_active ORDER BY created_at LIMIT 1))
+      AND NOT EXISTS (SELECT 1 FROM tenant_studio.studio_users WHERE role = 'admin');
+  `);
 
   // preset_links per user: tambah user_id, isi baris lama ke user tertua, lalu ganti primary key
   await auditDb.query(`ALTER TABLE tenant_studio.preset_links ADD COLUMN IF NOT EXISTS user_id uuid;`);
@@ -204,7 +230,7 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
 
 async function loadUserById(auditDb: Pool, esc: Esc, userId: string): Promise<StudioUser | null> {
   const r = await auditDb.query(`
-    SELECT u.id, u.email, u.display_name, u.must_change_password,
+    SELECT u.id, u.email, u.display_name, u.must_change_password, u.role,
            p.preset_dir_tenant, p.preset_dir_workflow, p.last_domain, p.last_tenant_id, p.last_target_env,
            p.last_target_service, p.preset_dirs
     FROM tenant_studio.studio_users u
