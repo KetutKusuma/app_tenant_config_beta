@@ -3,6 +3,7 @@ import type { StudioUser } from "../components/AuthGate";
 import { api, getActiveDomain, getActiveService, getActiveTargetEnv, setActiveDomain, setActiveService, setActiveTargetEnv, setEnvConfirmHandler } from "../lib/api";
 import { presetDirPref, presetDirPrefPatch } from "../lib/presetPrefs";
 import { type ConfigDomain, type ConfigItem, DOMAIN_LABEL, SERVICE_LABEL, type ServiceKey, serviceInEnv, type TargetEnvInfo, type Tenant } from "../types";
+import { pickConfigAfterSwitch } from "./compareEdit";
 import type { StudioState } from "./useStudioState";
 
 // Aksi inti: muat tenant/config, ganti env/domain, validasi, simpan, shortcut & guard perubahan.
@@ -47,7 +48,7 @@ export function useCoreActions(s: StudioState) {
   // sebelumnya (tenant_id dev) tetap tampil dan terpakai untuk membaca DB env lain.
   // selectCode boleh kode penuh (IDM_PROD) atau kode dasar (IDM): saat pindah env, tenant yang sama
   // dicari lewat kode dasar karena tenant_id & client_code-nya berbeda di tiap env.
-  const fetchTenants = async (selectCode?: string) => {
+  const fetchTenants = async (selectCode?: string, preferType?: string | null) => {
     try {
       const res = await api("/api/tenants");
       const json = await res.json();
@@ -67,7 +68,7 @@ export function useCoreActions(s: StudioState) {
         || list.find(t => t.tenantId === user.preferences.lastTenantId)
         || byCode("IDM")
         || list[0];
-      selectTenant(target);
+      await selectTenant(target, preferType);
     } catch (err: any) {
       console.error("Gagal mengambil tenant list:", err);
       setTenants([]);
@@ -146,7 +147,10 @@ export function useCoreActions(s: StudioState) {
   };
 
   // 2. Select Tenant & Fetch configs
-  const selectTenant = async (tenant: Tenant) => {
+  // Set true bila pesan peringatan "tipe tidak ada" tampil; penangan pindah tidak boleh menimpanya.
+  const switchWarnedRef = useRef(false);
+  const selectTenant = async (tenant: Tenant, preferType?: string | null) => {
+    switchWarnedRef.current = false;
     setSelectedTenant(tenant);
     if (user.preferences.lastTenantId !== tenant.tenantId) savePreferences({ lastTenantId: tenant.tenantId });
     setCurrentGroupId(tenant.groupId || "");
@@ -155,9 +159,14 @@ export function useCoreActions(s: StudioState) {
       const json = await res.json();
       if (json.data) {
         setConfigs(json.data);
-        const candidateStable = json.data.find((c: ConfigItem) => c.config_type === "CANDIDATE_STABLE") || json.data[0];
-        if (candidateStable) {
-          loadConfig(candidateStable.id, candidateStable.config_type, candidateStable.group_id);
+        const { config: picked, missingType } = pickConfigAfterSwitch<ConfigItem>(json.data, preferType);
+        if (picked) {
+          if (missingType) {
+            switchWarnedRef.current = true;
+            setStatusMessage(`⚠️ ${missingType} tidak ada di ${tenant.name}, membuka ${picked.config_type}.`);
+            setTimeout(() => setStatusMessage(null), 4000);
+          }
+          loadConfig(picked.id, picked.config_type, picked.group_id);
         } else {
           setJsonContent("{}");
           setSelectedConfigId(null);
@@ -231,6 +240,7 @@ export function useCoreActions(s: StudioState) {
     if (next === targetServiceKey) return;
     if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah layanan dan buang perubahan tersebut?")) return;
     const info = serviceInEnv(targetEnvs.find(e => e.name === targetEnvName), next);
+    const keepType = activeConfigType;
     setActiveService(next);
     setTargetServiceKey(next);
     resetWorkspace();
@@ -244,7 +254,8 @@ export function useCoreActions(s: StudioState) {
     }
     fetchReferences(presetDirPref(user.preferences, next, domain));
     // Tenant yang sama dipertahankan bila ada di layanan baru (tenant_id dipakai bersama lintas layanan)
-    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code, keepType);
+    if (switchWarnedRef.current) return;
     setStatusMessage(`🧩 Layanan aktif: ${SERVICE_LABEL[next]}${info?.dbName ? ` (${info.dbName})` : ""}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
@@ -252,6 +263,7 @@ export function useCoreActions(s: StudioState) {
   const handleSwitchTargetEnv = async (next: string) => {
     if (next === targetEnvName) return;
     if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah env dan buang perubahan tersebut?")) return;
+    const keepType = activeConfigType;
     setActiveTargetEnv(next);
     setTargetEnvName(next);
     resetWorkspace();
@@ -260,8 +272,8 @@ export function useCoreActions(s: StudioState) {
     const nextSvc = serviceInEnv(env, getActiveService());
     const fellBack = getActiveService() !== "ats" && !!env?.services && !nextSvc?.available && !nextSvc?.unreachable;
     if (fellBack) fallBackToAts(env!.label);
-    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
-    if (fellBack) return;
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code, keepType);
+    if (fellBack || switchWarnedRef.current) return;
     setStatusMessage(`🌐 Target env: ${env?.label || next}${env?.readonly ? " (read-only)" : ""}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
@@ -269,6 +281,7 @@ export function useCoreActions(s: StudioState) {
   const handleSwitchDomain = async (next: ConfigDomain) => {
     if (next === configDomain) return;
     if (jsonContent !== originalContent && !confirm("Ada perubahan yang belum disimpan. Pindah domain dan buang perubahan tersebut?")) return;
+    const keepType = activeConfigType;
     setActiveDomain(next);
     setConfigDomain(next);
     resetWorkspace();
@@ -276,7 +289,8 @@ export function useCoreActions(s: StudioState) {
     const nextDir = presetDirPref(user.preferences, getActiveService(), next);
     fetchReferences(nextDir);
     // Muat ulang daftar tenant (jumlah config per domain) dan pertahankan tenant yang sedang dipilih
-    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code);
+    await fetchTenants(selectedTenant?.baseCode || selectedTenant?.code, keepType);
+    if (switchWarnedRef.current) return;
     setStatusMessage(`🔀 Domain aktif: ${DOMAIN_LABEL[next]}`);
     setTimeout(() => setStatusMessage(null), 3000);
   };
@@ -522,7 +536,7 @@ export function useCoreActions(s: StudioState) {
   const confirmDiscard = (action: string) =>
     !isDirty || confirm(`Ada perubahan yang belum disimpan. ${action} dan buang perubahan tersebut?`);
   const openTenant = (t: Tenant) => {
-    if (confirmDiscard("Pindah tenant")) selectTenant(t);
+    if (confirmDiscard("Pindah tenant")) selectTenant(t, activeConfigType);
   };
   const openConfig = (c: ConfigItem) => {
     if (confirmDiscard("Buka konfigurasi lain")) loadConfig(c.id, c.config_type, c.group_id);
