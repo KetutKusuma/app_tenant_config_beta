@@ -3,7 +3,7 @@ import { ENV_DOT } from "../../types";
 
 // Judul satu sisi diff: titik warna env + nama env, tenant, config_type. Teks dipotong, detail lengkap di title.
 export function PaneTitle({
-  envLabel, envColor, tenantName, tenantCode, configType, icon, muted
+  envLabel, envColor, tenantName, tenantCode, configType, icon, muted, actions
 }: {
   envLabel: string;
   envColor: string;
@@ -12,6 +12,8 @@ export function PaneTitle({
   configType?: string;
   icon?: ReactNode;
   muted?: string;
+  /** Elemen tambahan di ujung kanan judul (mis. tombol Simpan di layar Bandingkan) */
+  actions?: ReactNode;
 }) {
   const full = [envLabel, tenantName, tenantCode, configType, muted].filter(Boolean).join(" · ");
   return (
@@ -22,6 +24,7 @@ export function PaneTitle({
       {tenantCode && <span className="font-mono text-[10px] text-slate-500 truncate">{tenantCode}</span>}
       {configType && <span className="font-mono text-[10px] text-slate-500 truncate">{configType}</span>}
       {muted && <span className="text-[10px] text-amber-300/80 truncate">{muted}</span>}
+      {actions && <span className="ml-auto flex items-center gap-1 shrink-0">{actions}</span>}
     </div>
   );
 }

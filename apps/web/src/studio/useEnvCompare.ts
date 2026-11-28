@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import type { CompareEntry, CompareSide, CompareSummary, Tenant } from "../types";
+import { isDirty } from "./compareEdit";
 import { useStudio } from "./StudioContext";
+
+export type CompareDraftSide = "left" | "right";
+export interface CompareDrafts { left?: string; right?: string }
+const NO_DRAFTS: CompareDrafts = {};
 
 export interface EnvCompareError { message: string; side?: "kiri" | "kanan" }
 
@@ -32,6 +37,28 @@ export function useEnvCompare() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const reqId = useRef(0);
+  // Draf editan per sisi, hanya untuk config terpilih. Disimpan bersama kunci konteksnya (config + kedua sisi):
+  // kalau konteks berubah, draf langsung dianggap kosong pada render itu juga (tanpa menunggu efek), lalu dibuang.
+  // reload() sengaja tidak menyentuh draf.
+  const draftKey = `${selectedType ?? ""}|${left.env}|${left.tenantId}|${right.env}|${right.tenantId}`;
+  const [draftState, setDraftState] = useState<{ key: string; drafts: CompareDrafts }>({ key: draftKey, drafts: NO_DRAFTS });
+  const drafts = draftState.key === draftKey ? draftState.drafts : NO_DRAFTS;
+  useEffect(() => {
+    setDraftState((prev) => (prev.key === draftKey ? prev : { key: draftKey, drafts: NO_DRAFTS }));
+  }, [draftKey]);
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+  const setDraft = useCallback((side: CompareDraftSide, text: string | undefined) => {
+    // Closure usang (mis. selesai simpan setelah user pindah config): jangan timpa draf konteks yang baru
+    if (draftKey !== draftKeyRef.current) return;
+    setDraftState((prev) => {
+      const base = prev.key === draftKey ? prev.drafts : NO_DRAFTS;
+      if (base[side] === text && prev.key === draftKey) return prev;
+      const next = { ...base };
+      if (text === undefined) delete next[side]; else next[side] = text;
+      return { key: draftKey, drafts: next };
+    });
+  }, [draftKey]);
 
   const loadTenants = useCallback(async (env: string): Promise<Tenant[]> => {
     try {
@@ -146,6 +173,20 @@ export function useEnvCompare() {
   const checkDifferent = () =>
     setChecked(new Set(entries.filter((e) => e.status === "beda" || e.status === "hanya_kiri").map((e) => e.configType)));
 
+  const selectedEntry = entries.find((e) => e.configType === selectedType) ?? null;
+  // Selama reload (entries sementara kosong) baris DB belum ada: draf apa pun dianggap belum disimpan
+  const hasDirty = selectedEntry
+    ? isDirty(drafts.left, selectedEntry.left) || isDirty(drafts.right, selectedEntry.right)
+    : drafts.left !== undefined || drafts.right !== undefined;
+  // Jalankan aksi yang membuang draf; kalau ada editan belum disimpan, minta konfirmasi dulu
+  const guard = (action: () => void) => {
+    if (hasDirty) {
+      if (!confirm(`Ada editan yang belum disimpan di ${selectedEntry?.configType ?? selectedType ?? ""}. Buang editan?`)) return;
+      setDraftState((prev) => ({ key: prev.key, drafts: NO_DRAFTS }));
+    }
+    action();
+  };
+
   const visibleEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q ? entries.filter((e) => e.configType.toLowerCase().includes(q)) : entries;
@@ -155,6 +196,7 @@ export function useEnvCompare() {
     left, right, setLeft, setRight, swap, tenantsFor, tenantErrorFor, loadTenants,
     entries, summary, loading, error, reload,
     selectedType, setSelectedType, checked, toggleChecked, checkDifferent,
-    query, setQuery, visibleEntries
+    query, setQuery, visibleEntries,
+    drafts, setDraft, hasDirty, guard
   };
 }

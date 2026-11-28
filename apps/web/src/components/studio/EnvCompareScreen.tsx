@@ -1,10 +1,11 @@
-import { getActiveService } from "../../lib/api";
+import { api, getActiveService } from "../../lib/api";
 import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
 import { ArrowLeftRight, ChevronDown, ChevronUp, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defineStudioTheme, STUDIO_THEME } from "../../lib/monacoTheme";
 import { useStudio } from "../../studio/StudioContext";
-import { useEnvCompare } from "../../studio/useEnvCompare";
+import { isDirty, prettyValue, sideEditable } from "../../studio/compareEdit";
+import { useEnvCompare, type CompareDraftSide } from "../../studio/useEnvCompare";
 import { ENV_DOT, type CompareSide, type CompareStatus, type CopyDialogRequest, type TargetEnvInfo, envOptionProps } from "../../types";
 import { ChangeBatchesPanel } from "./ChangeBatchesPanel";
 import { CopyConfigDialog } from "./CopyConfigDialog";
@@ -13,13 +14,12 @@ import { PaneTitle } from "./PaneTitle";
 
 type DiffEditorInstance = Parameters<DiffOnMount>[0];
 
-const DIFF_OPTIONS = {
+// Opsi dasar; readOnly/originalEditable dihitung per render dari sideEditable (lihat diffOptions)
+const DIFF_BASE_OPTIONS = {
   fontSize: 13,
   minimap: { enabled: false },
   renderSideBySide: true,
   useInlineViewWhenSpaceIsLimited: false,
-  readOnly: true,
-  originalEditable: false,
   hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 5, revealLineCount: 20 },
   renderOverviewRuler: true,
   scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
@@ -37,6 +37,9 @@ const STATUS_CHIP: Record<CompareStatus, { label: (n: number) => string; cls: st
     title: "Ada lebih dari 1 config aktif bertipe ini; bereskan dulu"
   }
 };
+
+const GHOST_BTN_CLS =
+  "px-1.5 py-0.5 rounded-md text-[11px] text-slate-300 hover:text-slate-100 hover:bg-slate-800 transition disabled:opacity-40 disabled:hover:bg-transparent";
 
 const SELECT_CLS =
   "bg-slate-950 border border-slate-700 rounded-md px-2 py-1 text-xs text-slate-200 max-w-[180px] truncate focus:outline-none focus:border-indigo-500";
@@ -83,8 +86,17 @@ function SidePicker({
 }
 
 function EnvCompareBody() {
-  const { configDomain, targetEnvs, setShowEnvCompare } = useStudio();
+  const studio = useStudio();
+  const { configDomain, targetEnvs, setShowEnvCompare, askReason, setStatusMessage } = studio;
+  // Nilai studio terbaru untuk dipakai setelah await (sinkron editor utama, Esc)
+  const studioRef = useRef(studio);
+  studioRef.current = studio;
   const c = useEnvCompare();
+  // Paksa isi model Monaco disetel ulang dari state (Kembalikan, buang draf lewat guard)
+  const [resetNonce, setResetNonce] = useState(0);
+  const guard = (action: () => void) => c.guard(() => { setResetNonce((n) => n + 1); action(); });
+  const guardRef = useRef(guard);
+  guardRef.current = guard;
   const diffRef = useRef<DiffEditorInstance | null>(null);
   const envReq = useRef({ left: 0, right: 0 });
   const [dialog, setDialog] = useState<"export" | null>(null);
@@ -97,7 +109,9 @@ function EnvCompareBody() {
       if (e.key !== "Escape" || e.defaultPrevented) return;
       // Esc di dalam Monaco (mis. menutup widget cari) bukan untuk menutup layar
       if ((e.target as HTMLElement | null)?.closest?.(".monaco-editor")) return;
-      setShowEnvCompare(false);
+      // Esc untuk menutup dialog alasan / konfirmasi env di atas layar ini, bukan untuk menutup layar
+      if (studioRef.current.promptDialog || studioRef.current.envConfirm) return;
+      guardRef.current(() => setShowEnvCompare(false));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -122,12 +136,69 @@ function EnvCompareBody() {
 
   const entry = c.entries.find((e) => e.configType === c.selectedType) ?? null;
   const [diffCount, setDiffCount] = useState<number | null>(null);
+  const leftText = useMemo(() => prettyValue(entry?.left?.value), [entry]);
+  const rightText = useMemo(() => prettyValue(entry?.right?.value), [entry]);
+
+  // Isi model Monaco tidak dikendalikan lewat prop original/modified (prop itu menyetel ulang model dan
+  // kursor setiap berubah). Model diisi sendiri lewat syncModels() hanya saat mount, ganti config/baseline,
+  // atau reset; ketikan user mengalir satu arah: model -> listener -> setDraft.
+  const wantRef = useRef({ left: "", right: "" });
+  wantRef.current = { left: c.drafts.left ?? leftText, right: c.drafts.right ?? rightText };
+  const baseRef = useRef({ left: leftText, right: rightText });
+  baseRef.current = { left: leftText, right: rightText };
+  const setDraftRef = useRef(c.setDraft);
+  setDraftRef.current = c.setDraft;
+  const applying = useRef(false);
+  const disposables = useRef<{ dispose(): void }[]>([]);
+  const disposeListeners = () => {
+    disposables.current.forEach((d) => d.dispose());
+    disposables.current = [];
+  };
+  const syncModels = useCallback(() => {
+    const ed = diffRef.current;
+    if (!ed) return;
+    const pairs: [CompareDraftSide, ReturnType<DiffEditorInstance["getOriginalEditor"]>][] = [
+      ["left", ed.getOriginalEditor()],
+      ["right", ed.getModifiedEditor()]
+    ];
+    for (const [side, sub] of pairs) {
+      const model = sub.getModel();
+      const want = wantRef.current[side];
+      if (!model || model.getValue() === want) continue;
+      applying.current = true;
+      try {
+        model.setValue(want);
+      } finally {
+        applying.current = false;
+      }
+    }
+  }, []);
   const handleMount: DiffOnMount = (editor) => {
+    disposeListeners();
     diffRef.current = editor;
     const update = () => setDiffCount(editor.getLineChanges()?.length ?? null);
     update();
-    editor.onDidUpdateDiff(update);
+    disposables.current.push(editor.onDidUpdateDiff(update));
+    const watch = (side: CompareDraftSide, sub: ReturnType<DiffEditorInstance["getOriginalEditor"]>) =>
+      sub.onDidChangeModelContent(() => {
+        if (applying.current) return;
+        const value = sub.getValue();
+        setDraftRef.current(side, value === baseRef.current[side] ? undefined : value);
+      });
+    disposables.current.push(watch("left", editor.getOriginalEditor()), watch("right", editor.getModifiedEditor()));
+    syncModels();
   };
+  // DiffEditor dilepas saat tidak ada entry (mis. selama reload) atau layar ditutup: lepas listener
+  useEffect(() => {
+    if (entry) return;
+    disposeListeners();
+    diffRef.current = null;
+  }, [entry]);
+  useEffect(() => () => disposeListeners(), []);
+  const syncKey = entry ? `${entry.configType}\u0000${leftText}\u0000${rightText}\u0000${resetNonce}` : "";
+  useEffect(() => {
+    syncModels();
+  }, [syncKey, syncModels]);
   const goToDiff = (target: "next" | "previous") => {
     const ed = diffRef.current;
     if (!ed) return;
@@ -135,14 +206,113 @@ function EnvCompareBody() {
     ed.getModifiedEditor().focus();
   };
 
-  const leftText = useMemo(() => (entry?.left?.value == null ? "" : JSON.stringify(entry.left.value, null, 2)), [entry]);
-  const rightText = useMemo(() => (entry?.right?.value == null ? "" : JSON.stringify(entry.right.value, null, 2)), [entry]);
   const leftEnv = envInfo(c.left.env);
   const rightEnv = envInfo(c.right.env);
   const leftTenant = tenantInfo(c.left);
   const rightTenant = tenantInfo(c.right);
   const ready = Boolean(c.left.tenantId && c.right.tenantId);
   const s = c.summary;
+
+  const leftEditable = sideEditable(entry, "left", Boolean(leftEnv?.readonly));
+  const rightEditable = sideEditable(entry, "right", Boolean(rightEnv?.readonly));
+  const diffOptions = useMemo(
+    () => ({ ...DIFF_BASE_OPTIONS, originalEditable: leftEditable, readOnly: !rightEditable }),
+    [leftEditable, rightEditable]
+  );
+  // Jaga-jaga: setel readOnly kedua editor langsung, kalau updateOptions diff editor tidak meneruskannya
+  useEffect(() => {
+    const ed = diffRef.current;
+    if (!ed) return;
+    ed.getOriginalEditor().updateOptions({ readOnly: !leftEditable });
+    ed.getModifiedEditor().updateOptions({ readOnly: !rightEditable });
+  }, [leftEditable, rightEditable, syncKey]);
+
+  const [savingSide, setSavingSide] = useState<CompareDraftSide | null>(null);
+  const revertSide = (side: CompareDraftSide) => {
+    c.setDraft(side, undefined);
+    setResetNonce((n) => n + 1);
+  };
+
+  // Simpan satu sisi ke env-nya sendiri (spec 4.1): validasi JSON, alasan, PUT dengan versi, lalu muat ulang
+  const saveSide = async (side: CompareDraftSide) => {
+    const row = entry?.[side] ?? null;
+    const text = c.drafts[side];
+    if (!entry || !row || text === undefined || savingSide) return;
+    const sideInfo = side === "left" ? c.left : c.right;
+    const envLabel = (side === "left" ? leftEnv?.label : rightEnv?.label) ?? sideInfo.env;
+    const tenantName = (side === "left" ? leftTenant?.name : rightTenant?.name) ?? sideInfo.tenantId;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e: any) {
+      alert(`JSON tidak valid: ${e?.message ?? e}`);
+      return;
+    }
+    setSavingSide(side);
+    try {
+      const summary = await askReason({
+        title: `Simpan ${entry.configType}`,
+        description: `${envLabel} · ${tenantName}. Versi sebelumnya otomatis diarsipkan ke History.`,
+        before: row.value,
+        after: parsed
+      });
+      if (summary === null) return;
+      // groupId sengaja tidak dikirim supaya tetap sama
+      const res = await api(`/api/configs/${row.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Target-Env": sideInfo.env },
+        body: JSON.stringify({ value: parsed, changeSummary: summary, expectedVersion: row.version_token })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        const msg = data.error || "Config sudah diubah orang lain.";
+        if (!confirm(`${msg}\n\nMuat ulang perbandingan? Editanmu disalin ke clipboard dulu.`)) return;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          /* clipboard tidak tersedia: tetap lanjut, user sudah konfirmasi */
+        }
+        c.setDraft(side, undefined);
+        await c.reload();
+        return;
+      }
+      if (!res.ok || !data.success) {
+        alert(`Gagal menyimpan: ${data.error || `HTTP ${res.status}`}`);
+        return;
+      }
+      c.setDraft(side, undefined);
+      setStatusMessage(`✅ Tersimpan ke ${envLabel} (versi ${data.version}).`);
+      setTimeout(() => setStatusMessage(null), 4000);
+      // Sinkron editor utama bila config yang sama sedang terbuka di env aktif
+      const st = studioRef.current;
+      if (sideInfo.env === st.targetEnvName && row.id === st.selectedConfigId) {
+        if (st.jsonContent === st.originalContent) void st.loadConfig(row.id, st.activeConfigType, st.currentGroupId);
+        else st.setIsDbNewer(true);
+      }
+      await c.reload();
+    } catch (e: any) {
+      alert(`Gagal menyimpan: ${e?.message ?? e}`);
+    } finally {
+      setSavingSide(null);
+    }
+  };
+
+  const paneActions = (side: CompareDraftSide, editable: boolean, envReadonly: boolean) => {
+    if (!entry) return undefined;
+    if (!editable) return envReadonly ? <span className="text-[10px] text-slate-500">read-only</span> : undefined;
+    const dirty = isDirty(c.drafts[side], entry[side]);
+    return (
+      <>
+        {dirty && <span className="w-2 h-2 rounded-full bg-amber-400" title="Belum disimpan" />}
+        <button onClick={() => void saveSide(side)} disabled={!dirty || savingSide !== null} className={GHOST_BTN_CLS} title="Simpan sisi ini ke env-nya">
+          Simpan
+        </button>
+        <button onClick={() => revertSide(side)} disabled={!dirty || savingSide !== null} className={GHOST_BTN_CLS} title="Buang editan sisi ini">
+          Kembalikan
+        </button>
+      </>
+    );
+  };
 
   return (
     <div className="fixed inset-0 z-40 bg-slate-950 text-slate-100 flex flex-col">
@@ -151,10 +321,10 @@ function EnvCompareBody() {
         <SidePicker
           label="Kiri" side={c.left} tenantError={c.tenantErrorFor(c.left.env)} envs={targetEnvs} tenants={c.tenantsFor(c.left.env)}
           errorMsg={c.error?.side === "kiri" ? c.error.message : undefined}
-          onEnv={(e) => changeEnv("left", e)} onTenant={(id) => c.setLeft({ ...c.left, tenantId: id })}
+          onEnv={(e) => guard(() => void changeEnv("left", e))} onTenant={(id) => guard(() => c.setLeft({ ...c.left, tenantId: id }))}
         />
         <button
-          onClick={c.swap}
+          onClick={() => guard(c.swap)}
           className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
           title="Tukar kiri dan kanan"
         >
@@ -163,7 +333,7 @@ function EnvCompareBody() {
         <SidePicker
           label="Kanan" side={c.right} tenantError={c.tenantErrorFor(c.right.env)} envs={targetEnvs} tenants={c.tenantsFor(c.right.env)}
           errorMsg={c.error?.side === "kanan" ? c.error.message : undefined}
-          onEnv={(e) => changeEnv("right", e)} onTenant={(id) => c.setRight({ ...c.right, tenantId: id })}
+          onEnv={(e) => guard(() => void changeEnv("right", e))} onTenant={(id) => guard(() => c.setRight({ ...c.right, tenantId: id }))}
         />
         <span className="flex-1" />
         {s && (
@@ -181,9 +351,9 @@ function EnvCompareBody() {
             Riwayat
           </button>
           <button
-            onClick={() => setCopyRequest({
+            onClick={() => guard(() => setCopyRequest({
               source: c.left, target: c.right, lockTarget: true, domains: [configDomain], preselect: "all"
-            })}
+            }))}
             disabled={!ready || c.loading}
             className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
             title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
@@ -200,7 +370,7 @@ function EnvCompareBody() {
           </button>
         </div>
         <button
-          onClick={() => setShowEnvCompare(false)}
+          onClick={() => guard(() => setShowEnvCompare(false))}
           className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
           title="Tutup (Esc)"
         >
@@ -244,7 +414,7 @@ function EnvCompareBody() {
               return (
                 <div
                   key={e.configType}
-                  onClick={() => c.setSelectedType(e.configType)}
+                  onClick={() => { if (!active) guard(() => c.setSelectedType(e.configType)); }}
                   className={`flex items-center gap-2 px-2 py-1.5 border-b border-slate-900 cursor-pointer text-xs ${
                     active ? "bg-indigo-950/60 border-l-2 border-l-indigo-400" : "hover:bg-slate-900"
                   }`}
@@ -304,11 +474,13 @@ function EnvCompareBody() {
                     envLabel={leftEnv?.label ?? c.left.env} envColor={leftEnv?.color ?? "slate"}
                     tenantName={leftTenant?.name} tenantCode={leftTenant?.code} configType={entry.configType}
                     muted={entry.left ? undefined : "(tidak ada di kiri)"}
+                    actions={paneActions("left", leftEditable, Boolean(leftEnv?.readonly))}
                   />
                   <PaneTitle
                     envLabel={rightEnv?.label ?? c.right.env} envColor={rightEnv?.color ?? "slate"}
                     tenantName={rightTenant?.name} tenantCode={rightTenant?.code} configType={entry.configType}
                     muted={entry.right ? undefined : "(tidak ada di kanan)"}
+                    actions={paneActions("right", rightEditable, Boolean(rightEnv?.readonly))}
                   />
                 </div>
               </div>
@@ -319,9 +491,7 @@ function EnvCompareBody() {
                   theme={STUDIO_THEME}
                   beforeMount={defineStudioTheme}
                   onMount={handleMount}
-                  original={leftText}
-                  modified={rightText}
-                  options={DIFF_OPTIONS}
+                  options={diffOptions}
                 />
               </div>
             </>
