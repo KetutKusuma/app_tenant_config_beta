@@ -7,6 +7,9 @@ import { useStudio } from "./StudioContext";
 export type CompareDraftSide = "left" | "right";
 export interface CompareDrafts { left?: string; right?: string }
 const NO_DRAFTS: CompareDrafts = {};
+// version_token baris DB saat draf sisi itu pertama dibuat; dikirim sebagai expectedVersion supaya perubahan
+// konkuren tetap memicu 409 walau perbandingan sudah dimuat ulang dengan draf dipertahankan
+const NO_BASES: CompareDrafts = {};
 
 export interface EnvCompareError { message: string; side?: "kiri" | "kanan" }
 
@@ -41,22 +44,34 @@ export function useEnvCompare() {
   // kalau konteks berubah, draf langsung dianggap kosong pada render itu juga (tanpa menunggu efek), lalu dibuang.
   // reload() sengaja tidak menyentuh draf.
   const draftKey = `${selectedType ?? ""}|${left.env}|${left.tenantId}|${right.env}|${right.tenantId}`;
-  const [draftState, setDraftState] = useState<{ key: string; drafts: CompareDrafts }>({ key: draftKey, drafts: NO_DRAFTS });
+  const [draftState, setDraftState] = useState<{ key: string; drafts: CompareDrafts; bases: CompareDrafts }>({
+    key: draftKey, drafts: NO_DRAFTS, bases: NO_BASES
+  });
   const drafts = draftState.key === draftKey ? draftState.drafts : NO_DRAFTS;
+  const draftBase = draftState.key === draftKey ? draftState.bases : NO_BASES;
   useEffect(() => {
-    setDraftState((prev) => (prev.key === draftKey ? prev : { key: draftKey, drafts: NO_DRAFTS }));
+    setDraftState((prev) => (prev.key === draftKey ? prev : { key: draftKey, drafts: NO_DRAFTS, bases: NO_BASES }));
   }, [draftKey]);
   const draftKeyRef = useRef(draftKey);
   draftKeyRef.current = draftKey;
-  const setDraft = useCallback((side: CompareDraftSide, text: string | undefined) => {
+  const setDraft = useCallback((side: CompareDraftSide, text: string | undefined, baseVersion?: string) => {
     // Closure usang (mis. selesai simpan setelah user pindah config): jangan timpa draf konteks yang baru
     if (draftKey !== draftKeyRef.current) return;
     setDraftState((prev) => {
       const base = prev.key === draftKey ? prev.drafts : NO_DRAFTS;
       if (base[side] === text && prev.key === draftKey) return prev;
+      const baseBases = prev.key === draftKey ? prev.bases : NO_BASES;
       const next = { ...base };
-      if (text === undefined) delete next[side]; else next[side] = text;
-      return { key: draftKey, drafts: next };
+      const bases = { ...baseBases };
+      if (text === undefined) {
+        delete next[side];
+        delete bases[side];
+      } else {
+        next[side] = text;
+        // Hanya saat draf pertama dibuat; ketikan berikutnya mempertahankan versi awal
+        if (bases[side] === undefined && baseVersion !== undefined) bases[side] = baseVersion;
+      }
+      return { key: draftKey, drafts: next, bases };
     });
   }, [draftKey]);
 
@@ -112,7 +127,6 @@ export function useEnvCompare() {
         setEntries([]);
         setSummary(null);
         setChecked(new Set());
-        setSelectedType(null);
         setError({ message: json.error || `HTTP ${res.status}`, side: json.side });
         return;
       }
@@ -133,7 +147,6 @@ export function useEnvCompare() {
       setEntries([]);
       setSummary(null);
       setChecked(new Set());
-      setSelectedType(null);
       setError({ message: e?.message || "Gagal membandingkan" });
     } finally {
       if (id === reqId.current) setLoading(false);
@@ -182,7 +195,7 @@ export function useEnvCompare() {
   const guard = (action: () => void) => {
     if (hasDirty) {
       if (!confirm(`Ada editan yang belum disimpan di ${selectedEntry?.configType ?? selectedType ?? ""}. Buang editan?`)) return;
-      setDraftState((prev) => ({ key: prev.key, drafts: NO_DRAFTS }));
+      setDraftState((prev) => ({ key: prev.key, drafts: NO_DRAFTS, bases: NO_BASES }));
     }
     action();
   };
@@ -197,6 +210,6 @@ export function useEnvCompare() {
     entries, summary, loading, error, reload,
     selectedType, setSelectedType, checked, toggleChecked, checkDifferent,
     query, setQuery, visibleEntries,
-    drafts, setDraft, hasDirty, guard
+    drafts, draftBase, setDraft, hasDirty, guard
   };
 }

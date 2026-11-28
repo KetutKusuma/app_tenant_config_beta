@@ -49,6 +49,7 @@ export function useCoreActions(s: StudioState) {
   // selectCode boleh kode penuh (IDM_PROD) atau kode dasar (IDM): saat pindah env, tenant yang sama
   // dicari lewat kode dasar karena tenant_id & client_code-nya berbeda di tiap env.
   const fetchTenants = async (selectCode?: string, preferType?: string | null) => {
+    switchWarnedRef.current = false;
     try {
       const res = await api("/api/tenants");
       const json = await res.json();

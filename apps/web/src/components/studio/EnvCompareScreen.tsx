@@ -51,8 +51,9 @@ export function EnvCompareScreen() {
 }
 
 function SidePicker({
-  label, side, errorMsg, tenantError, envs, tenants, onEnv, onTenant
+  label, side, errorMsg, tenantError, envs, tenants, onEnv, onTenant, disabled
 }: {
+  disabled?: boolean;
   label: string;
   side: CompareSide;
   errorMsg?: string;
@@ -67,12 +68,12 @@ function SidePicker({
     <div className="flex items-center gap-1.5" title={tenantError || errorMsg}>
       <span className="text-slate-500 text-xs">{label}</span>
       <span className={`w-2 h-2 rounded-full shrink-0 ${ENV_DOT[env?.color ?? ""] ?? "bg-slate-400"}`} />
-      <select className={SELECT_CLS} value={side.env} onChange={(e) => onEnv(e.target.value)} title="Env">
+      <select className={SELECT_CLS} disabled={disabled} value={side.env} onChange={(e) => onEnv(e.target.value)} title="Env">
         {envs.map((e) => { const o = envOptionProps(e, getActiveService()); return <option key={e.name} value={e.name} disabled={o.disabled}>{o.label}</option>; })}
       </select>
       <select
         className={`${SELECT_CLS} ${errorMsg || tenantError ? "border-rose-500/60" : ""}`}
-        disabled={Boolean(tenantError)}
+        disabled={disabled || Boolean(tenantError)}
         value={side.tenantId}
         onChange={(e) => onTenant(e.target.value)}
         title="Tenant"
@@ -103,6 +104,17 @@ function EnvCompareBody() {
   // Popup Salin config lokal (bukan state studio): sumber = kiri, tujuan = kanan dan dikunci; null = tertutup
   const [copyRequest, setCopyRequest] = useState<CopyDialogRequest | null>(null);
   const [showBatches, setShowBatches] = useState(false);
+
+  // Peringatan tutup/muat ulang tab selama ada editan belum disimpan
+  useEffect(() => {
+    if (!c.hasDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [c.hasDirty]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -148,6 +160,9 @@ function EnvCompareBody() {
   baseRef.current = { left: leftText, right: rightText };
   const setDraftRef = useRef(c.setDraft);
   setDraftRef.current = c.setDraft;
+  // version_token baris DB saat ini per sisi, dicatat sebagai dasar draf yang baru dibuat
+  const rowVersionRef = useRef<{ left?: string; right?: string }>({});
+  rowVersionRef.current = { left: entry?.left?.version_token, right: entry?.right?.version_token };
   const applying = useRef(false);
   const disposables = useRef<{ dispose(): void }[]>([]);
   const disposeListeners = () => {
@@ -183,7 +198,7 @@ function EnvCompareBody() {
       sub.onDidChangeModelContent(() => {
         if (applying.current) return;
         const value = sub.getValue();
-        setDraftRef.current(side, value === baseRef.current[side] ? undefined : value);
+        setDraftRef.current(side, value === baseRef.current[side] ? undefined : value, rowVersionRef.current[side]);
       });
     disposables.current.push(watch("left", editor.getOriginalEditor()), watch("right", editor.getModifiedEditor()));
     syncModels();
@@ -261,7 +276,7 @@ function EnvCompareBody() {
       const res = await api(`/api/configs/${row.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", "X-Target-Env": sideInfo.env },
-        body: JSON.stringify({ value: parsed, changeSummary: summary, expectedVersion: row.version_token })
+        body: JSON.stringify({ value: parsed, changeSummary: summary, expectedVersion: c.draftBase[side] ?? row.version_token })
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 409) {
@@ -323,19 +338,20 @@ function EnvCompareBody() {
       {/* Bar atas */}
       <div className="bg-slate-900 border-b border-slate-800 px-3 py-2 flex items-center gap-2 flex-wrap">
         <SidePicker
-          label="Kiri" side={c.left} tenantError={c.tenantErrorFor(c.left.env)} envs={targetEnvs} tenants={c.tenantsFor(c.left.env)}
+          label="Kiri" disabled={savingSide !== null} side={c.left} tenantError={c.tenantErrorFor(c.left.env)} envs={targetEnvs} tenants={c.tenantsFor(c.left.env)}
           errorMsg={c.error?.side === "kiri" ? c.error.message : undefined}
           onEnv={(e) => guard(() => void changeEnv("left", e))} onTenant={(id) => guard(() => c.setLeft({ ...c.left, tenantId: id }))}
         />
         <button
           onClick={() => guard(c.swap)}
-          className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition"
+          disabled={savingSide !== null}
+          className="h-7 w-7 rounded-md text-slate-400 hover:text-slate-200 hover:bg-slate-800 flex items-center justify-center transition disabled:opacity-40"
           title="Tukar kiri dan kanan"
         >
           <ArrowLeftRight className="w-3.5 h-3.5" />
         </button>
         <SidePicker
-          label="Kanan" side={c.right} tenantError={c.tenantErrorFor(c.right.env)} envs={targetEnvs} tenants={c.tenantsFor(c.right.env)}
+          label="Kanan" disabled={savingSide !== null} side={c.right} tenantError={c.tenantErrorFor(c.right.env)} envs={targetEnvs} tenants={c.tenantsFor(c.right.env)}
           errorMsg={c.error?.side === "kanan" ? c.error.message : undefined}
           onEnv={(e) => guard(() => void changeEnv("right", e))} onTenant={(id) => guard(() => c.setRight({ ...c.right, tenantId: id }))}
         />
@@ -358,7 +374,7 @@ function EnvCompareBody() {
             onClick={() => guard(() => setCopyRequest({
               source: c.left, target: c.right, lockTarget: true, domains: [configDomain], preselect: "all"
             }))}
-            disabled={!ready || c.loading}
+            disabled={!ready || c.loading || savingSide !== null}
             className="px-2.5 py-1 rounded-md text-xs text-slate-300 hover:bg-slate-800 transition disabled:opacity-40"
             title={`Salin config kiri ke ${rightEnv?.label ?? c.right.env}`}
           >
