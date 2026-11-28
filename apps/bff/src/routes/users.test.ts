@@ -29,7 +29,10 @@ const cases: Array<[string, string, string, any?]> = [
   ["POST", "/api/admin/users", "buat akun", { email: "a@b.co", displayName: "A", role: "user" }],
   ["PATCH", `/api/admin/users/${U}`, "ubah akun", { role: "admin" }],
   ["POST", `/api/admin/users/${U}/reset-password`, "reset password", {}],
-  ["GET", "/api/admin/user-events", "log aktivitas"]
+  ["GET", "/api/admin/user-events", "log aktivitas"],
+  ["GET", `/api/admin/users/${U}/sessions`, "sesi akun"],
+  ["DELETE", `/api/admin/users/${U}/sessions/${U}`, "keluarkan sesi akun"],
+  ["GET", "/api/admin/login-history", "riwayat login semua akun"]
 ];
 for (const [method, path, label, body] of cases) {
   test(`user biasa ditolak 403 FORBIDDEN: ${label}`, async () => {

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 
 export type Role = "admin" | "user";
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
-export type UserAction = "create" | "update" | "deactivate" | "activate" | "reset_password";
+export type UserAction = "create" | "update" | "deactivate" | "activate" | "reset_password" | "revoke_session";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_NAME = 100;

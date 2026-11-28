@@ -12,6 +12,7 @@ import {
   type UserAction
 } from "../users/rules";
 import { UUID_RE, parsePageQuery } from "../users/sessions";
+import { listLoginEvents, listSessions, revokeSession } from "./sessions.js";
 
 // Route admin: kelola akun Studio (/api/admin/users) + log aktivitas akun (/api/admin/user-events).
 // Akun tidak pernah dihapus, hanya dinonaktifkan. Password/hash tidak pernah masuk log atau event.
@@ -271,6 +272,44 @@ router.get("/api/admin/user-events", async (req, res) => {
     }));
     const nextBefore = data.length === limit ? data[data.length - 1].createdAt : null;
     res.json({ data, nextBefore });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function findAccount(id: string): Promise<{ id: string; email: string } | null> {
+  const r = await auditDb.query(`SELECT id, email FROM tenant_studio.studio_users WHERE id = ${esc(id)};`);
+  return r.rows[0] ?? null;
+}
+
+router.get("/api/admin/users/:id/sessions", async (req, res) => {
+  const id = req.params.id;
+  if (!UUID_RE.test(id)) return res.status(404).json({ error: NOT_FOUND });
+  try {
+    if (!(await findAccount(id))) return res.status(404).json({ error: NOT_FOUND });
+    res.json({ data: await listSessions(id, req.sessionId ?? null) });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete("/api/admin/users/:id/sessions/:sid", async (req, res) => {
+  const { id, sid } = req.params;
+  if (!UUID_RE.test(id)) return res.status(404).json({ error: NOT_FOUND });
+  try {
+    const owner = await findAccount(id);
+    if (!owner) return res.status(404).json({ error: NOT_FOUND });
+    const r = await revokeSession(req, owner, sid, true);
+    res.status(r.status).json(r.body);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/api/admin/login-history", async (req, res) => {
+  try {
+    const uid = typeof req.query.userId === "string" && UUID_RE.test(req.query.userId) ? req.query.userId : null;
+    res.json(await listLoginEvents(req.query, uid));
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
