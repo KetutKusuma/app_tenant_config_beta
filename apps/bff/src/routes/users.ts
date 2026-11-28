@@ -11,13 +11,13 @@ import {
   type Role,
   type UserAction
 } from "../users/rules";
+import { UUID_RE, parsePageQuery } from "../users/sessions";
 
 // Route admin: kelola akun Studio (/api/admin/users) + log aktivitas akun (/api/admin/user-events).
 // Akun tidak pernah dihapus, hanya dinonaktifkan. Password/hash tidak pernah masuk log atau event.
 
 export const router = express.Router();
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NOT_FOUND = "Akun tidak ditemukan.";
 const FORBIDDEN = "Hanya admin yang boleh mengakses fitur ini.";
 
@@ -252,11 +252,8 @@ router.post("/api/admin/users/:id/reset-password", async (req, res) => {
 
 router.get("/api/admin/user-events", async (req, res) => {
   try {
-    const n = parseInt(String(req.query.limit ?? ""), 10);
-    const limit = Number.isFinite(n) ? Math.min(200, Math.max(1, n)) : 50;
-    const beforeRaw = typeof req.query.before === "string" ? req.query.before : "";
-    const before = beforeRaw ? new Date(beforeRaw) : null;
-    const where = before && !isNaN(before.getTime()) ? `WHERE date_trunc('milliseconds', created_at) < ${esc(before.toISOString())}::timestamptz` : "";
+    const { limit, before } = parsePageQuery(req.query);
+    const where = before ? `WHERE date_trunc('milliseconds', created_at) < ${esc(before)}::timestamptz` : "";
     const r = await auditDb.query(`
       SELECT id, actor_name, target_email, action, details, created_at
       FROM tenant_studio.studio_user_events
