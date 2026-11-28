@@ -29,7 +29,8 @@ app.use(express.json({ limit: "50mb" }));
 app.set("trust proxy", TRUST_PROXY);
 // Auth: /api/auth/* + middleware wajib login untuk seluruh /api lainnya
 registerAuth(app, auditDb, esc);
-// Kelola akun (/api/admin/*): hanya memakai audit DB, jadi dipasang sebelum middleware env/layanan target
+// Perangkat aktif & riwayat login (/api/auth/sessions, /api/auth/login-history) dan kelola akun (/api/admin/*):
+// keduanya hanya memakai audit DB, jadi dipasang sebelum middleware env/layanan target
 app.use(sessionRoutes);
 app.use(userRoutes);
 // Target env (ats_db) per request: header X-Target-Env -> preferensi user -> default

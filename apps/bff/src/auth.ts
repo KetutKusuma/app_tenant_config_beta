@@ -122,25 +122,55 @@ export function consumeLockNotice(key: string, map = failedLogins): boolean {
   return true;
 }
 
-/** Sisa waktu kunci (ms): kunci email|ip ATAU cadangan per email, mana yang lebih lama. 0 bila tidak terkunci. */
-export function loginLockRemainingMs(email: string, ipKey: string): number {
-  return Math.max(loginLockedMs(ipKey), loginLockedMs(email, failedByEmail));
+const failedByIp = new Map<string, LockEntry>(); // anti password-spray: semua email dari satu IP
+export const MAX_FAILED_PER_IP = 30;
+export const MAX_EMAIL_LENGTH = 254;
+export const MAX_PASSWORD_LENGTH = 1024;
+const SWEEP_EVERY_MS = 60 * 1000;
+let lastSweep = 0;
+
+const ipKeyOf = (email: string, ip: string) => `${email}|${ip}`;
+
+/** Hapus entri yang kuncinya sudah lewat atau jendela hitungnya habis, agar peta tidak tumbuh tanpa batas. */
+export function sweepExpiredLocks(now = Date.now()) {
+  for (const map of [failedLogins, failedByEmail, failedByIp]) {
+    for (const [k, e] of map) {
+      if (e.until ? e.until <= now : now - e.windowStart > LOCK_MS) map.delete(k);
+    }
+  }
 }
-/** Setiap percobaan gagal menambah kedua hitungan. */
-export function recordFailedAttempt(email: string, ipKey: string) {
-  recordFailedLogin(ipKey);
+
+/** Jumlah entri di semua peta kunci (untuk uji). */
+export function lockEntryCount(): number {
+  return failedLogins.size + failedByEmail.size + failedByIp.size;
+}
+
+/** Sisa waktu kunci (ms): kunci email|ip, per email, ATAU per IP; yang terlama. 0 bila tidak terkunci. */
+export function loginLockRemainingMs(email: string, ip: string): number {
+  return Math.max(loginLockedMs(ipKeyOf(email, ip)), loginLockedMs(email, failedByEmail), loginLockedMs(ip, failedByIp));
+}
+/** Setiap percobaan gagal menambah ketiga hitungan. Sinkron (tanpa await) agar request paralel tidak lolos. */
+export function recordFailedAttempt(email: string, ip: string) {
+  const now = Date.now();
+  if (now - lastSweep > SWEEP_EVERY_MS) {
+    lastSweep = now;
+    sweepExpiredLocks(now);
+  }
+  recordFailedLogin(ipKeyOf(email, ip));
   recordFailedLogin(email, failedByEmail, MAX_FAILED_PER_EMAIL);
+  recordFailedLogin(ip, failedByIp, MAX_FAILED_PER_IP);
 }
-/** Login sukses menghapus kedua entri. */
-export function clearFailedAttempts(email: string, ipKey: string) {
-  failedLogins.delete(ipKey);
+/** Login sukses menghapus entri email|ip dan email. Entri per-IP sengaja dipertahankan (batas spray). */
+export function clearFailedAttempts(email: string, ip: string) {
+  failedLogins.delete(ipKeyOf(email, ip));
   failedByEmail.delete(email);
 }
 /** Paling banyak satu notifikasi per request: true bila salah satu kunci yang aktif belum diberitahukan. */
-export function consumeAnyLockNotice(email: string, ipKey: string): boolean {
-  const a = consumeLockNotice(ipKey);
+export function consumeAnyLockNotice(email: string, ip: string): boolean {
+  const a = consumeLockNotice(ipKeyOf(email, ip));
   const b = consumeLockNotice(email, failedByEmail);
-  return a || b;
+  const c = consumeLockNotice(ip, failedByIp);
+  return a || b || c;
 }
 
 const userAgentOf = (req: express.Request) => String(req.headers["user-agent"] || "").slice(0, 300);
@@ -320,14 +350,23 @@ async function loadUserById(auditDb: Pool, esc: Esc, userId: string): Promise<St
 export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
   app.post("/api/auth/login", async (req, res) => {
     try {
-      const email = String(req.body?.email || "").trim().toLowerCase();
-      const password = String(req.body?.password || "");
-      const lockKey = `${email}|${req.ip}`;
+      const rawEmail = req.body?.email;
+      const rawPassword = req.body?.password;
+      // Input tidak wajar ditolak sebelum menyentuh peta kunci, DB, atau event (cegah memori membengkak)
+      const bad =
+        (rawEmail != null && typeof rawEmail !== "string") ||
+        (rawPassword != null && typeof rawPassword !== "string") ||
+        (rawEmail ?? "").length > MAX_EMAIL_LENGTH ||
+        (rawPassword ?? "").length > MAX_PASSWORD_LENGTH;
+      if (bad) return res.status(401).json({ error: "Email atau password salah." });
+      const email = String(rawEmail || "").trim().toLowerCase();
+      const password = String(rawPassword || "");
+      const lockIp = req.ip ?? "unknown";
       const ua = userAgentOf(req);
       const ip = req.ip ?? null;
-      const lockedMs = loginLockRemainingMs(email, lockKey);
+      const lockedMs = loginLockRemainingMs(email, lockIp);
       if (lockedMs > 0) {
-        if (consumeAnyLockNotice(email, lockKey)) {
+        if (consumeAnyLockNotice(email, lockIp)) {
           const known = await auditDb.query(`SELECT id FROM tenant_studio.studio_users WHERE email = ${esc(email)};`);
           await recordLoginEvent(auditDb, { userId: known.rows[0]?.id ?? null, email, kind: "login_terkunci", ip, userAgent: ua });
         }
@@ -345,11 +384,11 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
       const passwordOk = row ? await verifyPassword(password, row.password_hash) : false;
       if (!row || !row.is_active || !passwordOk) {
         const reason = !row ? "tidak_terdaftar" : !row.is_active ? "nonaktif" : "password_salah";
+        recordFailedAttempt(email, lockIp); // sinkron, sebelum await apa pun
         await recordLoginEvent(auditDb, { userId: row?.id ?? null, email, kind: "login_gagal", reason, ip, userAgent: ua });
-        recordFailedAttempt(email, lockKey);
         return res.status(401).json({ error: "Email atau password salah." });
       }
-      clearFailedAttempts(email, lockKey);
+      clearFailedAttempts(email, lockIp);
 
       const token = randomBytes(32).toString("base64url");
       const ins = await auditDb.query(`

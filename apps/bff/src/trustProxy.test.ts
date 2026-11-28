@@ -25,3 +25,13 @@ test("trust proxy: IP klien dari X-Forwarded-For lewat loopback", async () => {
 test("trust proxy: hop publik terakhir, bukan nilai pertama yang bisa dipalsukan", async () => {
   assert.equal(await ipFor("203.0.113.7, 198.51.100.9"), "198.51.100.9");
 });
+
+test("trust proxy: pemanggil langsung dari alamat publik tidak dipercaya, loopback/privat dipercaya", () => {
+  const app = express();
+  app.set("trust proxy", TRUST_PROXY);
+  const trust = app.get("trust proxy fn") as (ip: string, hop: number) => boolean;
+  assert.equal(trust("203.0.113.5", 0), false);
+  assert.equal(trust("100.64.0.1", 0), false);
+  assert.equal(trust("127.0.0.1", 0), true);
+  assert.equal(trust("172.18.0.1", 0), true);
+});
