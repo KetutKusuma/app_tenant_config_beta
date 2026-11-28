@@ -267,12 +267,16 @@ function EnvCompareBody() {
       if (res.status === 409) {
         const msg = data.error || "Config sudah diubah orang lain.";
         if (!confirm(`${msg}\n\nMuat ulang perbandingan? Editanmu disalin ke clipboard dulu.`)) return;
+        let copied = false;
         try {
           await navigator.clipboard.writeText(text);
+          copied = true;
         } catch {
-          /* clipboard tidak tersedia: tetap lanjut, user sudah konfirmasi */
+          /* mis. Safari/Firefox menolak tanpa aktivasi user: draf jangan dibuang */
         }
-        c.setDraft(side, undefined);
+        // Gagal salin: draf tetap ada, dan setelah reload tampil di atas nilai DB baru (version_token baru)
+        if (copied) c.setDraft(side, undefined);
+        else alert("Gagal menyalin ke clipboard. Editanmu tetap ada di editor.");
         await c.reload();
         return;
       }
