@@ -2,6 +2,8 @@ import type express from "express";
 import type { Pool } from "pg";
 import { randomBytes, scrypt as scryptCb, timingSafeEqual, createHash } from "crypto";
 import { promisify } from "util";
+import { recordLoginEvent } from "./users/loginEvents.js";
+import { deviceLabel } from "./users/device.js";
 
 // ============================================================================
 // Auth Tenant Studio: user, session (cookie httpOnly) dan preferensi per user.
@@ -38,6 +40,8 @@ declare global {
   namespace Express {
     interface Request {
       user?: StudioUser;
+      /** id sesi yang sedang dipakai (diisi middleware untuk sesi valid) */
+      sessionId?: string;
     }
   }
 }
@@ -83,23 +87,36 @@ function setSessionCookie(res: express.Response, token: string | null) {
 }
 
 // Pembatas percobaan login gagal (in-memory, cukup untuk tool internal 1 instance)
-const failedLogins = new Map<string, { count: number; until: number }>();
+const failedLogins = new Map<string, { count: number; until: number; lockNoticed?: boolean }>();
 const MAX_FAILED = 5;
 const LOCK_MS = 15 * 60 * 1000;
 
-function loginLockedMs(key: string): number {
+export function loginLockedMs(key: string): number {
   const entry = failedLogins.get(key);
   if (!entry) return 0;
   if (entry.until && entry.until > Date.now()) return entry.until - Date.now();
   if (entry.until && entry.until <= Date.now()) failedLogins.delete(key);
   return 0;
 }
-function recordFailedLogin(key: string) {
+export function recordFailedLogin(key: string) {
   const entry = failedLogins.get(key) || { count: 0, until: 0 };
   entry.count += 1;
-  if (entry.count >= MAX_FAILED) entry.until = Date.now() + LOCK_MS;
+  if (entry.count >= MAX_FAILED) {
+    entry.until = Date.now() + LOCK_MS;
+    entry.lockNoticed = false;
+  }
   failedLogins.set(key, entry);
 }
+
+/** true hanya pada panggilan pertama selama satu masa kunci aktif (untuk mencatat login_terkunci sekali) */
+export function consumeLockNotice(key: string): boolean {
+  const entry = failedLogins.get(key);
+  if (!entry || !(entry.until > Date.now()) || entry.lockNoticed) return false;
+  entry.lockNoticed = true;
+  return true;
+}
+
+const userAgentOf = (req: express.Request) => String(req.headers["user-agent"] || "").slice(0, 300);
 
 function toStudioUser(row: any): StudioUser {
   return {
@@ -192,6 +209,24 @@ export async function initAuthSchema(auditDb: Pool, esc: Esc): Promise<void> {
       created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE INDEX IF NOT EXISTS idx_studio_user_events_created ON tenant_studio.studio_user_events (created_at DESC);
+    ALTER TABLE tenant_studio.studio_sessions
+      ADD COLUMN IF NOT EXISTS ip text,
+      ADD COLUMN IF NOT EXISTS device_label text;
+    CREATE TABLE IF NOT EXISTS tenant_studio.studio_login_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid REFERENCES tenant_studio.studio_users(id),
+      email text NOT NULL,
+      kind text NOT NULL,
+      reason text,
+      ip text,
+      device_label text,
+      user_agent text,
+      session_id uuid,
+      actor_name text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_studio_login_events_user ON tenant_studio.studio_login_events (user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_studio_login_events_created ON tenant_studio.studio_login_events (created_at DESC);
   `);
 
   // User default dibuat hanya jika tabel user masih kosong
@@ -261,8 +296,14 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
       const email = String(req.body?.email || "").trim().toLowerCase();
       const password = String(req.body?.password || "");
       const lockKey = `${email}|${req.ip}`;
+      const ua = userAgentOf(req);
+      const ip = req.ip ?? null;
       const lockedMs = loginLockedMs(lockKey);
       if (lockedMs > 0) {
+        if (consumeLockNotice(lockKey)) {
+          const known = await auditDb.query(`SELECT id FROM tenant_studio.studio_users WHERE email = ${esc(email)};`);
+          await recordLoginEvent(auditDb, { userId: known.rows[0]?.id ?? null, email, kind: "login_terkunci", ip, userAgent: ua });
+        }
         return res.status(429).json({ error: `Terlalu banyak percobaan gagal. Coba lagi dalam ${Math.ceil(lockedMs / 60000)} menit.` });
       }
       if (!email || !password) {
@@ -270,23 +311,30 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
       }
 
       const r = await auditDb.query(`
-        SELECT id, password_hash FROM tenant_studio.studio_users
-        WHERE email = ${esc(email)} AND is_active = true;
+        SELECT id, password_hash, is_active FROM tenant_studio.studio_users
+        WHERE email = ${esc(email)};
       `);
       const row = r.rows[0];
-      if (!row || !(await verifyPassword(password, row.password_hash))) {
+      const passwordOk = row ? await verifyPassword(password, row.password_hash) : false;
+      if (!row || !row.is_active || !passwordOk) {
+        const reason = !row ? "tidak_terdaftar" : !row.is_active ? "nonaktif" : "password_salah";
+        await recordLoginEvent(auditDb, { userId: row?.id ?? null, email, kind: "login_gagal", reason, ip, userAgent: ua });
         recordFailedLogin(lockKey);
         return res.status(401).json({ error: "Email atau password salah." });
       }
       failedLogins.delete(lockKey);
 
       const token = randomBytes(32).toString("base64url");
+      const ins = await auditDb.query(`
+        INSERT INTO tenant_studio.studio_sessions (user_id, token_hash, expires_at, user_agent, ip, device_label)
+        VALUES (${esc(row.id)}, ${esc(hashToken(token))}, NOW() + INTERVAL '${SESSION_TTL_DAYS} days', ${esc(ua)}, ${esc(ip)}, ${esc(deviceLabel(ua))})
+        RETURNING id;
+      `);
       await auditDb.query(`
-        INSERT INTO tenant_studio.studio_sessions (user_id, token_hash, expires_at, user_agent)
-        VALUES (${esc(row.id)}, ${esc(hashToken(token))}, NOW() + INTERVAL '${SESSION_TTL_DAYS} days', ${esc(String(req.headers["user-agent"] || "").slice(0, 300))});
         UPDATE tenant_studio.studio_users SET last_login_at = NOW() WHERE id = ${esc(row.id)};
         DELETE FROM tenant_studio.studio_sessions WHERE expires_at < NOW();
       `);
+      await recordLoginEvent(auditDb, { userId: row.id, email, kind: "login_berhasil", ip, userAgent: ua, sessionId: ins.rows[0]?.id ?? null });
       setSessionCookie(res, token);
       res.json({ user: await loadUserById(auditDb, esc, row.id) });
     } catch (err: any) {
@@ -302,7 +350,7 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
       if (!token) return res.status(401).json({ code: "UNAUTHENTICATED", error: "Silakan login terlebih dahulu." });
 
       const s = await auditDb.query(`
-        SELECT id, user_id, expires_at, last_seen_at FROM tenant_studio.studio_sessions
+        SELECT id, user_id, expires_at, last_seen_at, ip, user_agent FROM tenant_studio.studio_sessions
         WHERE token_hash = ${esc(hashToken(token))} AND expires_at > NOW();
       `);
       const session = s.rows[0];
@@ -327,6 +375,14 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
       }
 
       req.user = user;
+      req.sessionId = session.id;
+      if (req.ip && req.ip !== session.ip) {
+        await auditDb.query(`
+          UPDATE tenant_studio.studio_sessions
+          SET ip = ${esc(req.ip)}, device_label = ${esc(deviceLabel(userAgentOf(req)))}
+          WHERE id = ${esc(session.id)};
+        `);
+      }
       // User yang wajib ganti password hanya boleh mengakses endpoint auth
       if (user.mustChangePassword && !req.path.startsWith("/auth/")) {
         return res.status(403).json({ code: "PASSWORD_CHANGE_REQUIRED", error: "Ganti password terlebih dahulu." });
@@ -345,7 +401,16 @@ export function registerAuth(app: express.Express, auditDb: Pool, esc: Esc) {
     try {
       const token = readCookie(req, SESSION_COOKIE);
       if (token) {
+        const found = await auditDb.query(`
+          SELECT s.id, s.user_id, u.email FROM tenant_studio.studio_sessions s
+          JOIN tenant_studio.studio_users u ON u.id = s.user_id
+          WHERE s.token_hash = ${esc(hashToken(token))};
+        `);
         await auditDb.query(`DELETE FROM tenant_studio.studio_sessions WHERE token_hash = ${esc(hashToken(token))};`);
+        const s = found.rows[0];
+        if (s) {
+          await recordLoginEvent(auditDb, { userId: s.user_id, email: s.email, kind: "logout", ip: req.ip ?? null, userAgent: userAgentOf(req), sessionId: s.id });
+        }
       }
       setSessionCookie(res, null);
       res.json({ success: true });

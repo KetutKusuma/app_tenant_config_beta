@@ -37,7 +37,7 @@ export async function recordLoginEvent(db: { query(sql: string): Promise<unknown
   try {
     await db.query(buildLoginEventSql(e));
   } catch (err: any) {
-    console.error("Gagal mencatat event login:", err?.message ?? err);
+    console.warn("Gagal mencatat event login:", err?.message ?? err);
   }
 }
 

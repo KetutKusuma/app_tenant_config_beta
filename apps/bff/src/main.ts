@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { auditDb, esc } from "./db";
 import { registerAuth } from "./auth";
+import { TRUST_PROXY } from "./trustProxy";
 import { targetEnvMiddleware, targetServiceMiddleware } from "./envs";
 import { initStudioSchema } from "./studioSchema";
 import { router as tenantRoutes } from "./routes/tenants";
@@ -23,6 +24,8 @@ const PORT = process.env.PORT_BFF || process.env.PORT || 4000;
 app.use(cors({ origin: process.env.STUDIO_WEB_ORIGIN || "http://localhost:3000", credentials: true }));
 app.use(express.json({ limit: "50mb" }));
 
+// IP klien asli: hanya percayai hop proxy lokal/privat
+app.set("trust proxy", TRUST_PROXY);
 // Auth: /api/auth/* + middleware wajib login untuk seluruh /api lainnya
 registerAuth(app, auditDb, esc);
 // Kelola akun (/api/admin/*): hanya memakai audit DB, jadi dipasang sebelum middleware env/layanan target
