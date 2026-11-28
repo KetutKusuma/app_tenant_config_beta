@@ -1,6 +1,6 @@
 import {
   ArrowLeftRight, Check, CheckCircle2, ChevronRight, CircleHelp, Copy, Database, Download, Edit2, FolderOpen,
-  FolderSearch, GitCompare, History, KeyRound, Layers, LogOut, RefreshCw, RotateCcw, Save, Sparkles, Upload,
+  FolderSearch, GitCompare, History, KeyRound, Layers, LogOut, MonitorSmartphone, RefreshCw, RotateCcw, Save, Sparkles, Upload,
   Users, X, Zap
 } from "lucide-react";
 import { Chip, MenuButton, SplitButton } from "../ui";
@@ -13,7 +13,7 @@ export function StudioHeader() {
     handleCompareWithDb, handleCompareWithOriginal, handleSave, handleSwitchTargetEnv, handleValidate,
     handleValidateAndSave, histories, isSaving, isSplitScreen, isTargetReadonly, jsonContent, onLogout,
     openCompareTenantModal, setShowEnvCompare, openEditTenantModal, openSavePresetModal, openSyncCenter, originalContent,
-    presetDirPath, references, selectedConfigId, selectedTenant, setIsSplitScreen, setShowChangePassword, setShowManageAccounts,
+    presetDirPath, references, selectedConfigId, selectedTenant, setIsSplitScreen, setShowChangePassword, setShowManageAccounts, setShowDevices,
     setShowDocsModal, setShowHistoryModal, setShowRefDrawer, showHistoryModal, targetEnvName, targetEnvs,
     user
   } = useStudio();
@@ -317,6 +317,12 @@ export function StudioHeader() {
                 label: "Ganti password…",
                 icon: <KeyRound className="w-3.5 h-3.5" />,
                 onSelect: () => setShowChangePassword(true)
+              },
+              {
+                key: "devices",
+                label: "Perangkat & Riwayat Login",
+                icon: <MonitorSmartphone className="w-3.5 h-3.5" />,
+                onSelect: () => setShowDevices(true)
               },
               ...(user.role === "admin"
                 ? [{

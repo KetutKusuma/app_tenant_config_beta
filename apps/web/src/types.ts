@@ -267,7 +267,29 @@ export interface UserEventRow {
   id: string;
   actorName: string;
   targetEmail: string;
-  action: "create" | "update" | "deactivate" | "activate" | "reset_password";
+  action: "create" | "update" | "deactivate" | "activate" | "reset_password" | "revoke_session";
   details: Record<string, any>;
   createdAt: string;
+}
+
+export interface SessionRow {
+  id: string;
+  deviceLabel: string;
+  ip: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  current: boolean;
+}
+
+export interface LoginEventRow {
+  id: string;
+  email: string;
+  kind: "login_berhasil" | "login_gagal" | "login_terkunci" | "logout" | "dikeluarkan";
+  reason: "password_salah" | "tidak_terdaftar" | "nonaktif" | null;
+  deviceLabel: string;
+  ip: string | null;
+  actorName: string | null;
+  createdAt: string;
+  userRegistered: boolean;
 }

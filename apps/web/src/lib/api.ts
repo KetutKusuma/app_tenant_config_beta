@@ -1,5 +1,5 @@
 import { UNAUTHORIZED_EVENT } from "../components/AuthGate";
-import type { AdminUserRow, ConfigDomain, ServiceKey, UserEventRow } from "../types";
+import type { AdminUserRow, ConfigDomain, LoginEventRow, ServiceKey, SessionRow, UserEventRow } from "../types";
 
 // Domain konfigurasi aktif: menentukan tabel DB yang dipakai BFF (lewat header X-Config-Domain)
 let activeDomain: ConfigDomain = "tenant_config";
@@ -71,3 +71,19 @@ export const listUserEvents = async (before?: string) =>
   adminJson<{ data: UserEventRow[]; nextBefore: string | null }>(
     await api(`/api/admin/user-events?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`)
   );
+
+// --- Perangkat aktif & riwayat login ---
+const historyQuery = (p: { userId?: string; before?: string }) =>
+  `limit=50${p.userId ? `&userId=${encodeURIComponent(p.userId)}` : ""}${p.before ? `&before=${encodeURIComponent(p.before)}` : ""}`;
+
+export const listMySessions = async () => (await adminJson<{ data: SessionRow[] }>(await api("/api/auth/sessions"))).data;
+export const revokeMySession = async (id: string) =>
+  adminJson<{ success: true }>(await api(`/api/auth/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }));
+export const listMyLoginHistory = async (before?: string) =>
+  adminJson<{ data: LoginEventRow[]; nextBefore: string | null }>(await api(`/api/auth/login-history?${historyQuery({ before })}`));
+export const listUserSessions = async (userId: string) =>
+  (await adminJson<{ data: SessionRow[] }>(await api(`/api/admin/users/${encodeURIComponent(userId)}/sessions`))).data;
+export const revokeUserSession = async (userId: string, sid: string) =>
+  adminJson<{ success: true }>(await api(`/api/admin/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" }));
+export const listLoginHistory = async (p: { userId?: string; before?: string } = {}) =>
+  adminJson<{ data: LoginEventRow[]; nextBefore: string | null }>(await api(`/api/admin/login-history?${historyQuery(p)}`));

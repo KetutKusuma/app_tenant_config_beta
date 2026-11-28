@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Check, Copy, KeyRound, Pencil, Power, UserPlus, X } from "lucide-react";
-import { createUser, listUserEvents, listUsers, resetUserPassword, updateUser } from "../../lib/api";
+import { Check, Copy, KeyRound, MonitorSmartphone, Pencil, Power, UserPlus, X } from "lucide-react";
+import { createUser, listLoginHistory, listUserEvents, listUsers, resetUserPassword, updateUser } from "../../lib/api";
+import { DevicesPanel } from "./DevicesPanel";
+import { LoginHistoryList } from "./LoginHistoryList";
 import type { AdminUserRow, UserEventRow } from "../../types";
 
 // Layar "Kelola Akun" (khusus admin): daftar akun, aksi per akun, dan log aktivitas.
@@ -15,7 +17,8 @@ const ACTION_VERB: Record<UserEventRow["action"], string> = {
   update: "mengubah",
   deactivate: "menonaktifkan",
   activate: "mengaktifkan kembali",
-  reset_password: "mereset password"
+  reset_password: "mereset password",
+  revoke_session: "mengeluarkan perangkat"
 };
 
 const fmtTime = (iso: string | null) => (iso ? new Date(iso).toLocaleString("id-ID") : "-");
@@ -27,6 +30,7 @@ function eventLine(e: UserEventRow): string {
   if (d.role !== undefined) {
     s += typeof d.role === "object" && d.role !== null ? ` (peran ${d.role.from} → ${d.role.to})` : ` (peran ${d.role})`;
   }
+  if (e.action === "revoke_session" && d.device) s += ` (${d.device})`;
   return `${s} · ${fmtTime(e.createdAt)}`;
 }
 
@@ -217,10 +221,11 @@ function UserFormDialog({
 type Dialog =
   | { kind: "form"; user: AdminUserRow | null }
   | { kind: "reset" | "toggle"; user: AdminUserRow }
+  | { kind: "devices"; user: AdminUserRow }
   | { kind: "secret"; email: string; password: string };
 
 export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId: string; onClose: () => void }) {
-  const [tab, setTab] = useState<"akun" | "log">("akun");
+  const [tab, setTab] = useState<"akun" | "log" | "riwayat">("akun");
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [events, setEvents] = useState<UserEventRow[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -256,8 +261,10 @@ export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId:
 
   useEffect(() => {
     if (tab === "akun") void loadUsers();
-    else void loadEvents();
+    else if (tab === "log") void loadEvents();
   }, [tab, loadUsers, loadEvents]);
+
+  const loadAllHistory = useCallback((before?: string) => listLoginHistory({ before }), []);
 
   const afterChange = () => {
     setDialog(null);
@@ -273,12 +280,12 @@ export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId:
         <div className="flex items-center justify-between gap-3 px-5 pt-4 pb-3 border-b border-slate-800">
           <div className="flex items-center gap-1">
             <h3 className="text-sm font-semibold text-slate-100 mr-3">Kelola Akun</h3>
-            {(["akun", "log"] as const).map((t) => (
+            {(["akun", "log", "riwayat"] as const).map((t) => (
               <button
                 key={t} type="button" onClick={() => setTab(t)}
                 className={`px-2.5 py-1 rounded-md text-xs transition ${tab === t ? "bg-slate-800 text-slate-100" : "text-slate-400 hover:text-slate-200"}`}
               >
-                {t === "akun" ? "Akun" : "Log Aktivitas"}
+                {t === "akun" ? "Akun" : t === "log" ? "Log Aktivitas" : "Riwayat Login"}
               </button>
             ))}
           </div>
@@ -321,6 +328,7 @@ export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId:
                       <td className="py-2 pr-3">{u.createdByName ?? "-"}</td>
                       <td className="py-2 text-right whitespace-nowrap">
                         <button type="button" className={ICON_BTN} title="Ubah" onClick={() => setDialog({ kind: "form", user: u })}><Pencil className="w-3.5 h-3.5" /></button>
+                        <button type="button" className={ICON_BTN} title="Perangkat" onClick={() => setDialog({ kind: "devices", user: u })}><MonitorSmartphone className="w-3.5 h-3.5" /></button>
                         {!self && (
                           <>
                             <button type="button" className={ICON_BTN} title="Reset password" onClick={() => setDialog({ kind: "reset", user: u })}><KeyRound className="w-3.5 h-3.5" /></button>
@@ -336,6 +344,8 @@ export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId:
                 )}
               </tbody>
             </table>
+          ) : tab === "riwayat" ? (
+            <LoginHistoryList load={loadAllHistory} showEmail />
           ) : (
             <>
               <ul className="space-y-1.5 text-[11px] text-slate-300">
@@ -388,6 +398,9 @@ export function ManageAccountsModal({ currentUserId, onClose }: { currentUserId:
             afterChange();
           }}
         />
+      )}
+      {dialog?.kind === "devices" && (
+        <DevicesPanel mode={{ kind: "admin", userId: dialog.user.id, email: dialog.user.email }} onClose={() => setDialog(null)} z="z-[70]" />
       )}
       {dialog?.kind === "secret" && <SecretDialog email={dialog.email} password={dialog.password} onClose={() => setDialog(null)} />}
     </div>
